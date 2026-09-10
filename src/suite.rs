@@ -2,6 +2,7 @@
 //! selected check — findings accumulated, never short-circuited.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use ikigai_core::{
@@ -11,7 +12,7 @@ use ikigai_core::{
 
 use crate::checks::{Check, Checks};
 use crate::rdf;
-use crate::report::{Declarations, Finding, OptedOut, Report};
+use crate::report::{Declarations, Finding, OptedOut, Report, Unprobed};
 
 /// The kernel's own operations are listed by [`Kernel::entries`] ahead of the root
 /// space's bindings; they are core's, not the module's, so the walk skips them
@@ -26,6 +27,9 @@ const PLACEHOLDER: &str = "x";
 
 /// The IRI substituted for an entity-valued (`rdfs:Class`) or `xsd:anyURI` input.
 const PLACEHOLDER_IRI: &str = "urn:example:conformance";
+
+/// The longest fixture value a report line prints before cutting it and saying so.
+const SHOWN: usize = 48;
 
 /// Module-supplied inputs for one action, for when the ArgSpecs cannot say what a
 /// valid call looks like (a `path` that must exist, a JSON-LD document that must
@@ -70,6 +74,13 @@ impl Fixture {
 
     /// Supply the value of one template variable of the entry this endpoint is
     /// bound at (`urn:file:{path}` → `binding("path", …)`).
+    ///
+    /// Bindings are looked up per ENTRY, not per action: every verb of the entry
+    /// resolves the same IRI, and the verb a binding-only fixture was built with
+    /// is ignored (the first fixture for the id that binds the variable wins).
+    /// Arguments ARE per `(id, verb)`. So a Sink that writes a scratch file while
+    /// Source reads a seeded one cannot be expressed as two bindings; give every
+    /// verb's fixture the same value.
     pub fn binding(mut self, var: impl Into<String>, value: impl Into<String>) -> Self {
         self.bindings.insert(var.into(), value.into());
         self
@@ -84,6 +95,43 @@ impl Fixture {
     pub fn verb(&self) -> Verb {
         self.verb
     }
+}
+
+/// The report line for a fixture: `<id> <verb> <var>=<value>… <name>=<value>…`,
+/// bindings first, values in their escaped string form so a line stays a line, cut
+/// after 48 characters with the true length stated.
+///
+/// ```
+/// use ikigai_conformance::Fixture;
+/// use ikigai_core::Verb;
+///
+/// let f = Fixture::new("file", Verb::Sink).binding("path", "scratch.txt").arg("content", "a\nb");
+/// assert_eq!(f.to_string(), r#"file sink path="scratch.txt" content="a\nb""#);
+/// let long = Fixture::new("doc", Verb::Source).arg("content", "x".repeat(200));
+/// assert!(long.to_string().ends_with("… (202 chars)"), "{long}");
+/// ```
+impl fmt::Display for Fixture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.id, crate::report::verb_name(self.verb))?;
+        for (var, value) in &self.bindings {
+            write!(f, " {var}={}", shown(value))?;
+        }
+        for (name, value) in &self.args {
+            write!(f, " {name}={}", shown(value))?;
+        }
+        Ok(())
+    }
+}
+
+/// A fixture value as one printable token: escaped, and cut when long.
+fn shown(value: &str) -> String {
+    let escaped = format!("{value:?}");
+    let len = escaped.chars().count();
+    if len <= SHOWN {
+        return escaped;
+    }
+    let cut: String = escaped.chars().take(SHOWN).collect();
+    format!("{cut}… ({len} chars)")
 }
 
 #[derive(Clone, Debug)]
@@ -240,7 +288,9 @@ impl Suite {
                 pure: self.pure.clone(),
                 cacheable: self.cacheable.clone(),
                 namespaces: self.namespaces.clone(),
+                fixtures: self.fixtures.clone(),
             }),
+            unprobed: Vec::new(),
         };
 
         let Some(entries) = kernel.entries() else {
@@ -307,12 +357,17 @@ impl Suite {
                     target: &target,
                     spec: &spec,
                     minimal: None,
+                    fired: None,
                     failure_reported: false,
                 };
                 action.enforced(&mut report).await;
                 action.rdf_faces(&mut report).await;
                 action.cacheable(&mut report).await;
                 action.pipeline(&mut report).await;
+                // Last: it reads what the checks above already resolved and fires
+                // nothing new for a mutating verb, so the walk's footprint stays
+                // "Source once or twice, Sink once, Delete never".
+                action.outputs(&mut report).await;
             }
         }
         report
@@ -683,9 +738,10 @@ impl Tracer for Collector {
     }
 }
 
-/// One action under examination: the memoized minimal resolution under root and
-/// whether its failure has already been reported (once, under the first check that
-/// needed it).
+/// One action under examination: the memoized minimal resolution under root,
+/// what the pipeline probe got back when it fired the action, and whether the
+/// minimal resolution's failure has already been reported (once, under the first
+/// check that needed it).
 struct Action<'a> {
     suite: &'a Suite,
     kernel: &'a Kernel,
@@ -693,6 +749,7 @@ struct Action<'a> {
     target: &'a Iri,
     spec: &'a ActionSpec,
     minimal: Option<Result<(Representation, Vec<TraceEvent>), Error>>,
+    fired: Option<Result<Representation, Error>>,
     failure_reported: bool,
 }
 
@@ -982,6 +1039,7 @@ impl Action<'_> {
             .kernel
             .issue(self.request(&args), &Capability::root())
             .await;
+        self.fired = Some(result.clone());
         if let Err(Error::MissingArgument(name)) = &result {
             // With `content` and every required input supplied, a missing argument
             // is one the contract does not declare — `content` itself unread and
@@ -995,6 +1053,99 @@ impl Action<'_> {
                 ),
             ));
         }
+    }
+
+    // ----- OUTPUTS ------------------------------------------------------------
+
+    /// The bare media type the action serves with its minimal inputs must be one of
+    /// its declared outputs. Reads the resolution the other checks already made —
+    /// for a mutating verb, the pipeline probe's firing (or an RDF face's minimal
+    /// resolution) — so it never fires a Sink or Delete itself; what it could not
+    /// observe is recorded as unprobed.
+    async fn outputs(&mut self, report: &mut Report) {
+        if !self.suite.checks.contains(Check::Outputs) {
+            return;
+        }
+        let probed = if self.spec.verb.is_mutating() {
+            self.fired
+                .clone()
+                .or_else(|| self.minimal.clone().map(|r| r.map(|(repr, _)| repr)))
+        } else {
+            Some(self.resolve_minimal(false).await.map(|(repr, _)| repr))
+        };
+        let repr = match probed {
+            None => {
+                self.unprobed(
+                    report,
+                    "never fired under root: a mutating action is fired only by the pipeline \
+                     probe (PIPELINE, on an action declaring `content`), so what it serves was \
+                     not observed",
+                );
+                return;
+            }
+            Some(Err(err)) => {
+                self.report_failure(Check::Outputs, &err, report);
+                self.unprobed(
+                    report,
+                    "the minimal resolution failed, so nothing was served",
+                );
+                return;
+            }
+            Some(Ok(repr)) => repr,
+        };
+        let got = rdf::bare_media_type(&repr.repr_type.media_type);
+        let declared: Vec<String> = self
+            .spec
+            .outputs
+            .iter()
+            .map(|o| rdf::bare_media_type(o))
+            .collect();
+        if declared.contains(&got) {
+            return;
+        }
+        // `as=` is the caller's label, not the endpoint's choice: a stylesheet that
+        // emits SVG is relabeled `image/svg+xml` by a fixture's `as`, and the
+        // declared outputs (what the endpoint chooses by itself) need not list it.
+        let args = self.suite.args_for(self.id, self.spec);
+        if let Some(label) = args.get("as").map(|a| rdf::bare_media_type(a)) {
+            if label == got {
+                self.unprobed(
+                    report,
+                    format!(
+                        "served the caller's `as={got}` label; the endpoint's own choice of \
+                         face was not observed"
+                    ),
+                );
+                return;
+            }
+        }
+        let detail = if declared.is_empty() {
+            format!(
+                "served `{got}` but declares no output: a face the manifold does not announce \
+                 (`.output(\"{got}\")`)"
+            )
+        } else {
+            format!(
+                "served `{got}` with its minimal inputs but declares only {}: a face the \
+                 manifold does not announce and the RDF checks never saw — declare it \
+                 (`.output(\"{got}\")`) or serve what is declared",
+                declared
+                    .iter()
+                    .map(|d| format!("`{d}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        report.findings.push(self.finding(Check::Outputs, detail));
+    }
+
+    fn unprobed(&self, report: &mut Report, reason: impl Into<String>) {
+        report.unprobed.push(Unprobed {
+            endpoint: self.id.to_string(),
+            verb: self.spec.verb,
+            check: Check::Outputs,
+            reason: reason.into(),
+        });
     }
 }
 

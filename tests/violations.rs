@@ -3,6 +3,7 @@
 //! violates nothing, asserting the suite is clean on it. If a check stops seeing
 //! its fixture, that is the check failing, not the module.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use ikigai_conformance::{check, Check, Checks, Fixture, Report, Suite};
@@ -245,6 +246,189 @@ fn enforced_reports_an_action_that_resolves_under_no_grants() {
     // suite cannot know the author MEANT the Sink to be gated. That is the honest
     // limit of the check, pinned here so a future change to it is deliberate.
     assert!(report.of(Check::Enforced).next().is_none(), "{report}");
+}
+
+// ----- OUTPUTS ----------------------------------------------------------------
+
+/// Declares a SPARQL results type as its only output and serves Turtle — with a
+/// blank node the RDF checks would catch, if the declaration let them see the face.
+/// The shape linkeddata's `sparql-construct` had for its whole life (#20).
+fn mislabeled() -> FnEndpoint {
+    FnEndpoint::new("mislabeled", |_inv: &Invocation<'_>| {
+        Ok(turtle(
+            "<urn:ikigai:endpoint:mislabeled> <http://purl.org/dc/terms/title> [ ] .",
+        ))
+    })
+    .with_description(
+        Description::new("mislabeled")
+            .verb(Verb::Source)
+            .output("application/sparql-results+json"),
+    )
+}
+
+/// Declares nothing at all about what it serves.
+fn unannounced() -> FnEndpoint {
+    FnEndpoint::new("unannounced", |_inv: &Invocation<'_>| Ok(text("x")))
+        .with_description(Description::new("unannounced").verb(Verb::Source))
+}
+
+/// Declares the type with a parameter and serves it bare: the same face.
+fn parameterized() -> FnEndpoint {
+    FnEndpoint::new("parameterized", |_inv: &Invocation<'_>| Ok(text("x"))).with_description(
+        Description::new("parameterized")
+            .verb(Verb::Source)
+            .output("text/plain;charset=utf-8"),
+    )
+}
+
+/// Serves whatever `as=` names — a stylesheet emitting SVG relabeled by the caller.
+/// Its own choice is `application/xml`, and that is what it declares.
+fn relabel() -> FnEndpoint {
+    FnEndpoint::new("relabel", |inv: &Invocation<'_>| {
+        let label = inv.inline_str("as").unwrap_or("application/xml");
+        Ok(Representation::new(
+            ReprType::new(label),
+            b"<svg/>".to_vec(),
+        ))
+    })
+    .with_description(
+        Description::new("relabel")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("as").class(XSD_STRING).optional())
+            .output("application/xml"),
+    )
+}
+
+#[test]
+fn outputs_catches_a_declared_type_the_action_does_not_serve() {
+    let space = EndpointSpace::new()
+        .bind(Exact::new("urn:example:mislabeled"), mislabeled())
+        .bind(Exact::new("urn:example:unannounced"), unannounced())
+        .bind(Exact::new("urn:example:parameterized"), parameterized());
+    let report = report_of(space);
+    assert_caught(
+        &report,
+        Check::Outputs,
+        "served `text/turtle` with its minimal inputs but declares only \
+         `application/sparql-results+json`",
+    );
+    assert_caught(
+        &report,
+        Check::Outputs,
+        "served `text/plain` but declares no output",
+    );
+    // The wrong declaration HID the face: the blank node goes unreported by the RDF
+    // checks, which filter the declared outputs before probing. OUTPUTS is the check
+    // that says why they saw nothing.
+    assert!(
+        report
+            .against("mislabeled")
+            .all(|f| f.check == Check::Outputs),
+        "{report}"
+    );
+    // A parameter is not a different face.
+    assert!(
+        report
+            .against("parameterized")
+            .all(|f| f.check != Check::Outputs),
+        "{report}"
+    );
+    assert_eq!(report.of(Check::Outputs).count(), 2, "{report}");
+    assert!(report.unprobed.is_empty(), "{report}");
+}
+
+#[test]
+fn outputs_honours_a_callers_as_label_and_says_it_saw_only_that() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:relabel"), relabel());
+    let report = Suite::new()
+        .fixture(Fixture::new("relabel", Verb::Source).arg("as", "image/svg+xml"))
+        .run_blocking(&kernel(space));
+    assert!(report.of(Check::Outputs).next().is_none(), "{report}");
+    let text = report.to_string();
+    assert!(
+        text.contains(
+            "unprobed: relabel source OUTPUTS: served the caller's `as=image/svg+xml` label"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("fixture: relabel source as=\"image/svg+xml\""),
+        "{text}"
+    );
+
+    // Without the label the endpoint's own choice is observed, and matches.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:relabel"), relabel());
+    let report = report_of(space);
+    assert!(report.of(Check::Outputs).next().is_none(), "{report}");
+    assert!(report.unprobed.is_empty(), "{report}");
+}
+
+#[test]
+fn outputs_reads_a_mutating_action_from_the_one_firing_the_pipeline_probe_makes() {
+    // Fired under root exactly once (the pipeline probe); ENFORCED's no-grants call
+    // is refused at the kernel's floor and never reaches the endpoint.
+    let fired = Arc::new(AtomicUsize::new(0));
+    let counter = fired.clone();
+    let put = FnEndpoint::new("notes-put", move |inv: &Invocation<'_>| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        let body = inv.inline_str("content")?;
+        Ok(Representation::new(
+            ReprType::new("application/json"),
+            format!("{{\"stored\": {}}}", body.len()).into_bytes(),
+        ))
+    })
+    .with_description(
+        Description::new("notes-put")
+            .verb(Verb::Sink)
+            .requires("urn:cap:example:write")
+            .input(ArgSpec::new("content").class(XSD_STRING))
+            .output("text/plain"),
+    );
+    // Delete declares no `content`, so nothing fires it under root.
+    let delete = FnEndpoint::new("notes-delete", |_inv: &Invocation<'_>| Ok(text("gone")))
+        .with_description(
+            Description::new("notes-delete")
+                .verb(Verb::Delete)
+                .requires("urn:cap:example:write")
+                .output("text/plain"),
+        );
+    let space = EndpointSpace::new()
+        .bind(Exact::new("urn:example:notes-put"), put)
+        .bind(Exact::new("urn:example:notes-delete"), delete);
+    let report = report_of(space);
+    assert_caught(
+        &report,
+        Check::Outputs,
+        "served `application/json` with its minimal inputs but declares only `text/plain`",
+    );
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        1,
+        "Sink is fired once, under root"
+    );
+    assert!(
+        report.to_string().contains(
+            "unprobed: notes-delete delete OUTPUTS: never fired under root: a mutating \
+             action is fired only by the pipeline probe"
+        ),
+        "{report}"
+    );
+    assert!(
+        report
+            .against("notes-delete")
+            .all(|f| f.check != Check::Outputs),
+        "{report}"
+    );
+}
+
+#[test]
+fn outputs_can_be_left_out_like_any_other_check() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:mislabeled"), mislabeled());
+    let report = Suite::new()
+        .checks(Checks::all() - Checks::OUTPUTS)
+        .run_blocking(&kernel(space));
+    assert!(report.is_clean(), "{report}");
+    assert!(report.to_string().contains("skipped: OUTPUTS"), "{report}");
 }
 
 // ----- SKOLEM-RDF -------------------------------------------------------------
@@ -644,6 +828,13 @@ fn a_fixture_supplies_inputs_the_spec_cannot_derive() {
         1,
         "{report}"
     );
+    // OUTPUTS had nothing to compare, and says so rather than inventing a finding.
+    assert!(
+        report
+            .to_string()
+            .contains("unprobed: json-keys source OUTPUTS: the minimal resolution failed"),
+        "{report}"
+    );
 
     let space = EndpointSpace::new().bind(
         Exact::new("urn:example:json-keys"),
@@ -662,6 +853,13 @@ fn a_fixture_supplies_inputs_the_spec_cannot_derive() {
         .pure("json-keys")
         .run_blocking(&kernel(space));
     assert!(report.is_clean(), "{report}");
+    // What the module said is printed — the fixture included.
+    assert!(
+        report
+            .to_string()
+            .contains("fixture: json-keys source content=\"{}\""),
+        "{report}"
+    );
 }
 
 #[test]
