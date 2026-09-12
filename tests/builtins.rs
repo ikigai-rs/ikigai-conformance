@@ -51,11 +51,13 @@ fn the_builtins_report_exactly_the_findings_their_age_predicts() {
         .iter()
         .all(|f| f.detail.contains("empty golden-thread set")));
 
-    // Nothing else: the builtins declare no capability and enforce none, serve no
-    // RDF face, and take their input by name.
+    // Nothing else: the builtins declare no capability and enforce none, serve
+    // the `text/plain;charset=utf-8` they declare (parameters stripped, the same
+    // face), serve no RDF face, and take their input by name.
     for check in [
         Check::RequiresVerb,
         Check::Enforced,
+        Check::Outputs,
         Check::SkolemRdf,
         Check::Vocabulary,
         Check::Pipeline,
@@ -127,5 +129,20 @@ fn the_kernel_operations_reported_for_the_record() {
                 && f.detail.contains("empty golden-thread set")),
         "{report}"
     );
+    // Every kernel op serves what it declares. Two cannot be resolved with minimal
+    // inputs on a bare kernel (`kernel-catalog` needs a Meta renderer,
+    // `kernel-validate` a proposal), and OUTPUTS lists them as unprobed rather than
+    // reporting a face it never saw.
+    assert!(
+        kernel_findings.iter().all(|f| f.check != Check::Outputs),
+        "{report}"
+    );
+    let unprobed: Vec<&str> = report
+        .unprobed
+        .iter()
+        .filter(|u| u.check == Check::Outputs)
+        .map(|u| u.endpoint.as_str())
+        .collect();
+    assert_eq!(unprobed, ["kernel-catalog", "kernel-validate"], "{report}");
     eprintln!("{report}");
 }

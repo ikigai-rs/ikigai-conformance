@@ -6,6 +6,7 @@ use std::fmt;
 use ikigai_core::Verb;
 
 use crate::checks::{Check, Checks};
+use crate::suite::Fixture;
 
 /// One violation of one check by one endpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,6 +63,22 @@ pub struct OptedOut {
     pub reason: String,
 }
 
+/// One action a check could not observe, with the reason — printed so a clean
+/// report says what it did NOT see, not only what it found. Distinct from an
+/// opt-out (the module's decision) and from a finding (a violation).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unprobed {
+    /// The endpoint's description id.
+    pub endpoint: String,
+    /// The action's verb.
+    pub verb: Verb,
+    /// The check that could not observe it.
+    pub check: Check,
+    /// Why: a mutating action never fired under root, a minimal resolution that
+    /// failed, a caller's `as=` label standing in for the endpoint's own choice.
+    pub reason: String,
+}
+
 /// What one run of the suite found.
 ///
 /// A `Report` is the `Err` of [`check`](crate::check) so a `#[test]` can `unwrap()`
@@ -90,9 +107,13 @@ pub struct Report {
     /// Every finding, in walk order (endpoints in catalog order, checks in
     /// [`Check::ALL`] order within an endpoint).
     pub findings: Vec<Finding>,
-    /// How many descriptions were walked (distinct description ids).
+    /// How many descriptions were walked: distinct description ids, so two
+    /// patterns binding one endpoint (`urn:a11y:config` and
+    /// `urn:a11y:config:{app}`) count once.
     pub endpoints: usize,
-    /// How many actions (endpoint × verb) were examined.
+    /// How many actions were examined: one per bound ENTRY per verb, so the two
+    /// patterns above count their verbs twice — each is a place the action can be
+    /// reached, with its own template variables.
     pub actions: usize,
     /// The checks that ran.
     pub checks: Checks,
@@ -100,6 +121,9 @@ pub struct Report {
     /// waived, not only what was found. Boxed: `Report` is the `Err` of
     /// [`check`](crate::check) and must stay small enough to return by value.
     pub declared: Box<Declarations>,
+    /// The actions a check could not observe, with reasons — the gaps in the
+    /// walk's coverage, printed beside the findings (`unprobed: …`).
+    pub unprobed: Vec<Unprobed>,
 }
 
 /// What a module declared when it configured the [`Suite`](crate::Suite),
@@ -116,6 +140,9 @@ pub struct Declarations {
     pub cacheable: Vec<String>,
     /// The namespaces the module registered as its own for [`Check::Vocabulary`].
     pub namespaces: Vec<String>,
+    /// The fixtures the module supplied, printed one per line (`fixture: file
+    /// source path="README.md"`) so a reader can tell which inputs a walk ran over.
+    pub fixtures: Vec<Fixture>,
 }
 
 impl Report {
@@ -185,6 +212,19 @@ impl fmt::Display for Report {
         if !declared.namespaces.is_empty() {
             writeln!(f, "module namespaces: {}", declared.namespaces.join(" "))?;
         }
+        for fixture in &declared.fixtures {
+            writeln!(f, "fixture: {fixture}")?;
+        }
+        for u in &self.unprobed {
+            writeln!(
+                f,
+                "unprobed: {} {} {}: {}",
+                u.endpoint,
+                verb_name(u.verb),
+                u.check.label(),
+                u.reason
+            )?;
+        }
         Ok(())
     }
 }
@@ -232,7 +272,19 @@ mod tests {
                 pure: vec!["to-upper".into()],
                 cacheable: vec!["to-upper".into()],
                 namespaces: vec!["urn:example:ns#".into()],
+                fixtures: vec![Fixture::new("file", Verb::Source)
+                    .binding("path", "README.md")
+                    .arg(
+                        "content",
+                        "a body that is long enough to be cut short in the report",
+                    )],
             }),
+            unprobed: vec![Unprobed {
+                endpoint: "notes-delete".into(),
+                verb: Verb::Delete,
+                check: Check::Outputs,
+                reason: "never fired under root".into(),
+            }],
         };
         // The Err of `check` travels by value: keep it under clippy's large-error bar.
         assert!(std::mem::size_of::<Report>() <= 128);
@@ -241,6 +293,18 @@ mod tests {
         assert!(text.contains("skipped: SKOLEM-RDF VOCABULARY"));
         assert!(text.contains("opted out: email-send sink: sends real mail"));
         assert!(text.contains("declared pure: to-upper"));
+        assert!(
+            text.contains("fixture: file source path=\"README.md\" content=\"a body that is long"),
+            "{text}"
+        );
+        assert!(
+            text.contains("chars)"),
+            "a long value is cut, and says so:\n{text}"
+        );
+        assert!(
+            text.contains("unprobed: notes-delete delete OUTPUTS: never fired under root"),
+            "{text}"
+        );
         assert!(report.is_clean());
         assert!(report.into_result().is_ok());
     }

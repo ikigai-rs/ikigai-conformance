@@ -21,6 +21,15 @@ pub enum Check {
     /// is refused with a typed `Denied` under a capability holding no grants; an
     /// action declaring nothing is not.
     Enforced,
+    /// **Declared outputs = served outputs.** The bare media type of the minimal
+    /// resolution (parameters such as `;charset=` stripped) is one of the action's
+    /// declared `outputs`. A wrong declaration hides a face from every consumer that
+    /// reads outputs — [`SkolemRdf`](Check::SkolemRdf) and
+    /// [`Vocabulary`](Check::Vocabulary) included, which filter the declaration for
+    /// RDF faces before probing. What the check could not observe (a mutating
+    /// action never fired under root, a failed minimal resolution, a caller's `as=`
+    /// label) is listed in the report as unprobed, never as a finding.
+    Outputs,
     /// **Skolemize; no blank nodes.** Every declared RDF face resolves, parses, and
     /// carries no blank node.
     SkolemRdf,
@@ -42,10 +51,11 @@ pub enum Check {
 
 impl Check {
     /// Every check, in report order.
-    pub const ALL: [Check; 8] = [
+    pub const ALL: [Check; 9] = [
         Check::ArgSpecs,
         Check::RequiresVerb,
         Check::Enforced,
+        Check::Outputs,
         Check::SkolemRdf,
         Check::Vocabulary,
         Check::Cacheable,
@@ -59,6 +69,7 @@ impl Check {
             Check::ArgSpecs => "ARGSPECS",
             Check::RequiresVerb => "REQUIRES-VERB",
             Check::Enforced => "ENFORCED",
+            Check::Outputs => "OUTPUTS",
             Check::SkolemRdf => "SKOLEM-RDF",
             Check::Vocabulary => "VOCABULARY",
             Check::Cacheable => "CACHEABLE",
@@ -72,12 +83,17 @@ impl Check {
     pub fn invokes(self) -> bool {
         matches!(
             self,
-            Check::Enforced | Check::SkolemRdf | Check::Vocabulary | Check::Cacheable
-        ) || self == Check::Pipeline
+            Check::Enforced
+                | Check::Outputs
+                | Check::SkolemRdf
+                | Check::Vocabulary
+                | Check::Cacheable
+                | Check::Pipeline
+        )
     }
 
-    fn bit(self) -> u8 {
-        1 << (self as u8)
+    fn bit(self) -> u16 {
+        1 << (self as u16)
     }
 }
 
@@ -106,25 +122,27 @@ impl fmt::Display for Check {
 /// assert_eq!(one.iter().count(), 2);
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Checks(u8);
+pub struct Checks(u16);
 
 impl Checks {
     /// [`Check::ArgSpecs`].
-    pub const ARGSPECS: Checks = Checks(1 << (Check::ArgSpecs as u8));
+    pub const ARGSPECS: Checks = Checks(1 << (Check::ArgSpecs as u16));
     /// [`Check::RequiresVerb`].
-    pub const REQUIRES_VERB: Checks = Checks(1 << (Check::RequiresVerb as u8));
+    pub const REQUIRES_VERB: Checks = Checks(1 << (Check::RequiresVerb as u16));
     /// [`Check::Enforced`].
-    pub const ENFORCED: Checks = Checks(1 << (Check::Enforced as u8));
+    pub const ENFORCED: Checks = Checks(1 << (Check::Enforced as u16));
+    /// [`Check::Outputs`].
+    pub const OUTPUTS: Checks = Checks(1 << (Check::Outputs as u16));
     /// [`Check::SkolemRdf`].
-    pub const SKOLEM_RDF: Checks = Checks(1 << (Check::SkolemRdf as u8));
+    pub const SKOLEM_RDF: Checks = Checks(1 << (Check::SkolemRdf as u16));
     /// [`Check::Vocabulary`].
-    pub const VOCABULARY: Checks = Checks(1 << (Check::Vocabulary as u8));
+    pub const VOCABULARY: Checks = Checks(1 << (Check::Vocabulary as u16));
     /// [`Check::Cacheable`].
-    pub const CACHEABLE: Checks = Checks(1 << (Check::Cacheable as u8));
+    pub const CACHEABLE: Checks = Checks(1 << (Check::Cacheable as u16));
     /// [`Check::Pipeline`].
-    pub const PIPELINE: Checks = Checks(1 << (Check::Pipeline as u8));
+    pub const PIPELINE: Checks = Checks(1 << (Check::Pipeline as u16));
     /// [`Check::Names`].
-    pub const NAMES: Checks = Checks(1 << (Check::Names as u8));
+    pub const NAMES: Checks = Checks(1 << (Check::Names as u16));
     /// Both RDF-face checks: [`Check::SkolemRdf`] and [`Check::Vocabulary`] — the
     /// pair a module without a graph face subtracts.
     pub const RDF: Checks = Checks(Checks::SKOLEM_RDF.0 | Checks::VOCABULARY.0);
@@ -228,5 +246,19 @@ mod tests {
         labels.sort_unstable();
         labels.dedup();
         assert_eq!(labels.len(), Check::ALL.len());
+    }
+
+    #[test]
+    fn every_check_has_its_own_bit() {
+        // Nine checks no longer fit a u8; a shared bit would make one check select
+        // another silently.
+        let mut bits: Vec<u16> = Check::ALL.iter().map(|c| c.bit()).collect();
+        bits.sort_unstable();
+        bits.dedup();
+        assert_eq!(bits.len(), Check::ALL.len());
+        assert_eq!(
+            Checks::OUTPUTS.iter().collect::<Vec<_>>(),
+            vec![Check::Outputs]
+        );
     }
 }
