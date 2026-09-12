@@ -77,15 +77,20 @@ pub struct OptedOutCheck {
     pub reason: String,
 }
 
-/// One RDF face that was reached, served and parsed — positive evidence of what a
-/// walk actually looked at.
+/// One face that was reached and served — positive evidence of what a walk
+/// actually looked at.
 ///
 /// A clean report is otherwise indistinguishable from a never-probed one: an
 /// endpoint whose face is undeclared, unreachable or opted out produces no finding
-/// and no line, exactly like one whose face is perfect. `triples` says whether the
-/// pass meant anything — a face parsing to zero triples satisfies both RDF checks
-/// vacuously.
+/// and no line, exactly like one whose face is perfect.
+///
+/// Every face is recorded, not only the RDF ones: a module with no graph face used
+/// to get no `probed:` section at all, which is the ambiguity these lines exist to
+/// kill. For an RDF face `triples` says whether the pass meant anything — a face
+/// parsing to zero triples satisfies both RDF checks vacuously; for every other
+/// face the evidence is `bytes`, and nothing about the content is checked.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Probed {
     /// The endpoint's description id.
     pub endpoint: String,
@@ -93,8 +98,12 @@ pub struct Probed {
     pub verb: Verb,
     /// The face's bare media type (`text/turtle`).
     pub face: String,
-    /// How many triples it parsed to. Zero is a vacuous pass, not a clean one.
+    /// How many triples it parsed to, for an RDF face ([`rdf::is_rdf_face`](crate::rdf::is_rdf_face)).
+    /// Zero is a vacuous pass, not a clean one. Always zero for a non-RDF face,
+    /// which is never parsed.
     pub triples: usize,
+    /// How many bytes were served — the evidence for a face no check parses.
+    pub bytes: usize,
 }
 
 /// One action a check could not observe, with the reason — printed so a clean
@@ -158,10 +167,20 @@ pub struct Report {
     /// The actions a check could not observe, with reasons — the gaps in the
     /// walk's coverage, printed beside the findings (`unprobed: …`).
     pub unprobed: Vec<Unprobed>,
-    /// The RDF faces the walk actually reached, served and parsed, with their
-    /// triple counts (`probed: …`) — so a first-run clean report carries positive
-    /// evidence of coverage rather than only the absence of findings.
+    /// The faces the walk actually reached and served (`probed: …`) — so a
+    /// first-run clean report carries positive evidence of coverage rather than
+    /// only the absence of findings.
     pub probed: Vec<Probed>,
+    /// The description ids the walk reached, in walk order — what `endpoints`
+    /// counts, by name. A declaration naming an id that is not here reached no
+    /// check at all ([`Check::Declarations`]), and a test can assert the walk
+    /// covered exactly the endpoints the module means to bind.
+    ///
+    /// A boxed slice, not a `Vec`: `Report` is the `Err` of [`check`](crate::check)
+    /// and travels by value, and its size is held under clippy's large-error bar
+    /// (a `Vec` here puts it exactly AT the 128-byte threshold, which the lint
+    /// rejects).
+    pub walked: Box<[String]>,
 }
 
 /// What a module declared when it configured the [`Suite`](crate::Suite),
@@ -263,39 +282,95 @@ impl fmt::Display for Report {
             self.endpoints,
             self.actions
         )?;
-        let ran: Vec<&str> = self.checks.iter().map(Check::label).collect();
+        // A check has a THIRD state the list could not express: ran, but not
+        // everywhere — a per-check waiver takes it off one endpoint and `checked:`
+        // said nothing, so a reader over-reads the coverage. Starred, with the
+        // count on its own line.
+        let declared = &self.declared;
+        let mut waived: std::collections::BTreeMap<Check, Vec<&str>> =
+            std::collections::BTreeMap::new();
+        for out in &declared.opted_out_checks {
+            let ids = waived.entry(out.check).or_default();
+            if !ids.contains(&out.endpoint.as_str()) {
+                ids.push(&out.endpoint);
+            }
+        }
+        let ran: Vec<String> = self
+            .checks
+            .iter()
+            .map(|c| {
+                if waived.contains_key(&c) {
+                    format!("{}*", c.label())
+                } else {
+                    c.label().to_string()
+                }
+            })
+            .collect();
         writeln!(f, "checked: {}", ran.join(" "))?;
+        for (check, ids) in &waived {
+            if !self.checks.contains(*check) {
+                continue;
+            }
+            // Only a waiver for an id the walk REACHED took the check off an
+            // endpoint; one naming an id nothing binds took it off nothing, and is
+            // its own finding. Counting those here would understate the coverage in
+            // the one line whose whole job is to state it.
+            let reached = ids
+                .iter()
+                .filter(|id| self.walked.iter().any(|w| w == *id))
+                .count();
+            writeln!(
+                f,
+                "* {} ran on {} of {} endpoint(s); waived on the rest (see `opted out:`)",
+                check.label(),
+                self.endpoints.saturating_sub(reached),
+                self.endpoints
+            )?;
+        }
         let skipped: Vec<&str> = self.checks.skipped().map(Check::label).collect();
         if !skipped.is_empty() {
             writeln!(f, "skipped: {}", skipped.join(" "))?;
         }
         // What was PROBED, not only what was checked: a clean report otherwise says
-        // nothing about whether a face was ever reached.
-        if !self.probed.is_empty() {
+        // nothing about whether anything was ever reached. Every face, not only the
+        // RDF ones — a module with no graph face had no section at all, which is
+        // indistinguishable from a walk that probed nothing.
+        if self.probed.is_empty() {
+            writeln!(
+                f,
+                "probed: nothing — no action was resolved, so every clean check above is a \
+                 statement about declarations only"
+            )?;
+        } else {
             let endpoints: std::collections::BTreeSet<&str> =
                 self.probed.iter().map(|p| p.endpoint.as_str()).collect();
             writeln!(
                 f,
-                "probed {} RDF face(s) across {} endpoint(s)",
+                "probed {} face(s) across {} endpoint(s)",
                 self.probed.len(),
                 endpoints.len()
             )?;
             for p in &self.probed {
                 write!(
                     f,
-                    "probed: {} {} `{}`: {} triple(s)",
+                    "probed: {} {} `{}`: ",
                     p.endpoint,
                     verb_name(p.verb),
-                    p.face,
-                    p.triples
+                    p.face
                 )?;
-                if p.triples == 0 {
-                    write!(f, " — nothing was checked")?;
+                if crate::rdf::is_rdf_face(&p.face) {
+                    write!(f, "{} triple(s)", p.triples)?;
+                    if p.triples == 0 {
+                        write!(f, " — nothing was checked")?;
+                    }
+                } else {
+                    // No check reads these bytes: the line is evidence the action
+                    // was reached and served something, nothing more.
+                    write!(f, "{} byte(s)", p.bytes)?;
                 }
                 writeln!(f)?;
             }
         }
-        let declared = &self.declared;
         for out in &declared.opted_out {
             match out.verb {
                 Some(verb) => writeln!(
@@ -308,13 +383,27 @@ impl fmt::Display for Report {
                 None => writeln!(f, "opted out: {}: {}", out.endpoint, out.reason)?,
             }
         }
+        // Grouped by (check, reason): one honest waiver of one check across five
+        // endpoints printed its reason verbatim five times and buried every other
+        // line of a six-endpoint report. One id reads exactly as it did before.
+        let mut groups: Vec<((Check, &str), Vec<&str>)> = Vec::new();
         for out in &declared.opted_out_checks {
+            let key = (out.check, out.reason.as_str());
+            match groups.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, ids)) => {
+                    if !ids.contains(&out.endpoint.as_str()) {
+                        ids.push(&out.endpoint);
+                    }
+                }
+                None => groups.push((key, vec![&out.endpoint])),
+            }
+        }
+        for ((check, reason), ids) in groups {
             writeln!(
                 f,
-                "opted out: {} {}: {}",
-                out.endpoint,
-                out.check.label(),
-                out.reason
+                "opted out: {} {}: {reason}",
+                ids.join(" "),
+                check.label()
             )?;
         }
         if !declared.pure.is_empty() {
@@ -379,6 +468,7 @@ mod tests {
             findings: vec![],
             endpoints: 2,
             actions: 3,
+            walked: vec!["cms-graph".to_string(), "ik-context".to_string()].into_boxed_slice(),
             checks: Checks::all() - Checks::RDF,
             declared: Box::new(Declarations {
                 opted_out: vec![OptedOut {
@@ -414,12 +504,21 @@ mod tests {
                     verb: Verb::Source,
                     face: "text/turtle".into(),
                     triples: 14,
+                    bytes: 512,
                 },
                 Probed {
                     endpoint: "ik-context".into(),
                     verb: Verb::Source,
                     face: "application/ld+json".into(),
                     triples: 0,
+                    bytes: 2,
+                },
+                Probed {
+                    endpoint: "to-upper".into(),
+                    verb: Verb::Source,
+                    face: "text/plain".into(),
+                    triples: 0,
+                    bytes: 3,
                 },
             ],
         };
@@ -439,8 +538,12 @@ mod tests {
         assert!(text.contains("declared pure: to-upper"));
         assert!(text.contains("declared live: clock-now"), "{text}");
         assert!(
-            text.contains("probed 2 RDF face(s) across 2 endpoint(s)"),
+            text.contains("probed 3 face(s) across 3 endpoint(s)"),
             "{text}"
+        );
+        assert!(
+            text.contains("probed: to-upper source `text/plain`: 3 byte(s)\n"),
+            "a face no check parses is evidence in BYTES:\n{text}"
         );
         assert!(
             text.contains("probed: cms-graph source `text/turtle`: 14 triple(s)\n"),

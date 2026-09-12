@@ -53,16 +53,50 @@
 //! | [`Cacheable`](Check::Cacheable) | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and carries a golden thread unless the endpoint is declared pure; a result declared live ([`Suite::live`]) is `Expiry::Always` |
 //! | [`Pipeline`](Check::Pipeline) | pipeline citizenship | a mutating action with by-value inputs declares `content` (where the pipe's value arrives); an action declaring `content` reads it |
 //! | [`Names`](Check::Names) | naming convention | the id is a kebab-case noun (the convention `ikigai-core`'s crate docs state) |
+//! | [`Declarations`](Check::Declarations) | — | every declaration the module made ([`Suite::live`], [`Suite::cacheable`], [`Suite::pure`], [`Suite::namespace`], a [`Fixture`], an [`opt_out`](Suite::opt_out), an [`opt_out_check`](Suite::opt_out_check)) reached the check that would honour it |
 //!
 //! Both RDF checks resolve and **parse** the face, so an unresolvable, mislabeled
 //! or malformed graph is reported whichever of the two is selected — under
 //! [`SkolemRdf`](Check::SkolemRdf) when it runs, under [`Vocabulary`](Check::Vocabulary)
 //! otherwise. A module can rely on `VOCABULARY` alone to prove a new `@prefix` line
-//! is well-formed. Every face actually reached, served and parsed is printed as
-//! `probed: <id> <verb> <face>: N triple(s)`, so a first-run clean report carries
-//! positive evidence rather than only the absence of findings — and a face that
-//! parsed to **0 triples** says `nothing was checked`, because the RDF checks pass
-//! vacuously over an empty graph.
+//! is well-formed.
+//!
+//! # What the walk did NOT do
+//!
+//! A clean report is only worth what it covered, so the report says what it did not
+//! reach as loudly as what it found.
+//!
+//! - **`probed:`** — every face the walk actually resolved, whatever the media
+//!   type: `probed: <id> <verb> <face>: N triple(s)` for an RDF face (the count
+//!   matters: a face that parsed to **0 triples** says `nothing was checked`,
+//!   because the RDF checks pass vacuously over an empty graph) and
+//!   `… N byte(s)` for one no check parses. A walk that resolved nothing at all
+//!   says so on one line, rather than printing no section — a module with no graph
+//!   face used to be indistinguishable from a walk that reached nothing.
+//! - **`unprobed:`** — the actions a check could not observe, with the reason.
+//! - **[`Report::walked`]** — the description ids the walk reached, by name and in
+//!   walk order. An endpoint that stops being bound otherwise makes a report
+//!   *cleaner*; this is the list a test can pin.
+//! - **`checked:`** — a starred check (`OUTPUTS*`) ran on some endpoints and is
+//!   waived on others, with the count on its own line. Without it, a check waived
+//!   on five of six endpoints read as a check that ran.
+//! - **[`Declarations`](Check::Declarations)** — the same rule turned on the
+//!   module's own declarations. A declaration is a promise about a check that will
+//!   honour it, and one whose target the walk never reaches is inert: it changes
+//!   nothing, fails nothing, and is printed in the report exactly like one that was
+//!   consulted. [`Suite::live`] on a `Sink` was the founding instance —
+//!   `CACHEABLE` returns early on a non-cacheable verb, so the declaration did
+//!   nothing at all while the report said `declared live: notes-write`. The check
+//!   covers every declaration, not that one: a fixture whose id is a typo, a
+//!   binding naming no template variable, a waiver for a check that could not have
+//!   run, an `opt_out` that excluded nothing, a namespace that accounted for no
+//!   term, a [`pure`](Suite::pure) over a result that is never cacheable.
+//!
+//!   The rule is structural — *could this declaration have applied?* — never "did
+//!   it silence a finding today": a standing waiver that happens to be green is
+//!   doing its job. What it cannot see is a waiver whose CONDITION has passed (the
+//!   core change it waits for landed); a waiver's reason is prose, and prose is
+//!   what the field guide keeps.
 //!
 //! # The vocabulary pin
 //!
@@ -146,6 +180,14 @@
 //! [`Vocabulary`](Check::Vocabulary) in a hand test, so a module can pin the
 //! undefined set as an EXACT list that goes red in both directions — including the
 //! day the missing terms land.
+//!
+//! Every one of those declarations is held to having reached something
+//! ([`Declarations`](Check::Declarations)), so a fixture for an id nothing binds
+//! and a waiver for a check that could not run are findings rather than lines in a
+//! clean report. A declaration that is standing on purpose — a `live` an endpoint
+//! will earn next release — says so with
+//! `opt_out_check(id, Check::Declarations, "…")`, which puts the reason in the
+//! record where the next reader will find it.
 //!
 //! What a walk fires, under root: a `Source` or `Exists` is resolved once (twice
 //! when cacheable — the second is the cache probe); each declared RDF face beyond
