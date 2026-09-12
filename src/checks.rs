@@ -60,11 +60,30 @@ pub enum Check {
     /// **Naming convention.** A description id is a short noun in `kebab-case`
     /// (the convention `ikigai-core`'s crate docs state).
     Names,
+    /// **Every declaration reached the check that would honour it.** A
+    /// [`Suite`](crate::Suite) declaration — `live`, `cacheable`, `pure`,
+    /// `namespace`, a [`Fixture`](crate::Fixture), an
+    /// [`opt_out`](crate::Suite::opt_out) or an
+    /// [`opt_out_check`](crate::Suite::opt_out_check) — that the walk never
+    /// consulted is reported, because a declaration printed in a clean report reads
+    /// as a check that ran.
+    ///
+    /// The hole it closes: `Suite::live("notes-write")` on a `Sink` did nothing at
+    /// all (`CACHEABLE` returns early on a non-cacheable verb), and the report said
+    /// `declared live: notes-write` anyway. Same shape for a fixture whose id is a
+    /// typo, a waiver for an endpoint nothing binds, and a namespace no probed face
+    /// used.
+    ///
+    /// This check reads declarations against what the walk covered; it invokes
+    /// nothing. Subtract it ([`Checks::DECLARATIONS`]) for a suite that keeps
+    /// standing declarations on purpose — a `live` an endpoint will earn next
+    /// release, say — and say why in the same place you would say it to a reviewer.
+    Declarations,
 }
 
 impl Check {
     /// Every check, in report order.
-    pub const ALL: [Check; 9] = [
+    pub const ALL: [Check; 10] = [
         Check::ArgSpecs,
         Check::RequiresVerb,
         Check::Enforced,
@@ -74,6 +93,7 @@ impl Check {
         Check::Cacheable,
         Check::Pipeline,
         Check::Names,
+        Check::Declarations,
     ];
 
     /// The short upper-case label a report line carries.
@@ -88,6 +108,7 @@ impl Check {
             Check::Cacheable => "CACHEABLE",
             Check::Pipeline => "PIPELINE",
             Check::Names => "NAMES",
+            Check::Declarations => "DECLARATIONS",
         }
     }
 
@@ -156,6 +177,8 @@ impl Checks {
     pub const PIPELINE: Checks = Checks(1 << (Check::Pipeline as u16));
     /// [`Check::Names`].
     pub const NAMES: Checks = Checks(1 << (Check::Names as u16));
+    /// [`Check::Declarations`].
+    pub const DECLARATIONS: Checks = Checks(1 << (Check::Declarations as u16));
     /// Both RDF-face checks: [`Check::SkolemRdf`] and [`Check::Vocabulary`] — the
     /// pair a module without a graph face subtracts.
     pub const RDF: Checks = Checks(Checks::SKOLEM_RDF.0 | Checks::VOCABULARY.0);
@@ -254,6 +277,13 @@ mod tests {
     }
 
     #[test]
+    fn the_declarations_check_reads_declarations_and_invokes_nothing() {
+        assert!(!Check::Declarations.invokes());
+        assert!(Checks::all().contains(Check::Declarations));
+        assert!(!(Checks::all() - Checks::DECLARATIONS).contains(Check::Declarations));
+    }
+
+    #[test]
     fn labels_are_distinct() {
         let mut labels: Vec<&str> = Check::ALL.iter().map(|c| c.label()).collect();
         labels.sort_unstable();
@@ -263,7 +293,7 @@ mod tests {
 
     #[test]
     fn every_check_has_its_own_bit() {
-        // Nine checks no longer fit a u8; a shared bit would make one check select
+        // Ten checks no longer fit a u8; a shared bit would make one check select
         // another silently.
         let mut bits: Vec<u16> = Check::ALL.iter().map(|c| c.bit()).collect();
         bits.sort_unstable();

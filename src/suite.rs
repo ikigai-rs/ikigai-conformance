@@ -31,6 +31,11 @@ const PLACEHOLDER_IRI: &str = "urn:example:conformance";
 /// The longest fixture value a report line prints before cutting it and saying so.
 const SHOWN: usize = 48;
 
+/// The endpoint field of a finding about the suite itself rather than an endpoint —
+/// a registered namespace has no id. Matches `(kernel)`, used for a root space that
+/// cannot be enumerated.
+const SUITE: &str = "(suite)";
+
 /// Module-supplied inputs for one action, for when the ArgSpecs cannot say what a
 /// valid call looks like (a `path` that must exist, a JSON-LD document that must
 /// parse). Named arguments override the derived minimal ones; bindings fill the
@@ -81,6 +86,11 @@ impl Fixture {
     /// Arguments ARE per `(id, verb)`. So a Sink that writes a scratch file while
     /// Source reads a seeded one cannot be expressed as two bindings; give every
     /// verb's fixture the same value.
+    ///
+    /// A binding naming a variable no pattern of that id has — a typo, or a
+    /// variable that was renamed — is reported by
+    /// [`Check::Declarations`](crate::Check::Declarations): it used to be dropped
+    /// silently, and the IRI was formed from the ArgSpec's derived value instead.
     pub fn binding(mut self, var: impl Into<String>, value: impl Into<String>) -> Self {
         self.bindings.insert(var.into(), value.into());
         self
@@ -139,6 +149,84 @@ struct OptOut {
     id: String,
     verb: Option<Verb>,
     reason: String,
+}
+
+/// What the walk actually covered, recorded as it goes — the evidence
+/// [`Check::Declarations`] reads to say which declarations were never consulted.
+///
+/// A declaration is a promise about a check that will honour it. When the target of
+/// that promise is never reached — a `live` on a Sink, a fixture whose id is a typo,
+/// a waiver for a check that was not selected — the declaration is inert, and the
+/// report prints it as if it had run. This is the ledger that makes the difference
+/// visible.
+#[derive(Debug, Default)]
+struct Coverage {
+    /// Description ids the walk reached.
+    walked: BTreeSet<String>,
+    /// Every `(id, verb)` action a walked description declared, in walk order
+    /// (`Verb` is not `Ord`, so these are vectors kept unique on insert).
+    actions: Vec<(String, Verb)>,
+    /// The actions the walk skipped because of [`Suite::opt_out`].
+    opted_out: Vec<(String, Verb)>,
+    /// Ids declaring at least one RDF face, the only thing the graph checks probe.
+    rdf_faces: BTreeSet<String>,
+    /// The template variables of every pattern an id is bound at.
+    vars: BTreeMap<String, BTreeSet<String>>,
+    /// Ids for which `CACHEABLE` ran at all — past its non-cacheable-verb guard,
+    /// which is where `live` and `cacheable` are read.
+    cacheable_ran: BTreeSet<String>,
+    /// Ids whose result came back cacheable, so the golden-thread rule — the one
+    /// `pure` exempts — actually applied.
+    pure_consulted: BTreeSet<String>,
+    /// Ids whose minimal resolution failed under CACHEABLE: nothing can be said
+    /// about `pure` for them, and a report already carries the real finding.
+    cacheable_unresolved: BTreeSet<String>,
+    /// Registered namespaces that accounted for at least one term in a probed face.
+    namespaces_used: BTreeSet<String>,
+    /// Whether any RDF face was probed at all (an unused namespace means something
+    /// different when nothing was parsed).
+    faces_probed: bool,
+}
+
+impl Coverage {
+    /// Record an action of `id`, once.
+    fn record_action(&mut self, id: &str, verb: Verb, opted_out: bool) {
+        let list = if opted_out {
+            &mut self.opted_out
+        } else {
+            &mut self.actions
+        };
+        if !list.iter().any(|(i, v)| i == id && *v == verb) {
+            list.push((id.to_string(), verb));
+        }
+    }
+
+    /// Whether `(id, verb)` is an action the walk saw declared.
+    fn declares(&self, id: &str, verb: Verb) -> bool {
+        self.actions.iter().any(|(i, v)| i == id && *v == verb)
+    }
+
+    /// Whether `(id, verb)` was excluded by [`Suite::opt_out`].
+    fn is_opted_out(&self, id: &str, verb: Option<Verb>) -> bool {
+        self.opted_out
+            .iter()
+            .any(|(i, v)| i == id && verb.is_none_or(|w| w == *v))
+    }
+
+    /// The verbs a walked description declared, in verb order.
+    fn verbs_of(&self, id: &str) -> Vec<Verb> {
+        self.actions
+            .iter()
+            .filter(|(i, _)| i == id)
+            .map(|(_, v)| *v)
+            .collect()
+    }
+
+    /// Whether every action of `id` was excluded by [`Suite::opt_out`].
+    fn wholly_opted_out(&self, id: &str) -> bool {
+        let verbs = self.verbs_of(id);
+        !verbs.is_empty() && verbs.iter().all(|v| self.is_opted_out(id, Some(*v)))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -285,6 +373,12 @@ impl Suite {
     /// reported by [`Check::Vocabulary`]. Register only a namespace the module
     /// DEFINES (serves a vocabulary for); an undefined one is what the check exists
     /// to catch.
+    ///
+    /// A registration that accounted for no term in any probed face is reported by
+    /// [`Check::Declarations`]: it waives every term under that prefix forever —
+    /// including the next one somebody invents — so one that waives nothing today
+    /// is scope with no owner. The finding's endpoint is `(suite)`, a namespace
+    /// having no id.
     pub fn namespace(mut self, prefix: impl Into<String>) -> Self {
         self.namespaces.push(prefix.into());
         self
@@ -333,6 +427,11 @@ impl Suite {
     ///
     /// `live` and [`cacheable`](Self::cacheable) contradict each other; declaring
     /// both for one id is itself a finding.
+    ///
+    /// It applies only where `CACHEABLE` runs, which is only on a cacheable verb: a
+    /// `live` on a `Sink` or `Delete` holds the endpoint to nothing, and
+    /// [`Check::Declarations`] reports it rather than letting the report print
+    /// `declared live:` for a check that returned early.
     pub fn live(mut self, id: impl Into<String>) -> Self {
         self.live.push(id.into());
         self
@@ -386,6 +485,7 @@ impl Suite {
             }),
             unprobed: Vec::new(),
             probed: Vec::new(),
+            walked: Box::default(),
         };
 
         let Some(entries) = kernel.entries() else {
@@ -400,6 +500,8 @@ impl Suite {
         };
 
         let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut walk_order: Vec<String> = Vec::new();
+        let mut coverage = Coverage::default();
         for entry in entries {
             if entry.pattern.starts_with(KERNEL_NS) && !self.kernel_ops {
                 continue;
@@ -422,7 +524,26 @@ impl Suite {
             let first_time = seen.insert(description.id.clone());
             if first_time {
                 report.endpoints += 1;
+                walk_order.push(description.id.clone());
                 self.static_checks(&description, &mut report);
+            }
+            // What the walk covered, recorded from the DESCRIPTION rather than from
+            // what was reached: a declaration is inert against the shape the module
+            // declared, so a template that fails to expand must not also make every
+            // fixture for that id read as inert.
+            coverage.walked.insert(description.id.clone());
+            if let Some(vars) = template_vars(&entry.pattern) {
+                coverage
+                    .vars
+                    .entry(description.id.clone())
+                    .or_default()
+                    .extend(vars);
+            }
+            for spec in description.action_specs() {
+                coverage.record_action(&description.id, spec.verb, false);
+                if spec.outputs.iter().any(|o| rdf::is_rdf_face(o)) {
+                    coverage.rdf_faces.insert(description.id.clone());
+                }
             }
             // Per entry, not per id: two patterns binding one endpoint are two
             // places it can be reached, each with its own template variables.
@@ -445,6 +566,7 @@ impl Suite {
             for spec in description.action_specs() {
                 report.actions += 1;
                 if self.opted_out(&description.id, spec.verb) {
+                    coverage.record_action(&description.id, spec.verb, true);
                     continue;
                 }
                 let mut action = Action {
@@ -458,16 +580,293 @@ impl Suite {
                     failure_reported: false,
                 };
                 action.enforced(&mut report).await;
-                action.rdf_faces(&mut report).await;
-                action.cacheable(&mut report).await;
+                action.rdf_faces(&mut report, &mut coverage).await;
+                action.cacheable(&mut report, &mut coverage).await;
                 action.pipeline(&mut report).await;
                 // Last: it reads what the checks above already resolved and fires
                 // nothing new for a mutating verb, so the walk's footprint stays
                 // "Source once or twice, Sink once, Delete never".
                 action.outputs(&mut report).await;
+                // Positive evidence for a face the RDF checks do not cover: what
+                // this action actually served, whatever its media type. Fires
+                // nothing of its own — it reads what the checks above resolved.
+                action.record_probe(&mut report);
             }
         }
+        report.walked = walk_order.into_boxed_slice();
+        self.declaration_checks(&coverage, &mut report);
         report
+    }
+
+    // ----- DECLARATIONS -------------------------------------------------------
+
+    /// Every declaration the module made, against what the walk covered: one
+    /// finding per declaration the walk never consulted.
+    ///
+    /// The rule is structural, never "this waiver silenced nothing today": a
+    /// standing waiver that happens to be green is doing its job, while a waiver
+    /// for an id nothing binds could not have done anything at all.
+    fn declaration_checks(&self, coverage: &Coverage, report: &mut Report) {
+        for id in &self.live {
+            if coverage.cacheable_ran.contains(id) {
+                continue;
+            }
+            let why = self.why_no_cacheable(id, coverage);
+            self.inert(
+                report,
+                id,
+                format!(
+                    "declared live (`Suite::live`) but nothing held it to it: {why}. The report \
+                 prints `declared live: {id}`, which reads as a check that ran"
+                ),
+            );
+        }
+        for id in &self.cacheable {
+            if coverage.cacheable_ran.contains(id) {
+                continue;
+            }
+            let why = self.why_no_cacheable(id, coverage);
+            self.inert(
+                report,
+                id,
+                format!(
+                "declared cacheable (`Suite::cacheable`) but nothing held it to it: {why}. The \
+                 report prints `declared cacheable: {id}`, which reads as a check that ran"
+            ),
+            );
+        }
+        for id in &self.pure {
+            if coverage.pure_consulted.contains(id) || coverage.cacheable_unresolved.contains(id) {
+                continue;
+            }
+            let why = if coverage.cacheable_ran.contains(id) {
+                "no action of it came back cacheable, so the golden-thread rule it exempts \
+                 never applied"
+                    .to_string()
+            } else {
+                self.why_no_cacheable(id, coverage)
+            };
+            self.inert(
+                report,
+                id,
+                format!(
+                "declared pure (`Suite::pure`) but nothing consulted it: {why}. `pure` exempts \
+                 a CACHEABLE result from the empty-golden-thread finding and does nothing else"
+            ),
+            );
+        }
+        self.namespace_declarations(coverage, report);
+        self.fixture_declarations(coverage, report);
+        self.opt_out_declarations(coverage, report);
+    }
+
+    /// Why `CACHEABLE` never ran for `id` — in the order a reader would ask.
+    fn why_no_cacheable(&self, id: &str, coverage: &Coverage) -> String {
+        if let Some(reason) = self.unreachable_check(id, Check::Cacheable, coverage, true) {
+            return reason;
+        }
+        "CACHEABLE ran for no action of it".to_string()
+    }
+
+    /// Why `check` could not run for `id`, structurally — `None` when it could.
+    /// `waivers` says whether a per-check waiver counts as a reason (it does for
+    /// every declaration except a waiver judging itself).
+    fn unreachable_check(
+        &self,
+        id: &str,
+        check: Check,
+        coverage: &Coverage,
+        waivers: bool,
+    ) -> Option<String> {
+        if !coverage.walked.contains(id) {
+            return Some(
+                "the walk reached no endpoint with that id (the id is the `Description::id`, \
+                 not the bound IRI)"
+                    .to_string(),
+            );
+        }
+        if !self.checks.contains(check) {
+            return Some(format!(
+                "{check} is not selected (`Suite::checks`), so it is already skipped everywhere"
+            ));
+        }
+        if waivers
+            && self
+                .opt_out_checks
+                .iter()
+                .any(|o| o.id == id && o.check == check)
+        {
+            return Some(format!(
+                "{check} is waived for it by a `Suite::opt_out_check`"
+            ));
+        }
+        if check.invokes() && coverage.wholly_opted_out(id) {
+            return Some(
+                "every action of it is opted out (`Suite::opt_out`), and this check invokes"
+                    .to_string(),
+            );
+        }
+        match check {
+            Check::Cacheable if !coverage.verbs_of(id).iter().any(|v| v.is_cacheable()) => {
+                Some(format!(
+                    "it declares no cacheable verb ({}), and CACHEABLE returns early on a \
+                     mutating one",
+                    verb_list(&coverage.verbs_of(id))
+                ))
+            }
+            Check::SkolemRdf | Check::Vocabulary if !coverage.rdf_faces.contains(id) => Some(
+                "it declares no RDF face, and the graph checks probe declared RDF outputs only"
+                    .to_string(),
+            ),
+            _ => None,
+        }
+    }
+
+    fn namespace_declarations(&self, coverage: &Coverage, report: &mut Report) {
+        for ns in &self.namespaces {
+            if coverage.namespaces_used.contains(ns) {
+                continue;
+            }
+            let why = if !self.checks.contains(Check::Vocabulary) {
+                "VOCABULARY is not selected (`Suite::checks`)".to_string()
+            } else if !coverage.faces_probed {
+                "no RDF face was probed at all".to_string()
+            } else {
+                "no term in any probed face lies under it, or the terms under it are defined \
+                 without it"
+                    .to_string()
+            };
+            self.inert(
+                report,
+                SUITE,
+                format!(
+                "registered namespace `{ns}` (`Suite::namespace`) accounted for no term: {why}. \
+                 A registration waives every term under it forever, so an unused one is scope \
+                 nobody needs — drop it, or narrow it to the prefix the module really serves"
+            ),
+            );
+        }
+    }
+
+    fn fixture_declarations(&self, coverage: &Coverage, report: &mut Report) {
+        for fixture in &self.fixtures {
+            let id = &fixture.id;
+            if !coverage.walked.contains(id) {
+                self.inert(
+                    report,
+                    id,
+                    format!(
+                    "fixture `{fixture}` was never used: the walk reached no endpoint with that \
+                     id (the first field is the `Description::id`, not the bound IRI)"
+                ),
+                );
+                continue;
+            }
+            for var in fixture.bindings.keys() {
+                let known = coverage.vars.get(id).is_some_and(|v| v.contains(var));
+                if !known {
+                    self.inert(
+                        report,
+                        id,
+                        format!(
+                        "fixture `{fixture}` binds `{var}`, which is not a template variable of \
+                         any pattern `{id}` is bound at ({}): the binding was ignored and the \
+                         IRI was formed without it",
+                        if coverage.vars.get(id).is_none_or(BTreeSet::is_empty) {
+                            "it is bound at an exact IRI".to_string()
+                        } else {
+                            coverage.vars[id]
+                                .iter()
+                                .map(|v| format!("`{v}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        }
+                    ),
+                    );
+                }
+            }
+            if fixture.args.is_empty() {
+                // A binding-only fixture is per ENTRY: its verb is ignored by
+                // design, so a verb that names no action says nothing about it.
+                continue;
+            }
+            let verb = fixture.verb;
+            if !coverage.declares(id, verb) {
+                self.inert(
+                    report,
+                    id,
+                    format!(
+                        "fixture `{fixture}` supplies arguments for a {} action `{id}` does not \
+                     declare ({}): they were never used",
+                        crate::report::verb_name(verb),
+                        verb_list(&coverage.verbs_of(id))
+                    ),
+                );
+            } else if coverage.is_opted_out(id, Some(verb)) {
+                self.inert(
+                    report,
+                    id,
+                    format!(
+                        "fixture `{fixture}` supplies arguments for an action excluded by \
+                     `Suite::opt_out`: they were never used"
+                    ),
+                );
+            }
+        }
+    }
+
+    fn opt_out_declarations(&self, coverage: &Coverage, report: &mut Report) {
+        for out in &self.opt_outs {
+            let id = &out.id;
+            if coverage.is_opted_out(id, out.verb) {
+                continue;
+            }
+            let why = if !coverage.walked.contains(id) {
+                "the walk reached no endpoint with that id".to_string()
+            } else {
+                match out.verb {
+                    Some(verb) => format!(
+                        "`{id}` declares no {} action ({})",
+                        crate::report::verb_name(verb),
+                        verb_list(&coverage.verbs_of(id))
+                    ),
+                    None => format!("`{id}` declares no action at all"),
+                }
+            };
+            self.inert(
+                report,
+                id,
+                format!(
+                    "opted out of the invoking checks ({}) but excluded nothing: {why}",
+                    out.reason
+                ),
+            );
+        }
+        for out in &self.opt_out_checks {
+            // A waiver is judged against the check it waives, with ITSELF discounted
+            // — otherwise every waiver would report as its own reason to be inert.
+            let Some(why) = self.unreachable_check(&out.id, out.check, coverage, false) else {
+                continue;
+            };
+            self.inert(
+                report,
+                &out.id,
+                format!(
+                    "waived {} ({}) but that check could not have run for it anyway: {why}",
+                    out.check, out.reason
+                ),
+            );
+        }
+    }
+
+    /// Record one inert-declaration finding, unless DECLARATIONS is itself
+    /// unselected or waived for this id.
+    fn inert(&self, report: &mut Report, id: &str, detail: String) {
+        if self.runs(id, Check::Declarations) {
+            report
+                .findings
+                .push(Finding::new(id, None, Check::Declarations, detail));
+        }
     }
 
     // ----- description-only checks -------------------------------------------
@@ -662,6 +1061,22 @@ fn build_request(verb: Verb, target: &Iri, args: &BTreeMap<String, String>) -> R
         request = request.with_arg(name, ArgRef::Inline(value.as_bytes().to_vec()));
     }
     request
+}
+
+/// `it declares source, exists` / `it declares nothing` — the verbs an id was
+/// walked with, for a finding that has to say why a declaration missed.
+fn verb_list(verbs: &[Verb]) -> String {
+    if verbs.is_empty() {
+        return "it declares no action".to_string();
+    }
+    format!(
+        "it declares {}",
+        verbs
+            .iter()
+            .map(|v| crate::report::verb_name(*v))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 fn requires_list(spec: &ActionSpec) -> String {
@@ -962,7 +1377,7 @@ impl Action<'_> {
 
     // ----- SKOLEM-RDF + VOCABULARY --------------------------------------------
 
-    async fn rdf_faces(&mut self, report: &mut Report) {
+    async fn rdf_faces(&mut self, report: &mut Report, coverage: &mut Coverage) {
         let skolem = self.runs(Check::SkolemRdf);
         let vocab = self.runs(Check::Vocabulary);
         if !skolem && !vocab {
@@ -1031,7 +1446,9 @@ impl Action<'_> {
                 verb: self.spec.verb,
                 face: face.clone(),
                 triples: triples.len(),
+                bytes: repr.bytes.len(),
             });
+            coverage.faces_probed = true;
             if skolem {
                 let blank = rdf::blank_nodes(&triples);
                 if !blank.is_empty() {
@@ -1051,28 +1468,88 @@ impl Action<'_> {
             }
             if vocab {
                 for term in rdf::terms(&triples) {
-                    if !rdf::is_defined(&term, &self.suite.namespaces) {
-                        report.findings.push(self.finding(
-                            Check::Vocabulary,
-                            format!(
-                                "the `{face}` face uses `{term}`, which ikigai-vocab does not \
+                    if rdf::is_defined(&term, &[]) {
+                        continue;
+                    }
+                    // WHICH registered namespace accounted for it, not merely
+                    // whether one did: a namespace that accounts for nothing is a
+                    // standing waiver nobody needs, and DECLARATIONS says so.
+                    // Asking `is_defined` one namespace at a time keeps the `ik:`
+                    // rule intact — an undefined `ik:` term is covered by no
+                    // registration.
+                    let covering = self
+                        .suite
+                        .namespaces
+                        .iter()
+                        .find(|ns| rdf::is_defined(&term, std::slice::from_ref(*ns)));
+                    match covering {
+                        Some(ns) => {
+                            coverage.namespaces_used.insert(ns.clone());
+                        }
+                        None => {
+                            report.findings.push(self.finding(
+                                Check::Vocabulary,
+                                format!(
+                                    "the `{face}` face uses `{term}`, which ikigai-vocab does not \
                                  define and no well-known or registered namespace covers: an \
                                  invented term with no definition (define it in the vocabulary, \
                                  or `Suite::namespace` one the module serves)"
-                            ),
-                        ));
+                                ),
+                            ));
+                        }
                     }
                 }
             }
         }
     }
 
+    /// Record what this action served, whatever the media type — the evidence a
+    /// module with no graph face otherwise has none of. Reads the representation
+    /// the checks above already obtained; resolves nothing of its own, so an action
+    /// no check invoked stays unprobed rather than being fired for a report line.
+    ///
+    /// A face the RDF checks already recorded (same id, verb and media type) is not
+    /// recorded twice: there the triple count is the stronger statement.
+    fn record_probe(&self, report: &mut Report) {
+        // The same representation OUTPUTS reads: the pipeline probe's firing for a
+        // mutating verb, the minimal resolution otherwise.
+        let served = match (self.spec.verb.is_mutating(), self.fired.as_ref()) {
+            (true, Some(Ok(repr))) => Some(repr),
+            (true, Some(Err(_))) => None,
+            _ => match self.minimal.as_ref() {
+                Some(Ok((repr, _))) => Some(repr),
+                _ => None,
+            },
+        };
+        let Some(repr) = served else {
+            return;
+        };
+        let face = rdf::bare_media_type(&repr.repr_type.media_type);
+        if report
+            .probed
+            .iter()
+            .any(|p| p.endpoint == self.id && p.verb == self.spec.verb && p.face == face)
+        {
+            return;
+        }
+        report.probed.push(Probed {
+            endpoint: self.id.to_string(),
+            verb: self.spec.verb,
+            face,
+            triples: 0,
+            bytes: repr.bytes.len(),
+        });
+    }
+
     // ----- CACHEABLE ----------------------------------------------------------
 
-    async fn cacheable(&mut self, report: &mut Report) {
+    async fn cacheable(&mut self, report: &mut Report, coverage: &mut Coverage) {
         if !self.runs(Check::Cacheable) || !self.spec.verb.is_cacheable() {
             return;
         }
+        // Past the guard is exactly where `live` and `cacheable` are read, so it is
+        // exactly where DECLARATIONS may stop calling them inert.
+        coverage.cacheable_ran.insert(self.id.to_string());
         let declared_cacheable = self.suite.cacheable.iter().any(|c| c == self.id);
         let declared_live = self.suite.live.iter().any(|l| l == self.id);
         if declared_cacheable && declared_live {
@@ -1086,10 +1563,22 @@ impl Action<'_> {
         let (first, _) = match self.resolve_minimal(false).await {
             Ok(first) => first,
             Err(err) => {
+                // Nothing can be said about `pure` here: the endpoint might well be
+                // cacheable once its inputs are right. DECLARATIONS must not add an
+                // "inert declaration" line on top of a resolution failure.
+                coverage.cacheable_unresolved.insert(self.id.to_string());
                 self.report_failure(Check::Cacheable, &err, report);
                 return;
             }
         };
+        if first.expiry != Expiry::Always {
+            // The result IS cacheable, so the golden-thread rule applies and
+            // `Suite::pure` — which exempts an endpoint from it — is in play.
+            // Recorded here rather than at the rule itself, so neither a `live`
+            // violation below nor a failed second resolution makes a declaration
+            // that WAS consulted read as inert.
+            coverage.pure_consulted.insert(self.id.to_string());
+        }
         if declared_live && first.expiry != Expiry::Always {
             report.findings.push(self.finding(
                 Check::Cacheable,

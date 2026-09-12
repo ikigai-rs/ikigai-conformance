@@ -795,6 +795,410 @@ fn a_per_check_opt_out_silences_one_rule_and_keeps_every_other() {
     );
 }
 
+// ----- DECLARATIONS -----------------------------------------------------------
+//
+// Every test here asserts the SILENCE is gone: the declaration used to reach no
+// check at all, and the report printed it as if one had honoured it.
+
+/// A well-behaved Sink: kebab id, typed `content`, reads it, declares what it
+/// serves. Nothing about it can ever be cacheable — `Verb::Sink` is not.
+fn notes_write() -> FnEndpoint {
+    FnEndpoint::new("notes-write", |inv: &Invocation<'_>| {
+        let _ = inv.inline_str("content")?;
+        Ok(text("written"))
+    })
+    .with_description(
+        Description::new("notes-write")
+            .verb(Verb::Sink)
+            .input(ArgSpec::new("content").class(XSD_STRING))
+            .output("text/plain"),
+    )
+}
+
+/// A Source nobody could cache: a counter, marked nothing.
+fn volatile() -> FnEndpoint {
+    let n = Arc::new(AtomicUsize::new(0));
+    FnEndpoint::new("tick", move |_inv: &Invocation<'_>| {
+        Ok(text(n.fetch_add(1, Ordering::SeqCst).to_string()))
+    })
+    .with_description(
+        Description::new("tick")
+            .verb(Verb::Source)
+            .output("text/plain"),
+    )
+}
+
+#[test]
+fn live_on_a_mutating_verb_is_reported_rather_than_silently_inert() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:notes"), notes_write());
+    let report = Suite::new()
+        .live("notes-write")
+        .run_blocking(&kernel(space));
+    // The hole: CACHEABLE returns early on a non-cacheable verb, so `live` produced
+    // no finding, no note, nothing — and the report printed `declared live:` anyway,
+    // which reads as a check that ran. ikigai-http hit this on the first day `live`
+    // existed and worked around it with a comment.
+    assert!(
+        report.of(Check::Cacheable).next().is_none(),
+        "CACHEABLE still says nothing — that is the point:\n{report}"
+    );
+    assert_caught(&report, Check::Declarations, "declares no cacheable verb");
+    assert_caught(&report, Check::Declarations, "declared live");
+    assert!(!report.is_clean(), "{report}");
+    assert!(
+        report.to_string().contains("declared live: notes-write"),
+        "the misleading line is still printed — now beside the finding:\n{report}"
+    );
+
+    // The same declaration on a cacheable verb is consulted, so it is not reported.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:tick"), volatile());
+    let report = Suite::new().live("tick").run_blocking(&kernel(space));
+    assert!(report.is_clean(), "{report}");
+}
+
+#[test]
+fn a_declaration_for_an_id_nothing_binds_is_reported() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
+    let report = Suite::new()
+        .pure("upper")
+        .live("uppr") // a typo
+        .cacheable("urn:example:upper") // the bound IRI, not the description id
+        .fixture(Fixture::new("uppercase", Verb::Source).arg("in", "x"))
+        .opt_out("uper", None, "meant `upper`")
+        .opt_out_check("Upper", Check::Names, "the id is a proper noun")
+        .run_blocking(&kernel(space));
+    for id in ["uppr", "urn:example:upper", "uppercase", "uper", "Upper"] {
+        assert!(
+            report
+                .against(id)
+                .any(|f| f.check == Check::Declarations
+                    && f.detail.contains("no endpoint with that id")),
+            "`{id}` was not reported:\n{report}"
+        );
+    }
+    assert_eq!(report.of(Check::Declarations).count(), 5, "{report}");
+    // The one declaration that DID reach its check is not reported.
+    assert!(report.against("upper").next().is_none(), "{report}");
+}
+
+#[test]
+fn a_waiver_for_a_check_that_could_not_have_run_is_reported() {
+    // No RDF face at all: the graph checks probe declared RDF outputs only, so a
+    // SKOLEM-RDF waiver here silences nothing and reads as if it did.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
+    let report = Suite::new()
+        .pure("upper")
+        .opt_out_check("upper", Check::SkolemRdf, "no graph face")
+        .run_blocking(&kernel(space));
+    assert_caught(&report, Check::Declarations, "declares no RDF face");
+
+    // A Sink cannot reach CACHEABLE (the same early return `live` fell through).
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:notes"), notes_write());
+    let report = Suite::new()
+        .opt_out_check("notes-write", Check::Cacheable, "writes are never cached")
+        .run_blocking(&kernel(space));
+    assert_caught(&report, Check::Declarations, "declares no cacheable verb");
+
+    // A check that is not selected is already skipped everywhere.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
+    let report = Suite::new()
+        .pure("upper")
+        .checks(Checks::all() - Checks::RDF)
+        .opt_out_check("upper", Check::Vocabulary, "terms land next release")
+        .run_blocking(&kernel(space));
+    assert_caught(&report, Check::Declarations, "is not selected");
+
+    // Every action opted out, so an invoking check had nothing to waive.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
+    let report = Suite::new()
+        .opt_out("upper", None, "calls a paid API")
+        .opt_out_check("upper", Check::Enforced, "capability comes from the host")
+        .run_blocking(&kernel(space));
+    assert_caught(
+        &report,
+        Check::Declarations,
+        "every action of it is opted out",
+    );
+
+    // The counter-case, thought through and deliberately NOT a finding: OUTPUTS on
+    // an endpoint declaring no outputs still fires ("served `text/plain` but
+    // declares no output"), so waiving it waives a real rule.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:unannounced"), unannounced());
+    let report = Suite::new()
+        .opt_out_check(
+            "unannounced",
+            Check::Outputs,
+            "a pass-through face core cannot spell",
+        )
+        .run_blocking(&kernel(space));
+    assert!(
+        report.of(Check::Declarations).next().is_none(),
+        "a waiver of a check that WOULD have fired is not inert:\n{report}"
+    );
+    assert!(report.is_clean(), "{report}");
+}
+
+#[test]
+fn a_fixture_binding_that_names_no_template_variable_is_reported() {
+    let by_n = FnEndpoint::new("pr", |inv: &Invocation<'_>| {
+        let n = inv.bindings.get("n").unwrap_or_default();
+        Ok(text(format!("pr {n}"))
+            .cacheable()
+            .depends_on("urn:repo:pr"))
+    })
+    .with_description(
+        Description::new("pr")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("n").class(XSD_INTEGER).binding())
+            .output("text/plain"),
+    );
+    let space = EndpointSpace::new().bind(UriTemplate::parse("urn:repo:pr:{n}").unwrap(), by_n);
+    let report = Suite::new()
+        .fixture(Fixture::new("pr", Verb::Source).binding("number", "42"))
+        .run_blocking(&kernel(space));
+    // The walk expanded `{n}` from the ArgSpec's class and never looked at
+    // `number`: a typo'd binding used to change nothing and say nothing.
+    assert_caught(
+        &report,
+        Check::Declarations,
+        "is not a template variable of any pattern",
+    );
+    assert!(
+        report.to_string().contains("(`n`)"),
+        "the finding names the variables there ARE:\n{report}"
+    );
+}
+
+#[test]
+fn a_fixture_for_an_action_the_endpoint_does_not_declare_is_reported() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
+    let report = Suite::new()
+        .pure("upper")
+        .fixture(Fixture::new("upper", Verb::Sink).arg("content", "x"))
+        .run_blocking(&kernel(space));
+    assert_caught(&report, Check::Declarations, "does not declare");
+
+    // And arguments for an action that was opted out are never used either.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
+    let report = Suite::new()
+        .opt_out("upper", Some(Verb::Source), "calls a paid API")
+        .fixture(Fixture::new("upper", Verb::Source).arg("in", "x"))
+        .run_blocking(&kernel(space));
+    assert_caught(
+        &report,
+        Check::Declarations,
+        "an action excluded by `Suite::opt_out`",
+    );
+}
+
+#[test]
+fn an_opt_out_that_excluded_nothing_is_reported() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
+    let report = Suite::new()
+        .pure("upper")
+        .opt_out("upper", Some(Verb::Sink), "would write to the store")
+        .run_blocking(&kernel(space));
+    assert_caught(&report, Check::Declarations, "declares no sink action");
+    assert!(
+        report
+            .of(Check::Declarations)
+            .any(|f| f.detail.contains("it declares source")),
+        "the finding names the verbs there ARE:\n{report}"
+    );
+}
+
+#[test]
+fn a_registered_namespace_that_accounts_for_nothing_is_reported() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:invented"), invented_terms());
+    let report = Suite::new()
+        .namespace("urn:example:ns#")
+        .namespace("https://example.com/unused#")
+        .run_blocking(&kernel(space));
+    let inert: Vec<String> = only(&report, Check::Declarations);
+    assert_eq!(inert.len(), 1, "only the unused one is reported:\n{report}");
+    assert!(inert[0].contains("https://example.com/unused#"), "{report}");
+    assert!(inert[0].contains("no term in any probed face"), "{report}");
+    assert!(
+        report
+            .of(Check::Declarations)
+            .all(|f| f.endpoint == "(suite)"),
+        "a namespace has no endpoint id:\n{report}"
+    );
+
+    // With VOCABULARY off, the reason is the selection, not the graph.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:invented"), invented_terms());
+    let report = Suite::new()
+        .checks(Checks::all() - Checks::RDF)
+        .namespace("urn:example:ns#")
+        .run_blocking(&kernel(space));
+    assert_caught(&report, Check::Declarations, "VOCABULARY is not selected");
+}
+
+#[test]
+fn pure_on_a_result_that_is_never_cacheable_is_reported() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:tick"), volatile());
+    let report = Suite::new().pure("tick").run_blocking(&kernel(space));
+    // CACHEABLE ran, and said nothing: an uncacheable result is held to nothing
+    // unless it was declared. `pure` exempts a CACHEABLE result from the
+    // golden-thread rule, so over this one it exempted nothing.
+    assert!(report.of(Check::Cacheable).next().is_none(), "{report}");
+    assert_caught(
+        &report,
+        Check::Declarations,
+        "no action of it came back cacheable",
+    );
+}
+
+#[test]
+fn a_failed_resolution_does_not_also_report_the_declaration_as_inert() {
+    // This endpoint needs a parseable JSON document and the derived `x` is not one,
+    // so the walk reports the failure. Whether `pure` would have applied is
+    // unknowable from here — calling it inert would be a second, wrong finding
+    // stacked on the real one.
+    let needs_json = FnEndpoint::new("json-keys", |inv: &Invocation<'_>| {
+        let raw = inv.inline_str("content")?;
+        if !raw.trim_start().starts_with('{') {
+            return Err(Error::InvalidArgument {
+                name: "content".into(),
+                detail: "not a JSON object".into(),
+            });
+        }
+        Ok(text("{}").cacheable())
+    })
+    .with_description(
+        Description::new("json-keys")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("content").class(XSD_STRING))
+            .output("text/plain"),
+    );
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:json-keys"), needs_json);
+    let report = Suite::new().pure("json-keys").run_blocking(&kernel(space));
+    assert_caught(
+        &report,
+        Check::Cacheable,
+        "did not resolve with the minimal inputs",
+    );
+    assert!(
+        report.of(Check::Declarations).next().is_none(),
+        "one failure, one finding:\n{report}"
+    );
+}
+
+#[test]
+fn declarations_can_be_left_out_like_any_other_check() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:notes"), notes_write());
+    let report = Suite::new()
+        .live("notes-write")
+        .checks(Checks::all() - Checks::DECLARATIONS)
+        .run_blocking(&kernel(space));
+    assert!(report.is_clean(), "{report}");
+    assert!(
+        report.to_string().contains("skipped: DECLARATIONS"),
+        "{report}"
+    );
+
+    // Or waived for one endpoint, with the reason in the record — the spelling for
+    // a declaration that is standing on purpose.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:notes"), notes_write());
+    let report = Suite::new()
+        .live("notes-write")
+        .opt_out_check(
+            "notes-write",
+            Check::Declarations,
+            "earns a Source face next release; the declaration stands until then",
+        )
+        .run_blocking(&kernel(space));
+    assert!(report.is_clean(), "{report}");
+}
+
+#[test]
+fn identical_waivers_group_onto_one_line_and_checked_says_it_was_partial() {
+    fn invented_as(id: &'static str) -> FnEndpoint {
+        FnEndpoint::new(id, |_inv: &Invocation<'_>| {
+            Ok(turtle(
+                "@prefix ik: <https://ikigai-rs.dev/ns#> .\n\
+                 <urn:ikigai:endpoint:x> a ik:Endpoint ; ik:madeUp \"x\" .",
+            ))
+        })
+        .with_description(Description::new(id).verb(Verb::Source).output(TURTLE))
+    }
+    let space = EndpointSpace::new()
+        .bind(Exact::new("urn:example:a"), invented_as("a-face"))
+        .bind(Exact::new("urn:example:b"), invented_as("b-face"))
+        .bind(Exact::new("urn:example:c"), invented_as("c-face"))
+        .bind(Exact::new("urn:example:graph"), {
+            FnEndpoint::new("cms-graph", |_inv: &Invocation<'_>| {
+                Ok(turtle(
+                    "<urn:example:doc> <http://purl.org/dc/terms/title> \"t\" .",
+                ))
+            })
+            .with_description(
+                Description::new("cms-graph")
+                    .verb(Verb::Source)
+                    .output(TURTLE),
+            )
+        });
+    const REASON: &str = "ik:madeUp lands in the next vocabulary release; another repo owns it";
+    let report = Suite::new()
+        .opt_out_check("a-face", Check::Vocabulary, REASON)
+        .opt_out_check("b-face", Check::Vocabulary, REASON)
+        .opt_out_check("c-face", Check::Vocabulary, REASON)
+        .run_blocking(&kernel(space));
+    report.assert_clean();
+    let text = report.to_string();
+    // One line, not three identical ones that bury every other line of the report.
+    assert!(
+        text.contains(&format!(
+            "opted out: a-face b-face c-face VOCABULARY: {REASON}"
+        )),
+        "{text}"
+    );
+    assert_eq!(
+        text.matches(REASON).count(),
+        1,
+        "the reason prints once:\n{text}"
+    );
+    // The third state `checked:` could not express: ran, but not everywhere.
+    assert!(text.contains("VOCABULARY*"), "{text}");
+    assert!(
+        text.contains("* VOCABULARY ran on 1 of 4 endpoint(s); waived on the rest"),
+        "{text}"
+    );
+
+    // A waiver for an id nothing binds took the check off NOTHING, so it must not
+    // shrink the count in the one line whose whole job is to state the coverage.
+    let space = EndpointSpace::new()
+        .bind(Exact::new("urn:example:a"), invented_as("a-face"))
+        .bind(Exact::new("urn:example:graph"), {
+            FnEndpoint::new("cms-graph", |_inv: &Invocation<'_>| {
+                Ok(turtle(
+                    "<urn:example:doc> <http://purl.org/dc/terms/title> \"t\" .",
+                ))
+            })
+            .with_description(
+                Description::new("cms-graph")
+                    .verb(Verb::Source)
+                    .output(TURTLE),
+            )
+        });
+    let report = Suite::new()
+        .opt_out_check("a-face", Check::Vocabulary, REASON)
+        .opt_out_check("z-face", Check::Vocabulary, REASON) // binds nothing
+        .run_blocking(&kernel(space));
+    assert_eq!(report.walked.to_vec(), ["a-face", "cms-graph"], "{report}");
+    let text = report.to_string();
+    assert!(
+        text.contains("* VOCABULARY ran on 1 of 2 endpoint(s)"),
+        "the bogus waiver does not count against coverage:\n{text}"
+    );
+    assert!(
+        report
+            .against("z-face")
+            .any(|f| f.check == Check::Declarations),
+        "and it is reported as the inert declaration it is:\n{report}"
+    );
+}
+
 // ----- what was probed ---------------------------------------------------------
 
 #[test]
@@ -828,7 +1232,7 @@ fn the_report_names_the_rdf_faces_the_walk_actually_reached() {
     report.assert_clean();
     let text = report.to_string();
     assert!(
-        text.contains("probed 2 RDF face(s) across 2 endpoint(s)"),
+        text.contains("probed 2 face(s) across 2 endpoint(s)"),
         "{text}"
     );
     assert!(
@@ -843,12 +1247,37 @@ fn the_report_names_the_rdf_faces_the_walk_actually_reached() {
         "{text}"
     );
 
-    // The whole point: a clean report over an endpoint with no RDF face says so by
-    // printing nothing, and the two are now distinguishable.
+    // A module with NO graph face is probed too. It used to print no `probed:`
+    // section at all — indistinguishable from a walk that reached nothing, which is
+    // the ambiguity these lines exist to kill, and it was true for about half the
+    // ecosystem.
     let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
     let report = Suite::new().pure("upper").run_blocking(&kernel(space));
-    assert!(report.probed.is_empty(), "{report}");
-    assert!(!report.to_string().contains("probed"), "{report}");
+    report.assert_clean();
+    assert_eq!(report.probed.len(), 1, "{report}");
+    assert_eq!(report.probed[0].face, "text/plain");
+    assert_eq!(
+        report.probed[0].bytes, 1,
+        "the minimal call upper-cases `x`"
+    );
+    assert!(
+        report
+            .to_string()
+            .contains("probed: upper source `text/plain`: 1 byte(s)"),
+        "{report}"
+    );
+
+    // And a walk that genuinely resolved nothing says THAT, rather than saying
+    // nothing — the two cases are now distinguishable in both directions.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
+    let nothing = Suite::new()
+        .checks(Checks::NAMES)
+        .run_blocking(&kernel(space));
+    assert!(nothing.probed.is_empty(), "{nothing}");
+    assert!(
+        nothing.to_string().contains("probed: nothing — no action"),
+        "{nothing}"
+    );
 }
 
 // ----- PIPELINE ---------------------------------------------------------------

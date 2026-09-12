@@ -21,11 +21,14 @@ link-remove  REQUIRES-VERB  declares requires `urn:cap:fs:write:*` but no verb: 
 cms-graph  SKOLEM-RDF  source: the `text/turtle` face has 4 blank node(s) (_:b0, _:b1, _:b2, …): skolemize — mint a stable IRI per node (`urn:ikigai:endpoint:{id}:…`, `urn:event:{uid}`), never a counter
 cms-graph  VOCABULARY  source: the `text/turtle` face uses `https://ikigai-rs.dev/ns#shelf`, which ikigai-vocab does not define and no well-known or registered namespace covers: an invented term with no definition (…)
 sparql-construct  OUTPUTS  source: served `text/turtle` with its minimal inputs but declares only `application/sparql-results+json`: a face the manifold does not announce and the RDF checks never saw — declare it (`.output("text/turtle")`) or serve what is declared
-6 finding(s) across 4 endpoint(s), 4 action(s)
-checked: ARGSPECS REQUIRES-VERB ENFORCED OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE NAMES
-probed 2 RDF face(s) across 2 endpoint(s)
+link-remove  DECLARATIONS  declared live (`Suite::live`) but nothing held it to it: it declares no cacheable verb (it declares delete), and CACHEABLE returns early on a mutating one. The report prints `declared live: link-remove`, which reads as a check that ran
+7 finding(s) across 4 endpoint(s), 4 action(s)
+checked: ARGSPECS REQUIRES-VERB ENFORCED OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE NAMES DECLARATIONS
+probed 3 face(s) across 3 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
 probed: ik-context source `application/ld+json`: 0 triple(s) — nothing was checked
+probed: tag-suggest source `text/plain`: 96 byte(s)
+declared live: link-remove
 fixture: sparql-construct source query="CONSTRUCT WHERE { ?s ?p ?o }"
 unprobed: link-remove delete OUTPUTS: never fired under root: a mutating action is fired only by the pipeline probe (PIPELINE, on an action declaring `content`), so what it serves was not observed
 ```
@@ -33,7 +36,13 @@ unprobed: link-remove delete OUTPUTS: never fired under root: a mutating action 
 The `probed:` lines are the positive half: a clean report would otherwise be
 indistinguishable from a never-probed one — an endpoint whose face is undeclared,
 unreachable or opted out produces no line and no finding, exactly like one whose
-face is perfect. The triple count says whether the pass meant anything.
+face is perfect. The triple count says whether the pass meant anything, and a
+walk that resolved nothing says so rather than printing no section at all.
+
+The last finding is the same idea turned on the module's own declarations: a
+`live` on a `Delete` reached no check, changed nothing, and was printed in a clean
+report exactly like one that had been honoured. See
+[What the walk did NOT do](#what-the-walk-did-not-do).
 
 The module recipe in the ikigai field guide is a page of prose every author must
 remember. The checkable rules are now one test; the prose rule becomes one line
@@ -52,6 +61,7 @@ pointing at the check.
 | `CACHEABLE` | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and carries a golden thread unless the endpoint is declared pure; a result declared live (`Suite::live`) is `Expiry::Always` |
 | `PIPELINE` | pipeline citizenship | a mutating action with by-value inputs declares `content` (where a pipe's value and a `sink`'s body arrive); an action declaring `content` reads it |
 | `NAMES` | naming convention | the description id is a kebab-case noun (`tag-suggest`, `kernel-catalog`) — the MCP projection derives an agent's tool name from it |
+| `DECLARATIONS` | — | every declaration the module made (`live`, `cacheable`, `pure`, `namespace`, a `Fixture`, an `opt_out`, an `opt_out_check`) reached the check that would honour it. A `live` on a `Sink` reached nothing and the report printed `declared live:` anyway |
 
 Every check is independently selectable, so a module adopts incrementally, and
 every skipped check is printed as skipped:
@@ -114,6 +124,8 @@ that on its most security-relevant endpoint, for a release cycle, because four
 `ik:` terms awaited a vocabulary release in another repo. `opt_out_check(id,
 check, reason)` waives one rule for one endpoint, reason printed, and reaches the
 description-only checks (`NAMES`, `ARGSPECS`) nothing else can silence per id.
+Identical `(check, reason)` waivers print on one line listing their ids, and the
+`checked:` line stars a check that ran on only some endpoints.
 
 Where the waiver can be made exact, prefer that: **`ikigai_conformance::rdf` is
 public**, and `rdf::parse` + `rdf::terms` + `rdf::is_defined` reproduce
@@ -140,7 +152,10 @@ fixture for the id that binds the variable wins); arguments are per `(id, verb)`
 **Counts.** `Report.endpoints` counts distinct description ids; `Report.actions`
 counts one per bound entry per verb — `urn:a11y:config` and
 `urn:a11y:config:{app}` sharing one description are one endpoint and, with one
-`Source` each, two actions.
+`Source` each, two actions. `Report.walked` is that first count BY NAME, in walk
+order, so a test can assert the walk reached exactly the endpoints the module
+means to bind (an endpoint that stops being bound is otherwise a report that gets
+*cleaner*).
 
 **One honest exception to "every input has a class".** An opaque-bytes input
 (`urn:sniff`'s `content`: a PNG is valid) has no XSD datatype that is true of the
@@ -148,6 +163,77 @@ value; declare `xsd:string` — the type the wire carries — and say so in a co
 
 The kernel's own `urn:kernel:*` operations are core's, not the module's: the walk
 skips them unless `Suite::include_kernel_ops()` asks.
+
+## What the walk did NOT do
+
+A clean report is worth exactly what it covered, so the report says what it did
+not reach as loudly as what it found.
+
+```
+0 finding(s) across 6 endpoint(s), 9 action(s)
+checked: ARGSPECS REQUIRES-VERB ENFORCED OUTPUTS* SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE NAMES DECLARATIONS
+* OUTPUTS ran on 1 of 6 endpoint(s); waived on the rest (see `opted out:`)
+probed 7 face(s) across 5 endpoint(s)
+probed: cms-graph source `text/turtle`: 412 triple(s)
+probed: ik-context source `application/ld+json`: 0 triple(s) — nothing was checked
+probed: wc source `text/plain`: 3 byte(s)
+opted out: a-face b-face c-face VOCABULARY: ik:madeUp lands in the next vocabulary release
+unprobed: notes-delete delete OUTPUTS: never fired under root
+```
+
+- **`probed:`** — every face the walk actually resolved, not only the RDF ones.
+  For an RDF face the count is triples, and **0 triples says `nothing was
+  checked`** (both RDF checks pass vacuously over an empty graph); for a face no
+  check parses it is bytes, evidence that the action was reached and served
+  something. A walk that resolved nothing at all says so on one line rather than
+  printing no section: a module with no graph face used to be indistinguishable
+  from a walk that reached nothing.
+- **`unprobed:`** — the actions a check could not observe, with the reason.
+- **`checked:`** — a starred check ran on some endpoints and is waived on others,
+  with the count on its own line. A check waived on five of six endpoints used to
+  read as a check that ran. Identical waivers are grouped: one `(check, reason)`
+  pair prints once, listing its ids, because five copies of one long reason
+  buried every other line of the report.
+- **`DECLARATIONS`** — the same rule turned on the module's own declarations.
+
+**A declaration that could not apply is a finding.** A declaration is a promise
+about a check that will honour it, and one whose target the walk never reaches is
+inert: it changes nothing, fails nothing, and prints in the report exactly like
+one that was consulted. `Suite::live` on a `Sink` is the founding instance —
+`CACHEABLE` returns early on a non-cacheable verb, so the declaration did nothing
+at all while the report said `declared live: notes-write`, and an author who
+declared `live` across every id got a clean report over declarations that never
+ran. The check covers every declaration, not that one:
+
+| inert | reported as |
+|---|---|
+| `live` / `cacheable` on an id with no cacheable verb, or one nothing binds, or one whose `CACHEABLE` is unselected, waived or wholly opted out | `declared live … but nothing held it to it: …` |
+| `pure` over a result that never came back cacheable | `nothing consulted it: no action of it came back cacheable` |
+| a `Fixture` whose id names no walked endpoint, or whose arguments are for an action the endpoint does not declare | `fixture … was never used: …` |
+| a `Fixture::binding` naming no template variable of any pattern that id is bound at | `binds \`number\`, which is not a template variable …` |
+| an `opt_out` that excluded nothing | `opted out … but excluded nothing: …` |
+| an `opt_out_check` for a check that could not have run for that id anyway | `waived SKOLEM-RDF … but that check could not have run for it anyway: it declares no RDF face` |
+| a `namespace` that accounted for no term in any probed face (endpoint `(suite)`) | `registered namespace … accounted for no term: …` |
+
+The rule is structural — *could this declaration have applied?* — never "did it
+silence a finding today": a standing waiver that happens to be green is doing its
+job. Two consequences worth stating. `opt_out_check(id, Check::Outputs, …)` on an
+endpoint that declares **no** outputs is NOT inert: `OUTPUTS` still fires there
+(`served text/plain but declares no output`), so the waiver waives a real rule.
+And what this cannot see is a waiver whose *condition* has passed — "until core
+§20" still passes silently the day §20 lands; a reason is prose, and prose is what
+review is for.
+
+A declaration that is standing on purpose says so in the record:
+
+```rust
+Suite::new()
+    .live("notes-write")
+    .opt_out_check("notes-write", Check::Declarations,
+                   "earns a Source face next release; the declaration stands until then")
+```
+
+or the whole check comes off with `Checks::all() - Checks::DECLARATIONS`.
 
 ## The vocabulary pin
 
@@ -208,23 +294,53 @@ the RDF checks stayed silent and `OUTPUTS` did not; for `live`, one endpoint the
 kernel returns cacheable and one it returns `Always`, asserting the declaration is
 what separates them; for `opt_out_check`, one endpoint breaking three rules at
 once, asserting a waiver of one leaves the other two reported — and one endpoint
-that breaks nothing, asserting the suite is clean on it. `tests/builtins.rs` runs the suite against
+that breaks nothing, asserting the suite is clean on it. Every `DECLARATIONS`
+case is falsified the same way — a `live` on a `Sink`, a fixture for an id
+nothing binds, a binding naming no template variable, a waiver for a check that
+could not run, a namespace covering nothing — each asserting the silence is gone,
+and the `live`-on-a-`Sink` test asserts `CACHEABLE` still says nothing, which is
+the whole point. `tests/builtins.rs` runs the suite against
 `ikigai-core`'s own `toUpper` / `reverseList` / `echo` (which predate the recipe)
 and pins the exact findings: three untyped inputs, two pre-convention ids, three
 cacheable pure functions nobody declared pure — and nothing else.
 
 ## Status
 
-0.1.1. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.1.2. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
 
-**Taking 0.1.1 from 0.1.0** requires no change to an adopting module: everything
-new is additive (`OUTPUTS`, `Suite::live`, `Suite::opt_out_check`,
-`Report::assert_clean`, the `probed:` lines). Two things an adopter may want to
-undo, both now unnecessary: an `ikigai-vocab` dev-dependency added only to lift
-this crate's vocabulary floor (0.1.1 pins 0.1.69), and a whole-endpoint `opt_out`
-whose reason names a single check (`opt_out_check` keeps the rest). `OUTPUTS` is
-new and on by default, so an action serving a media type it does not declare —
-including an `as=`-selected face nobody declared — becomes a finding at the next
-CI run; declare the face, or subtract `Checks::OUTPUTS` with a reason if the
-output is a pass-through the endpoint does not choose.
+### 0.1.1 → 0.1.2: compiles unchanged, and may turn your green suite red
+
+That is the whole upgrade note. `DECLARATIONS` is new and on by default, so a
+declaration that never reached a check becomes a finding at the next CI run — and
+those are correct findings: the declaration was doing nothing before and the
+report said otherwise. What to expect, in the order modules hit it:
+
+- **`Suite::live` on a mutating verb** — the most likely one, since `live` is new
+  in 0.1.1 and "declare it on every id" was the obvious first move. Drop it from
+  the `Sink` and `Delete` ids; keep it on the cacheable ones.
+- **`Suite::pure` on an endpoint whose result is not cacheable.** `pure` only
+  exempts a cacheable result from the golden-thread rule; over an uncacheable one
+  it exempted nothing. Drop it.
+- **A `Suite::namespace` no probed face used** — often because the terms are now
+  in `ikigai-vocab`, which is the good case. Drop the registration.
+- **A fixture, waiver or opt-out naming an id the walk does not reach** — almost
+  always the bound IRI rather than the `Description::id`, or a rename that left
+  the declaration behind.
+
+Keeping an inert declaration on purpose is `opt_out_check(id,
+Check::Declarations, "why")`, or `Checks::all() - Checks::DECLARATIONS` for the
+whole check.
+
+Report text changed in three places, which matters only to a test asserting on it:
+identical `(check, reason)` waivers now group onto one line listing their ids (one
+id reads exactly as before); `checked:` stars a partially-waived check and adds a
+count line; `probed:` covers every face rather than only RDF ones, so the header
+reads `probed N face(s)` and a non-RDF line ends `N byte(s)`. One API break, and
+only for code that CONSTRUCTS a `Probed` (reading it is unaffected): it gained a
+`bytes` field and is now `#[non_exhaustive]`, so future additions are not breaks.
+
+⚠ **A repo with no committed lockfile takes a new patch release through its
+existing caret pin**, so the red arrives with no commit of ours at all, whenever
+CI next runs. That is the same shape as 0.1.0 → 0.1.1, where `OUTPUTS` was the
+new check.
