@@ -306,12 +306,23 @@ cacheable pure functions nobody declared pure — and nothing else.
 
 ## Status
 
-0.1.2. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.2.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
 
-### 0.1.1 → 0.1.2: compiles unchanged, and may turn your green suite red
+### 0.1.1 → 0.2.0: a deliberate bump, and it may turn your green suite red
 
-That is the whole upgrade note. `DECLARATIONS` is new and on by default, so a
+**Why a MINOR bump for what looks like a patch.** Two reasons, and the second is
+the one that decided it. `Probed` gained a field and became `#[non_exhaustive]`,
+so code that CONSTRUCTS one no longer compiles — a breaking change, and under
+Cargo's 0.x caret rules a patch release would have been swallowed silently by
+every consumer's pin. That is precisely the shape that cost this ecosystem a
+published crate for two days when an upstream dependency did it to us, and we do
+not get to file the incident and then repeat it. The second reason: `DECLARATIONS`
+is expected to produce correct new findings across the fleet, and a minor bump
+means each repo adopts it by changing a pin and reading this section, rather than
+discovering it at whatever moment CI next runs.
+
+So: **update your pin to `"0.2.0"` deliberately.** `DECLARATIONS` is new and on by default, so a
 declaration that never reached a check becomes a finding at the next CI run — and
 those are correct findings: the declaration was doing nothing before and the
 report said otherwise. What to expect, in the order modules hit it:
@@ -340,7 +351,8 @@ reads `probed N face(s)` and a non-RDF line ends `N byte(s)`. One API break, and
 only for code that CONSTRUCTS a `Probed` (reading it is unaffected): it gained a
 `bytes` field and is now `#[non_exhaustive]`, so future additions are not breaks.
 
-⚠ **A repo with no committed lockfile takes a new patch release through its
-existing caret pin**, so the red arrives with no commit of ours at all, whenever
-CI next runs. That is the same shape as 0.1.0 → 0.1.1, where `OUTPUTS` was the
-new check.
+⚠ **0.1.0 → 0.1.1 was a patch, and a repo with no committed lockfile took it
+through its existing caret pin** — so `OUTPUTS` arrived with no commit of ours at
+all, whenever CI next ran. This release does not behave that way, on purpose: a
+minor bump is outside every existing caret, so nothing changes for you until you
+raise the pin.

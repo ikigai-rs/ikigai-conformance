@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-conformance"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "What \"done\" means for an ikigai module, as one test: walks every endpoint a kernel binds and reports every violation of the module recipe at once — ArgSpec completeness, requires implies a verb, declared = enforced, declared outputs = served outputs, skolemized RDF faces, vocabulary terms only, the cacheable-twice probe, pipeline citizenship — and says what it did NOT do: what it probed, what it could not, and which of your own declarations reached no check at all."
@@ -36,7 +36,7 @@ ikigai-core = "0.1.67"
 # workaround is an `ikigai-vocab` dev-dependency no line imports, added purely to
 # lift this floor (ikigai-llm and ikigai-browse both carried one).
 #
-# 0.1.2: re-checked at release time — 0.1.69 IS the head (ikigai-core's workspace
+# 0.2.0: re-checked at release time — 0.1.69 IS the head (ikigai-core's workspace
 # version and the newest in the registry index), so the pin stands unchanged.
 ikigai-vocab = "0.1.69"
 # One parser for every RDF face a module can declare (Turtle, N-Triples, N-Quads,
