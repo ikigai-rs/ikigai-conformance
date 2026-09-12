@@ -1,6 +1,29 @@
 //! Parsing a declared RDF face and reading it for the two graph checks: blank
 //! nodes ([`Check::SkolemRdf`](crate::Check::SkolemRdf)) and the terms it uses
 //! ([`Check::Vocabulary`](crate::Check::Vocabulary)).
+//!
+//! **This module is public on purpose.** [`parse`] + [`terms`] + [`is_defined`] are
+//! exactly what `VOCABULARY` runs, so a module can reproduce the check by hand over
+//! any bytes — which is the precise escape hatch for a face whose undefined terms
+//! are known and owned elsewhere:
+//!
+//! ```
+//! use ikigai_conformance::rdf::{is_defined, parse, terms};
+//!
+//! let face = b"@prefix ik: <https://ikigai-rs.dev/ns#> .\n\
+//!              <urn:example:review> a ik:Endpoint ; ik:quote \"a quoted line\" .";
+//! let undefined: Vec<String> = terms(&parse("text/turtle", face).unwrap())
+//!     .into_iter()
+//!     .filter(|t| !is_defined(t, &[]))
+//!     .collect();
+//! // Pinned as an EXACT list, so it goes red in both directions: a NEW invented
+//! // term fails, and so does the day `ik:quote` lands in the vocabulary.
+//! assert_eq!(undefined, ["https://ikigai-rs.dev/ns#quote"]);
+//! ```
+//!
+//! Prefer that to [`Suite::namespace`](crate::Suite::namespace) when the terms are
+//! the module's own and temporarily undefined: registering a namespace waives every
+//! term under it forever, including the next one somebody invents.
 
 use std::collections::BTreeSet;
 use std::sync::OnceLock;

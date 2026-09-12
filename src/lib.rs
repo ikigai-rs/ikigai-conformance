@@ -27,6 +27,9 @@
 //! ```
 //!
 //! — or, with no configuration, `ikigai_conformance::check(&my_kernel()).unwrap()`.
+//! Either way the panic message is the whole checklist: [`Report`]'s `Debug`
+//! delegates to its `Display`, and [`Report::assert_clean`] is the one-line
+//! assertion for a run you want to keep reading (`suite.run_blocking(&k).assert_clean()`).
 //!
 //! [`check`] walks every endpoint the kernel lists ([`Kernel::entries`] →
 //! [`Kernel::describe_pattern`]), every action each declares, and returns **every**
@@ -46,10 +49,34 @@
 //! | [`Enforced`](Check::Enforced) | declared = enforced | under a capability holding no grants, an action with `requires` is refused with a typed `Denied`; an action declaring nothing is not |
 //! | [`Outputs`](Check::Outputs) | faces are declared | the bare media type the action serves with its minimal inputs (parameters stripped) is one of its declared `outputs` — a wrong declaration hides a face from every consumer that reads outputs, the two RDF checks included |
 //! | [`SkolemRdf`](Check::SkolemRdf) | skolemize; no blank nodes | every declared RDF face ([`rdf::RDF_FACES`]) resolves with minimal inputs, parses, and has no blank node |
-//! | [`Vocabulary`](Check::Vocabulary) | faces use the shared vocabularies | every predicate and class in a face is defined in `ikigai-vocab`, or under a well-known ([`rdf::WELL_KNOWN_NAMESPACES`]) or module-registered namespace |
-//! | [`Cacheable`](Check::Cacheable) | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and carries a golden thread unless the endpoint is declared pure |
+//! | [`Vocabulary`](Check::Vocabulary) | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known ([`rdf::WELL_KNOWN_NAMESPACES`]) or module-registered namespace |
+//! | [`Cacheable`](Check::Cacheable) | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and carries a golden thread unless the endpoint is declared pure; a result declared live ([`Suite::live`]) is `Expiry::Always` |
 //! | [`Pipeline`](Check::Pipeline) | pipeline citizenship | a mutating action with by-value inputs declares `content` (where the pipe's value arrives); an action declaring `content` reads it |
 //! | [`Names`](Check::Names) | naming convention | the id is a kebab-case noun (the convention `ikigai-core`'s crate docs state) |
+//!
+//! Both RDF checks resolve and **parse** the face, so an unresolvable, mislabeled
+//! or malformed graph is reported whichever of the two is selected — under
+//! [`SkolemRdf`](Check::SkolemRdf) when it runs, under [`Vocabulary`](Check::Vocabulary)
+//! otherwise. A module can rely on `VOCABULARY` alone to prove a new `@prefix` line
+//! is well-formed. Every face actually reached, served and parsed is printed as
+//! `probed: <id> <verb> <face>: N triple(s)`, so a first-run clean report carries
+//! positive evidence rather than only the absence of findings — and a face that
+//! parsed to **0 triples** says `nothing was checked`, because the RDF checks pass
+//! vacuously over an empty graph.
+//!
+//! # The vocabulary pin
+//!
+//! [`Vocabulary`](Check::Vocabulary)'s oracle is `ikigai_vocab::VOCABULARY` — a
+//! term is defined iff it is a subject there — so this crate's `ikigai-vocab`
+//! dependency is load-bearing for DATA, not API, and **the pin tracks the
+//! vocabulary HEAD**: it is raised to the newest published version in every release
+//! of this crate, changed or not. Nothing enforces that (the crate uses only `NS`
+//! and `VOCABULARY`, both ancient, so no compile error can force it up). What a
+//! stale pin does: cargo unifies `ikigai-vocab` across the graph, so a module using
+//! a term the newest vocabulary defines is told the vocabulary does not define it,
+//! and its only local workaround is an `ikigai-vocab` dev-dependency no line
+//! imports. If a term you can see in `vocabulary.ttl` is reported as invented,
+//! check the resolved version first.
 //!
 //! # What stays prose
 //!
@@ -63,6 +90,9 @@
 //!   result behaves as one; it cannot know that an uncacheable result is a pure
 //!   function someone forgot to mark, nor that a marked one reads live state
 //!   without a thread — hence [`Suite::pure`], a declaration the module makes.
+//!   [`Suite::live`] is the same mechanism for the other polarity: without it, an
+//!   endpoint that silently *becomes* cached is invisible, because an undeclared
+//!   endpoint is held to nothing in either direction.
 //! - **A `.cacheable()` the kernel downgraded.** The kernel returns the
 //!   *effective* expiry (the least cacheable of the result and its dependencies),
 //!   so an endpoint that marked its result cacheable over a volatile dependency
@@ -106,6 +136,17 @@
 //! declaration are part of the report. A module that serves its own vocabulary
 //! registers the namespace ([`Suite::namespace`]).
 //!
+//! [`Suite::opt_out`] is coarse — it drops every invoking check for that id — so a
+//! rule that is legitimately red on one endpoint takes `ENFORCED`, `CACHEABLE` and
+//! `SKOLEM-RDF` down with it. [`Suite::opt_out_check`] waives exactly one check for
+//! one endpoint, reason included, and reaches the description-only checks
+//! (`NAMES`, `ARGSPECS`) that nothing else could silence per id. Where the waiver
+//! can be made exact, prefer that: the [`rdf`] module is public, and
+//! [`rdf::parse`] + [`rdf::terms`] + [`rdf::is_defined`] reproduce
+//! [`Vocabulary`](Check::Vocabulary) in a hand test, so a module can pin the
+//! undefined set as an EXACT list that goes red in both directions — including the
+//! day the missing terms land.
+//!
 //! What a walk fires, under root: a `Source` or `Exists` is resolved once (twice
 //! when cacheable — the second is the cache probe); each declared RDF face beyond
 //! the first is resolved once more with `as=`; a `Sink` or `Delete` declaring
@@ -125,7 +166,7 @@ mod report;
 mod suite;
 
 pub use checks::{Check, Checks};
-pub use report::{Declarations, Finding, OptedOut, Report, Unprobed};
+pub use report::{Declarations, Finding, OptedOut, OptedOutCheck, Probed, Report, Unprobed};
 pub use suite::{Fixture, Suite};
 
 use ikigai_core::Kernel;

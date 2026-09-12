@@ -12,7 +12,7 @@ use ikigai_core::{
 
 use crate::checks::{Check, Checks};
 use crate::rdf;
-use crate::report::{Declarations, Finding, OptedOut, Report, Unprobed};
+use crate::report::{Declarations, Finding, OptedOut, OptedOutCheck, Probed, Report, Unprobed};
 
 /// The kernel's own operations are listed by [`Kernel::entries`] ahead of the root
 /// space's bindings; they are core's, not the module's, so the walk skips them
@@ -141,6 +141,13 @@ struct OptOut {
     reason: String,
 }
 
+#[derive(Clone, Debug)]
+struct OptOutCheck {
+    id: String,
+    check: Check,
+    reason: String,
+}
+
 /// A configured run: which checks, which fixtures, which actions are opted out of
 /// being invoked and why, which namespaces are the module's own, and which
 /// endpoints are pure.
@@ -161,16 +168,18 @@ struct OptOut {
 ///     .namespace("https://example.org/ns#")
 ///     .pure("to-upper")
 ///     .run_blocking(&my_kernel());
-/// assert!(report.is_clean(), "{report}");
+/// report.assert_clean();
 /// ```
 #[derive(Clone, Debug)]
 pub struct Suite {
     checks: Checks,
     fixtures: Vec<Fixture>,
     opt_outs: Vec<OptOut>,
+    opt_out_checks: Vec<OptOutCheck>,
     namespaces: Vec<String>,
     pure: Vec<String>,
     cacheable: Vec<String>,
+    live: Vec<String>,
     kernel_ops: bool,
 }
 
@@ -187,9 +196,11 @@ impl Suite {
             checks: Checks::all(),
             fixtures: Vec::new(),
             opt_outs: Vec::new(),
+            opt_out_checks: Vec::new(),
             namespaces: Vec::new(),
             pure: Vec::new(),
             cacheable: Vec::new(),
+            live: Vec::new(),
             kernel_ops: false,
         }
     }
@@ -218,6 +229,53 @@ impl Suite {
         self.opt_outs.push(OptOut {
             id: id.into(),
             verb,
+            reason: reason.into(),
+        });
+        self
+    }
+
+    /// Exclude ONE check for one endpoint, with a reason — for a rule that is
+    /// legitimately red on this endpoint while every other check still runs on it.
+    ///
+    /// The lever [`opt_out`](Self::opt_out) is not: that one drops every *invoking*
+    /// check at once, so a module silencing one red rule loses `ENFORCED`,
+    /// `CACHEABLE` and `SKOLEM-RDF` on the same endpoint. ikigai-browse paid exactly
+    /// that: one endpoint's `text/turtle` face used four `ik:` terms the published
+    /// vocabulary did not define — a fix another repo owns — and silencing
+    /// `VOCABULARY` cost it every invoking check on its most security-relevant
+    /// endpoint (capability-gated, model-calling, store-writing) for a release cycle.
+    ///
+    /// Applies to the description-only checks too, which nothing else can silence
+    /// per id: `NAMES` on an endpoint whose id is a full IRI by contract, `ARGSPECS`
+    /// on an input whose class is a lie the module documents.
+    ///
+    /// ```no_run
+    /// # use ikigai_conformance::{Check, Suite};
+    /// # use ikigai_core::Kernel;
+    /// # fn my_kernel() -> Kernel { unimplemented!() }
+    /// Suite::new()
+    ///     .opt_out_check(
+    ///         "browse-review",
+    ///         Check::Vocabulary,
+    ///         "ik:quote/ik:note land in ikigai-vocab 0.1.70; pinned by hand until then",
+    ///     )
+    ///     .run_blocking(&my_kernel())
+    ///     .assert_clean();
+    /// ```
+    ///
+    /// Prefer pinning the exception EXACTLY where you can — `rdf::parse` +
+    /// [`rdf::terms`](crate::rdf::terms) + [`rdf::is_defined`](crate::rdf::is_defined)
+    /// reproduce `VOCABULARY` in a hand test, so the waiver can assert the undefined
+    /// set is *exactly* the known list and go red in both directions.
+    pub fn opt_out_check(
+        mut self,
+        id: impl Into<String>,
+        check: Check,
+        reason: impl Into<String>,
+    ) -> Self {
+        self.opt_out_checks.push(OptOutCheck {
+            id: id.into(),
+            check,
             reason: reason.into(),
         });
         self
@@ -254,6 +312,32 @@ impl Suite {
         self
     }
 
+    /// Declare that an endpoint's results are **live by decision** — `Expiry::Always`,
+    /// never cached — and hold it to that: a result the kernel hands back cacheable
+    /// is then a finding.
+    ///
+    /// The polarity twin of [`cacheable`](Self::cacheable), and the half
+    /// [`Check::Cacheable`] is otherwise blind to. When the first resolution is
+    /// `Expiry::Always` the probe reports only if the id was declared cacheable and
+    /// is silent otherwise — so "declared cacheable, is not" is caught, and
+    /// **"nobody declared anything, and it silently BECAME cacheable" is caught by
+    /// nothing.** That is the direction the field guide's cacheability-propagation
+    /// rule says nothing else can see: a resource that must be read fresh (a secret,
+    /// a live platform read, a non-deterministic generation, process-global host
+    /// state no `depends_on` could name) starts being served from the cache until
+    /// something cuts a thread — and no type changes, no test fails, nothing says so.
+    ///
+    /// It is also the spelling for "uncacheable on purpose" in the printed record: a
+    /// clean report over a module with no cacheable result is otherwise
+    /// indistinguishable from one where caching was never considered.
+    ///
+    /// `live` and [`cacheable`](Self::cacheable) contradict each other; declaring
+    /// both for one id is itself a finding.
+    pub fn live(mut self, id: impl Into<String>) -> Self {
+        self.live.push(id.into());
+        self
+    }
+
     /// Walk the kernel's own `urn:kernel:*` operations too. They are core's
     /// endpoints, not the module's — off by default so a module's report is about
     /// the module.
@@ -285,12 +369,23 @@ impl Suite {
                         reason: o.reason.clone(),
                     })
                     .collect(),
+                opted_out_checks: self
+                    .opt_out_checks
+                    .iter()
+                    .map(|o| OptedOutCheck {
+                        endpoint: o.id.clone(),
+                        check: o.check,
+                        reason: o.reason.clone(),
+                    })
+                    .collect(),
                 pure: self.pure.clone(),
                 cacheable: self.cacheable.clone(),
+                live: self.live.clone(),
                 namespaces: self.namespaces.clone(),
                 fixtures: self.fixtures.clone(),
             }),
             unprobed: Vec::new(),
+            probed: Vec::new(),
         };
 
         let Some(entries) = kernel.entries() else {
@@ -310,16 +405,18 @@ impl Suite {
                 continue;
             }
             let Some(description) = kernel.describe_pattern(&entry.pattern) else {
-                report.findings.push(Finding::new(
-                    &entry.endpoint,
-                    None,
-                    Check::ArgSpecs,
-                    format!(
-                        "bound at `{}` but describes nothing: a Meta resolution of the \
-                         pattern reaches no description",
-                        entry.pattern
-                    ),
-                ));
+                if self.runs(&entry.endpoint, Check::ArgSpecs) {
+                    report.findings.push(Finding::new(
+                        &entry.endpoint,
+                        None,
+                        Check::ArgSpecs,
+                        format!(
+                            "bound at `{}` but describes nothing: a Meta resolution of the \
+                             pattern reaches no description",
+                            entry.pattern
+                        ),
+                    ));
+                }
                 continue;
             };
             let first_time = seen.insert(description.id.clone());
@@ -334,7 +431,7 @@ impl Suite {
             let target = match self.target_for(&entry, &description) {
                 Ok(iri) => iri,
                 Err(detail) => {
-                    if self.checks.contains(Check::ArgSpecs) {
+                    if self.runs(&description.id, Check::ArgSpecs) {
                         report.findings.push(Finding::new(
                             &description.id,
                             None,
@@ -376,16 +473,16 @@ impl Suite {
     // ----- description-only checks -------------------------------------------
 
     fn static_checks(&self, description: &Description, report: &mut Report) {
-        if self.checks.contains(Check::ArgSpecs) {
+        if self.runs(&description.id, Check::ArgSpecs) {
             argspecs(description, report);
         }
-        if self.checks.contains(Check::RequiresVerb) {
+        if self.runs(&description.id, Check::RequiresVerb) {
             requires_verb(description, report);
         }
-        if self.checks.contains(Check::Names) {
+        if self.runs(&description.id, Check::Names) {
             names(description, report);
         }
-        if self.checks.contains(Check::Pipeline) {
+        if self.runs(&description.id, Check::Pipeline) {
             pipeline_static(description, report);
         }
     }
@@ -394,7 +491,7 @@ impl Suite {
     /// `Binding`-source input of every action — otherwise the manifold cannot form
     /// the IRI from the contract and drops the action.
     fn template_checks(&self, entry: &SpaceEntry, description: &Description, report: &mut Report) {
-        if !self.checks.contains(Check::ArgSpecs) {
+        if !self.runs(&description.id, Check::ArgSpecs) {
             return;
         }
         let Some(vars) = template_vars(&entry.pattern) else {
@@ -429,6 +526,18 @@ impl Suite {
         self.opt_outs
             .iter()
             .any(|o| o.id == id && o.verb.is_none_or(|v| v == verb))
+    }
+
+    /// Whether `check` runs for `id`: selected suite-wide ([`Suite::checks`]) and not
+    /// excluded for this endpoint ([`Suite::opt_out_check`]). Every check asks this
+    /// rather than `checks.contains`, so a per-id waiver silences one rule and one
+    /// endpoint — never a second check by accident.
+    fn runs(&self, id: &str, check: Check) -> bool {
+        self.checks.contains(check)
+            && !self
+                .opt_out_checks
+                .iter()
+                .any(|o| o.id == id && o.check == check)
     }
 
     fn fixture_for(&self, id: &str, verb: Verb) -> Option<&Fixture> {
@@ -762,6 +871,11 @@ impl Action<'_> {
         Finding::new(self.id, Some(self.spec.verb), check, detail)
     }
 
+    /// Whether `check` runs for this action — selected, and not waived for this id.
+    fn runs(&self, check: Check) -> bool {
+        self.suite.runs(self.id, check)
+    }
+
     /// Resolve with minimal inputs under root, traced. Memoized: the RDF and the
     /// cache checks both need it, and a second resolution is what the cache check
     /// measures.
@@ -809,7 +923,7 @@ impl Action<'_> {
     // ----- ENFORCED -----------------------------------------------------------
 
     async fn enforced(&mut self, report: &mut Report) {
-        if !self.suite.checks.contains(Check::Enforced) {
+        if !self.runs(Check::Enforced) {
             return;
         }
         let args = self.suite.args_for(self.id, self.spec);
@@ -849,8 +963,8 @@ impl Action<'_> {
     // ----- SKOLEM-RDF + VOCABULARY --------------------------------------------
 
     async fn rdf_faces(&mut self, report: &mut Report) {
-        let skolem = self.suite.checks.contains(Check::SkolemRdf);
-        let vocab = self.suite.checks.contains(Check::Vocabulary);
+        let skolem = self.runs(Check::SkolemRdf);
+        let vocab = self.runs(Check::Vocabulary);
         if !skolem && !vocab {
             return;
         }
@@ -908,6 +1022,16 @@ impl Action<'_> {
                     continue;
                 }
             };
+            // Positive evidence: this face was reached, served and parsed. A clean
+            // report is otherwise indistinguishable from a never-probed one, and the
+            // triple count says whether "clean" meant anything — a face that parses
+            // to zero triples passes both RDF checks vacuously.
+            report.probed.push(Probed {
+                endpoint: self.id.to_string(),
+                verb: self.spec.verb,
+                face: face.clone(),
+                triples: triples.len(),
+            });
             if skolem {
                 let blank = rdf::blank_nodes(&triples);
                 if !blank.is_empty() {
@@ -946,8 +1070,18 @@ impl Action<'_> {
     // ----- CACHEABLE ----------------------------------------------------------
 
     async fn cacheable(&mut self, report: &mut Report) {
-        if !self.suite.checks.contains(Check::Cacheable) || !self.spec.verb.is_cacheable() {
+        if !self.runs(Check::Cacheable) || !self.spec.verb.is_cacheable() {
             return;
+        }
+        let declared_cacheable = self.suite.cacheable.iter().any(|c| c == self.id);
+        let declared_live = self.suite.live.iter().any(|l| l == self.id);
+        if declared_cacheable && declared_live {
+            report.findings.push(self.finding(
+                Check::Cacheable,
+                "declared both cacheable (`Suite::cacheable`) and live (`Suite::live`): \
+                 the two are opposite promises about the same endpoint, so one of them \
+                 is certainly false — keep the one the module means",
+            ));
         }
         let (first, _) = match self.resolve_minimal(false).await {
             Ok(first) => first,
@@ -956,12 +1090,31 @@ impl Action<'_> {
                 return;
             }
         };
+        if declared_live && first.expiry != Expiry::Always {
+            report.findings.push(self.finding(
+                Check::Cacheable,
+                format!(
+                    "declared live (`Suite::live`) but the kernel returned it cacheable \
+                     ({}): a resource that must be read fresh is now served from the cache \
+                     until something cuts a thread. Effective expiry propagates, so this is \
+                     usually a dependency that became cacheable, or a `.cacheable()` added \
+                     to a result that reads live state",
+                    match first.expiry {
+                        Expiry::Never => "`Expiry::Never` — permanently".to_string(),
+                        other => format!("`{other:?}`"),
+                    }
+                ),
+            ));
+            return;
+        }
         if first.expiry == Expiry::Always {
             // The kernel hands back the EFFECTIVE expiry, so this is either "never
             // marked cacheable" (the recipe's "when in doubt, don't") or "marked
             // cacheable over a volatile dependency" — indistinguishable from here.
-            // Only a declaration separates them.
-            if self.suite.cacheable.iter().any(|c| c == self.id) {
+            // Only a declaration separates them — and `Suite::live` is the other
+            // half: an endpoint declared live and returned `Always` is the outcome
+            // its module promised, so the silence here is a verdict, not a gap.
+            if declared_cacheable {
                 report.findings.push(self.finding(
                     Check::Cacheable,
                     "declared cacheable (`Suite::cacheable`) but the kernel returned it \
@@ -1021,7 +1174,7 @@ impl Action<'_> {
     // ----- PIPELINE (invoking half) --------------------------------------------
 
     async fn pipeline(&mut self, report: &mut Report) {
-        if !self.suite.checks.contains(Check::Pipeline) {
+        if !self.runs(Check::Pipeline) {
             return;
         }
         let Some(content) = self
@@ -1063,7 +1216,7 @@ impl Action<'_> {
     /// resolution) — so it never fires a Sink or Delete itself; what it could not
     /// observe is recorded as unprobed.
     async fn outputs(&mut self, report: &mut Report) {
-        if !self.suite.checks.contains(Check::Outputs) {
+        if !self.runs(Check::Outputs) {
             return;
         }
         let probed = if self.spec.verb.is_mutating() {
