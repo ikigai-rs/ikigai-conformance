@@ -63,6 +63,40 @@ pub struct OptedOut {
     pub reason: String,
 }
 
+/// One check excluded for one endpoint, with the reason the module gave — the
+/// per-rule waiver ([`Suite::opt_out_check`](crate::Suite::opt_out_check)), as
+/// opposed to [`OptedOut`], which drops every invoking check at once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OptedOutCheck {
+    /// The endpoint's description id.
+    pub endpoint: String,
+    /// The check that did not run for it.
+    pub check: Check,
+    /// Why — printed in the report, so the waived rule and its reason travel
+    /// together instead of living in a comment.
+    pub reason: String,
+}
+
+/// One RDF face that was reached, served and parsed — positive evidence of what a
+/// walk actually looked at.
+///
+/// A clean report is otherwise indistinguishable from a never-probed one: an
+/// endpoint whose face is undeclared, unreachable or opted out produces no finding
+/// and no line, exactly like one whose face is perfect. `triples` says whether the
+/// pass meant anything — a face parsing to zero triples satisfies both RDF checks
+/// vacuously.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Probed {
+    /// The endpoint's description id.
+    pub endpoint: String,
+    /// The action's verb.
+    pub verb: Verb,
+    /// The face's bare media type (`text/turtle`).
+    pub face: String,
+    /// How many triples it parsed to. Zero is a vacuous pass, not a clean one.
+    pub triples: usize,
+}
+
 /// One action a check could not observe, with the reason — printed so a clean
 /// report says what it did NOT see, not only what it found. Distinct from an
 /// opt-out (the module's decision) and from a finding (a violation).
@@ -102,7 +136,7 @@ pub struct Unprobed {
 ///     && f.detail.contains("input `in` has no class")));
 /// assert_eq!(report.endpoints, 1);
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Report {
     /// Every finding, in walk order (endpoints in catalog order, checks in
     /// [`Check::ALL`] order within an endpoint).
@@ -124,6 +158,10 @@ pub struct Report {
     /// The actions a check could not observe, with reasons — the gaps in the
     /// walk's coverage, printed beside the findings (`unprobed: …`).
     pub unprobed: Vec<Unprobed>,
+    /// The RDF faces the walk actually reached, served and parsed, with their
+    /// triple counts (`probed: …`) — so a first-run clean report carries positive
+    /// evidence of coverage rather than only the absence of findings.
+    pub probed: Vec<Probed>,
 }
 
 /// What a module declared when it configured the [`Suite`](crate::Suite),
@@ -132,12 +170,18 @@ pub struct Report {
 pub struct Declarations {
     /// The actions the module opted out of the invoking checks, with reasons.
     pub opted_out: Vec<OptedOut>,
+    /// The single checks the module waived per endpoint, with reasons
+    /// ([`Suite::opt_out_check`](crate::Suite::opt_out_check)).
+    pub opted_out_checks: Vec<OptedOutCheck>,
     /// The endpoints the module declared pure (exempt from the golden-thread half
     /// of [`Check::Cacheable`]).
     pub pure: Vec<String>,
     /// The endpoints the module declared cacheable (held to it by
     /// [`Check::Cacheable`]).
     pub cacheable: Vec<String>,
+    /// The endpoints the module declared live — uncacheable by decision, held to
+    /// `Expiry::Always` by [`Check::Cacheable`].
+    pub live: Vec<String>,
     /// The namespaces the module registered as its own for [`Check::Vocabulary`].
     pub namespaces: Vec<String>,
     /// The fixtures the module supplied, printed one per line (`fixture: file
@@ -146,9 +190,35 @@ pub struct Declarations {
 }
 
 impl Report {
-    /// `true` when no check found anything.
+    /// `true` when no check found anything. Prefer [`assert_clean`](Self::assert_clean)
+    /// in a test: `assert!(report.is_clean())` panics with `assertion failed` and
+    /// none of the checklist.
     pub fn is_clean(&self) -> bool {
         self.findings.is_empty()
+    }
+
+    /// Panic with the whole report when it is not clean — the one line a `#[test]`
+    /// wants, and the assertion every adopter was otherwise writing by hand
+    /// (`assert!(report.is_clean(), "{report}")`).
+    ///
+    /// The panic message is the report's [`Display`](fmt::Display): every finding,
+    /// the counts, the checks run and skipped, what was declared, what was probed
+    /// and what was not. `into_result().unwrap()` prints the same text — `Debug`
+    /// delegates to `Display` for exactly that reason.
+    ///
+    /// ```should_panic
+    /// use ikigai_conformance::Suite;
+    /// use ikigai_core::builtins;
+    /// use ikigai_core::{EndpointSpace, Exact, Kernel};
+    /// use std::sync::Arc;
+    ///
+    /// let root = EndpointSpace::new().bind(Exact::new("urn:example:toUpper"), builtins::to_upper());
+    /// // The builtins predate the recipe: this panics, printing the checklist.
+    /// Suite::new().run_blocking(&Kernel::new(Arc::new(root))).assert_clean();
+    /// ```
+    #[track_caller]
+    pub fn assert_clean(&self) {
+        assert!(self.is_clean(), "{self}");
     }
 
     /// The findings of one check.
@@ -172,6 +242,15 @@ impl Report {
     }
 }
 
+/// The same text as [`Display`](fmt::Display): a `Report` is the `Err` of
+/// [`check`](crate::check), so `unwrap()` — which formats with `Debug` — must print
+/// the checklist rather than a struct dump.
+impl fmt::Debug for Report {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for finding in &self.findings {
@@ -190,6 +269,32 @@ impl fmt::Display for Report {
         if !skipped.is_empty() {
             writeln!(f, "skipped: {}", skipped.join(" "))?;
         }
+        // What was PROBED, not only what was checked: a clean report otherwise says
+        // nothing about whether a face was ever reached.
+        if !self.probed.is_empty() {
+            let endpoints: std::collections::BTreeSet<&str> =
+                self.probed.iter().map(|p| p.endpoint.as_str()).collect();
+            writeln!(
+                f,
+                "probed {} RDF face(s) across {} endpoint(s)",
+                self.probed.len(),
+                endpoints.len()
+            )?;
+            for p in &self.probed {
+                write!(
+                    f,
+                    "probed: {} {} `{}`: {} triple(s)",
+                    p.endpoint,
+                    verb_name(p.verb),
+                    p.face,
+                    p.triples
+                )?;
+                if p.triples == 0 {
+                    write!(f, " — nothing was checked")?;
+                }
+                writeln!(f)?;
+            }
+        }
         let declared = &self.declared;
         for out in &declared.opted_out {
             match out.verb {
@@ -203,11 +308,23 @@ impl fmt::Display for Report {
                 None => writeln!(f, "opted out: {}: {}", out.endpoint, out.reason)?,
             }
         }
+        for out in &declared.opted_out_checks {
+            writeln!(
+                f,
+                "opted out: {} {}: {}",
+                out.endpoint,
+                out.check.label(),
+                out.reason
+            )?;
+        }
         if !declared.pure.is_empty() {
             writeln!(f, "declared pure: {}", declared.pure.join(" "))?;
         }
         if !declared.cacheable.is_empty() {
             writeln!(f, "declared cacheable: {}", declared.cacheable.join(" "))?;
+        }
+        if !declared.live.is_empty() {
+            writeln!(f, "declared live: {}", declared.live.join(" "))?;
         }
         if !declared.namespaces.is_empty() {
             writeln!(f, "module namespaces: {}", declared.namespaces.join(" "))?;
@@ -269,8 +386,14 @@ mod tests {
                     verb: Some(Verb::Sink),
                     reason: "sends real mail".into(),
                 }],
+                opted_out_checks: vec![OptedOutCheck {
+                    endpoint: "browse-review".into(),
+                    check: Check::Vocabulary,
+                    reason: "four ik: terms land in the next vocabulary release".into(),
+                }],
                 pure: vec!["to-upper".into()],
                 cacheable: vec!["to-upper".into()],
+                live: vec!["clock-now".into()],
                 namespaces: vec!["urn:example:ns#".into()],
                 fixtures: vec![Fixture::new("file", Verb::Source)
                     .binding("path", "README.md")
@@ -285,6 +408,20 @@ mod tests {
                 check: Check::Outputs,
                 reason: "never fired under root".into(),
             }],
+            probed: vec![
+                Probed {
+                    endpoint: "cms-graph".into(),
+                    verb: Verb::Source,
+                    face: "text/turtle".into(),
+                    triples: 14,
+                },
+                Probed {
+                    endpoint: "ik-context".into(),
+                    verb: Verb::Source,
+                    face: "application/ld+json".into(),
+                    triples: 0,
+                },
+            ],
         };
         // The Err of `check` travels by value: keep it under clippy's large-error bar.
         assert!(std::mem::size_of::<Report>() <= 128);
@@ -292,7 +429,30 @@ mod tests {
         assert!(text.contains("0 finding(s) across 2 endpoint(s), 3 action(s)"));
         assert!(text.contains("skipped: SKOLEM-RDF VOCABULARY"));
         assert!(text.contains("opted out: email-send sink: sends real mail"));
+        assert!(
+            text.contains(
+                "opted out: browse-review VOCABULARY: four ik: terms land in the next \
+                 vocabulary release"
+            ),
+            "{text}"
+        );
         assert!(text.contains("declared pure: to-upper"));
+        assert!(text.contains("declared live: clock-now"), "{text}");
+        assert!(
+            text.contains("probed 2 RDF face(s) across 2 endpoint(s)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("probed: cms-graph source `text/turtle`: 14 triple(s)\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "probed: ik-context source `application/ld+json`: 0 triple(s) — nothing was \
+                 checked"
+            ),
+            "a vacuous pass is visible:\n{text}"
+        );
         assert!(
             text.contains("fixture: file source path=\"README.md\" content=\"a body that is long"),
             "{text}"

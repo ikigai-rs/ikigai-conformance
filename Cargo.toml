@@ -24,7 +24,18 @@ ikigai-core = "0.1.67"
 # is a subject in `ikigai_vocab::VOCABULARY`. So the floor is the newest published
 # vocabulary, not the oldest API this crate compiles against — an older pin would
 # report terms that exist as invented.
-ikigai-vocab = "0.1.66"
+#
+# ⚠ STANDING RULE: **this pin tracks the vocabulary HEAD.** Raise it to the newest
+# published `ikigai-vocab` in every release of this crate, whether or not anything
+# here changed. It is load-bearing for DATA, not API — the crate uses only `NS` and
+# `VOCABULARY`, both ancient, so no compile error will ever force it up and nothing
+# will ever say it has gone stale. What a stale pin does instead: cargo unifies
+# `ikigai-vocab` across the graph, so a module whose faces use a term the newest
+# vocabulary defines fails VOCABULARY ("the vocabulary does not define ns#passcode")
+# against a `vocabulary.ttl` that visibly defines it, and the only per-module
+# workaround is an `ikigai-vocab` dev-dependency no line imports, added purely to
+# lift this floor (ikigai-llm and ikigai-browse both carried one).
+ikigai-vocab = "0.1.69"
 # One parser for every RDF face a module can declare (Turtle, N-Triples, N-Quads,
 # TriG, RDF/XML, JSON-LD). 0.2.5 is the version whose `for_slice` and
 # `RdfFormat::from_media_type` this crate was written against.

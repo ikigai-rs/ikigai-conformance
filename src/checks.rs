@@ -35,10 +35,23 @@ pub enum Check {
     SkolemRdf,
     /// **Vocabulary terms only.** Every predicate and class in an RDF face is defined
     /// in `ikigai-vocab`, or lives under a well-known or module-registered namespace.
+    ///
+    /// It **parses the face** to see them
+    /// ([`rdf::parse`](crate::rdf::parse)), so it also reports a face that does not
+    /// resolve, is served as something other than what it declared, or is malformed
+    /// — under its own name when [`SkolemRdf`](Check::SkolemRdf) is not selected. A
+    /// module can therefore rely on `VOCABULARY` alone to prove a hand-written
+    /// `@prefix` line is well-formed. The oracle is `ikigai_vocab::VOCABULARY` at
+    /// the version cargo resolves for the whole graph: a term this crate's pin is
+    /// too old to know is reported as invented (see the crate docs' vocabulary-pin
+    /// note).
     Vocabulary,
     /// **The cacheable-twice probe.** A result marked cacheable is served from the
     /// cache the second time, byte-identical, and — unless the endpoint is declared
-    /// pure — depends on at least one golden thread.
+    /// pure — depends on at least one golden thread. Both polarities are
+    /// declarations the module makes: [`Suite::cacheable`](crate::Suite::cacheable)
+    /// holds an endpoint to being cacheable, [`Suite::live`](crate::Suite::live) to
+    /// being `Expiry::Always`. An endpoint declaring neither is held to neither.
     Cacheable,
     /// **Pipeline citizenship.** A mutating action with by-value inputs declares
     /// `content` (where a pipe's value arrives), and an action declaring `content`

@@ -669,6 +669,188 @@ fn cacheable_passes_a_threaded_stateful_read() {
     assert!(report.of(Check::Cacheable).next().is_none(), "{report}");
 }
 
+#[test]
+fn live_catches_a_resource_that_silently_became_cacheable() {
+    // Uncacheable by decision, declared so: the clean line now says which.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:clock"), clock());
+    let report = Suite::new().live("clock").run_blocking(&kernel(space));
+    report.assert_clean();
+    assert!(
+        report.to_string().contains("declared live: clock"),
+        "{report}"
+    );
+
+    // The same declaration over a result the kernel hands back cacheable — the
+    // polarity `Suite::cacheable` cannot see, and the direction nothing else can.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:config"), threadless());
+    let report = Suite::new().live("config").run_blocking(&kernel(space));
+    assert_caught(
+        &report,
+        Check::Cacheable,
+        "declared live (`Suite::live`) but the kernel returned it cacheable \
+         (`Expiry::Never` — permanently)",
+    );
+    // One finding, not two: the empty-thread rule is about a result that is meant to
+    // be cached, and this one is not.
+    assert_eq!(report.of(Check::Cacheable).count(), 1, "{report}");
+
+    // Undeclared, the same endpoint is silent — which is exactly why `live` exists.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:clock"), clock());
+    let report = report_of(space);
+    assert!(report.of(Check::Cacheable).next().is_none(), "{report}");
+
+    // Both declarations at once is a contradiction, and says so.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:clock"), clock());
+    let report = Suite::new()
+        .live("clock")
+        .cacheable("clock")
+        .run_blocking(&kernel(space));
+    assert_caught(
+        &report,
+        Check::Cacheable,
+        "declared both cacheable (`Suite::cacheable`) and live (`Suite::live`)",
+    );
+}
+
+// ----- per-check opt-outs -----------------------------------------------------
+
+/// Breaks three rules at once: a full-IRI id (NAMES), a blank node (SKOLEM-RDF)
+/// and an invented `ik:` term (VOCABULARY).
+fn three_violations() -> FnEndpoint {
+    FnEndpoint::new("urn:example:review", |_inv: &Invocation<'_>| {
+        Ok(turtle(
+            "@prefix ik: <https://ikigai-rs.dev/ns#> .\n\
+             <urn:ikigai:endpoint:review> a ik:Endpoint ; ik:quote [ ik:madeUp \"x\" ] .",
+        ))
+    })
+    .with_description(
+        Description::new("urn:example:review")
+            .verb(Verb::Source)
+            .output(TURTLE),
+    )
+}
+
+#[test]
+fn a_per_check_opt_out_silences_one_rule_and_keeps_every_other() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:review"), three_violations());
+    let report = report_of(space);
+    assert_caught(&report, Check::Names, "is not a kebab-case noun");
+    assert_caught(&report, Check::SkolemRdf, "has 1 blank node(s)");
+    assert_caught(&report, Check::Vocabulary, "ns#quote");
+
+    // One rule waived — an invoking one — and the other invoking check on the same
+    // endpoint still runs. `opt_out` would have dropped both.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:review"), three_violations());
+    let report = Suite::new()
+        .opt_out_check(
+            "urn:example:review",
+            Check::Vocabulary,
+            "ik:quote lands in the next vocabulary release; pinned by hand until then",
+        )
+        .run_blocking(&kernel(space));
+    assert!(report.of(Check::Vocabulary).next().is_none(), "{report}");
+    assert_caught(&report, Check::SkolemRdf, "has 1 blank node(s)");
+    assert_caught(&report, Check::Names, "is not a kebab-case noun");
+    assert!(
+        report.to_string().contains(
+            "opted out: urn:example:review VOCABULARY: ik:quote lands in the next vocabulary"
+        ),
+        "the waiver and its reason are in the record:\n{report}"
+    );
+
+    // A description-only check, which nothing else could silence per id.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:review"), three_violations());
+    let report = Suite::new()
+        .opt_out_check(
+            "urn:example:review",
+            Check::Names,
+            "the id is an IRI by contract",
+        )
+        .run_blocking(&kernel(space));
+    assert!(report.of(Check::Names).next().is_none(), "{report}");
+    assert_caught(&report, Check::Vocabulary, "ns#quote");
+
+    // And it is per ENDPOINT: another endpoint breaking the same rule is untouched.
+    let space = EndpointSpace::new()
+        .bind(Exact::new("urn:example:review"), three_violations())
+        .bind(Exact::new("urn:example:blank"), blank_face());
+    let report = Suite::new()
+        .opt_out_check(
+            "urn:example:review",
+            Check::SkolemRdf,
+            "another repo owns the fix",
+        )
+        .run_blocking(&kernel(space));
+    assert!(
+        report
+            .against("urn:example:review")
+            .all(|f| f.check != Check::SkolemRdf),
+        "{report}"
+    );
+    assert!(
+        report
+            .against("blank-graph")
+            .any(|f| f.check == Check::SkolemRdf),
+        "{report}"
+    );
+}
+
+// ----- what was probed ---------------------------------------------------------
+
+#[test]
+fn the_report_names_the_rdf_faces_the_walk_actually_reached() {
+    let empty_graph = FnEndpoint::new("ik-context", |_inv: &Invocation<'_>| {
+        // A JSON-LD *context* document: legitimate, and zero triples.
+        Ok(Representation::new(
+            ReprType::new("application/ld+json"),
+            br#"{"@context": {"@vocab": "https://ikigai-rs.dev/ns#"}}"#.to_vec(),
+        ))
+    })
+    .with_description(
+        Description::new("ik-context")
+            .verb(Verb::Source)
+            .output("application/ld+json"),
+    );
+    let graph = FnEndpoint::new("cms-graph", |_inv: &Invocation<'_>| {
+        Ok(turtle(
+            "<urn:example:doc> <http://purl.org/dc/terms/title> \"t\" .",
+        ))
+    })
+    .with_description(
+        Description::new("cms-graph")
+            .verb(Verb::Source)
+            .output(TURTLE),
+    );
+    let space = EndpointSpace::new()
+        .bind(Exact::new("urn:example:context"), empty_graph)
+        .bind(Exact::new("urn:example:graph"), graph);
+    let report = report_of(space);
+    report.assert_clean();
+    let text = report.to_string();
+    assert!(
+        text.contains("probed 2 RDF face(s) across 2 endpoint(s)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("probed: cms-graph source `text/turtle`: 1 triple(s)"),
+        "{text}"
+    );
+    // A clean pass over an empty graph is vacuous, and the line says so.
+    assert!(
+        text.contains(
+            "probed: ik-context source `application/ld+json`: 0 triple(s) — nothing was checked"
+        ),
+        "{text}"
+    );
+
+    // The whole point: a clean report over an endpoint with no RDF face says so by
+    // printing nothing, and the two are now distinguishable.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
+    let report = Suite::new().pure("upper").run_blocking(&kernel(space));
+    assert!(report.probed.is_empty(), "{report}");
+    assert!(!report.to_string().contains("probed"), "{report}");
+}
+
 // ----- PIPELINE ---------------------------------------------------------------
 
 /// A Sink whose body arrives under a name no pipe will ever use.
