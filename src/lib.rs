@@ -47,6 +47,7 @@
 //! | [`ArgSpecs`](Check::ArgSpecs) | ArgSpecs from day one | ≥1 action per description; every input has an IRI `class`; a `default` ∈ `one_of` when both exist; input names unique per action; every template variable is a declared binding input |
 //! | [`RequiresVerb`](Check::RequiresVerb) | declared = enforced | a `requires` with no verb — a floor `action_specs()` never yields, so the kernel enforces nothing |
 //! | [`Enforced`](Check::Enforced) | declared = enforced | under a capability holding no grants, an action with `requires` is refused with a typed `Denied`; an action declaring nothing is not |
+//! | [`Authority`](Check::Authority) | declared = enforced | the fourth cell of the same probe: a `Sink` or a `Delete` that declares no `requires` and **mutated anyway** under a capability holding no grants — no scope to withhold, so no caller can be given read without write. A `Source` is not in scope; a mutating action refused for some other reason is unprobed, never a finding |
 //! | [`Outputs`](Check::Outputs) | faces are declared | the bare media type the action serves with its minimal inputs (parameters stripped) is one of its declared `outputs` — a wrong declaration hides a face from every consumer that reads outputs, the two RDF checks included |
 //! | [`SkolemRdf`](Check::SkolemRdf) | skolemize; no blank nodes | every declared RDF face ([`rdf::RDF_FACES`]) resolves with minimal inputs, parses, and has no blank node |
 //! | [`Vocabulary`](Check::Vocabulary) | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known ([`rdf::WELL_KNOWN_NAMESPACES`]) or module-registered namespace |
@@ -194,8 +195,9 @@
 //! the first is resolved once more with `as=`; a `Sink` or `Delete` declaring
 //! `content` is fired **once**, by the pipeline probe, and [`Outputs`](Check::Outputs)
 //! reads that same firing; a mutating action without `content` is never fired
-//! under root ([`Enforced`](Check::Enforced) runs under no grants) and is listed as
-//! unprobed. Fixture bindings are per entry, not per verb (see [`Fixture::binding`]).
+//! under root ([`Enforced`](Check::Enforced) and [`Authority`](Check::Authority) run
+//! under no grants, off **one** shared resolution however many of the two are
+//! selected) and is listed as unprobed. Fixture bindings are per entry, not per verb (see [`Fixture::binding`]).
 //!
 //! The kernel's own `urn:kernel:*` operations are listed by [`Kernel::entries`] but
 //! are core's, not the module's; the walk skips them unless

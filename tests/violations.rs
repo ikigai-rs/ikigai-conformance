@@ -810,6 +810,23 @@ fn notes_write() -> FnEndpoint {
     .with_description(
         Description::new("notes-write")
             .verb(Verb::Sink)
+            // Gated, because a write is: without this the fixture trips AUTHORITY
+            // and the tests below stop being about what they are about.
+            .requires("urn:cap:notes:write")
+            .input(ArgSpec::new("content").class(XSD_STRING))
+            .output("text/plain"),
+    )
+}
+
+/// The same write with nothing in front of it — a `Sink` any caller can perform.
+fn notes_write_ungated() -> FnEndpoint {
+    FnEndpoint::new("notes-write", |inv: &Invocation<'_>| {
+        let _ = inv.inline_str("content")?;
+        Ok(text("written"))
+    })
+    .with_description(
+        Description::new("notes-write")
+            .verb(Verb::Sink)
             .input(ArgSpec::new("content").class(XSD_STRING))
             .output("text/plain"),
     )
@@ -1516,4 +1533,87 @@ fn the_kernels_own_operations_are_skipped_unless_asked() {
             .any(|f| f.endpoint.starts_with("kernel-")),
         "{included}"
     );
+}
+
+#[test]
+fn authority_catches_a_write_a_caller_holding_nothing_performed() {
+    // The fourth cell ENFORCED leaves open: declares nothing, and resolved anyway.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:notes"), notes_write_ungated());
+    let report = Suite::new().run_blocking(&kernel(space));
+    assert_caught(
+        &report,
+        Check::Authority,
+        "mutated under a capability holding no grants",
+    );
+    // ENFORCED is silent on it — that silence is why this check exists.
+    assert!(
+        report.of(Check::Enforced).next().is_none(),
+        "ENFORCED says nothing about the fourth cell:\n{report}"
+    );
+
+    // Declare the scope and the finding goes: the kernel refuses the ungranted
+    // caller, so there is a write to withhold.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:notes"), notes_write());
+    let report = Suite::new().run_blocking(&kernel(space));
+    assert!(report.is_clean(), "{report}");
+
+    // A public READ is not this check's business, declared or not.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
+    let report = Suite::new().pure("upper").run_blocking(&kernel(space));
+    assert!(
+        report.of(Check::Authority).next().is_none(),
+        "a Source declaring no capability is a decision, not a defect:\n{report}"
+    );
+}
+
+#[test]
+fn an_unobserved_mutation_is_unprobed_rather_than_a_pass() {
+    // A Sink that declares nothing and refuses the minimal call for an unrelated
+    // reason. Nothing was learned about what an ungranted caller can do through it,
+    // and the silent version of that reads exactly like a clean endpoint.
+    let picky = FnEndpoint::new("notes-strict", |inv: &Invocation<'_>| {
+        let body = inv.inline_str("content")?;
+        if !body.starts_with('{') {
+            return Err(Error::InvalidArgument {
+                name: "content".into(),
+                detail: "not a JSON object".into(),
+            });
+        }
+        Ok(text("written"))
+    })
+    .with_description(
+        Description::new("notes-strict")
+            .verb(Verb::Sink)
+            .input(ArgSpec::new("content").class(XSD_STRING))
+            .output("text/plain"),
+    );
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:strict"), picky);
+    let report = Suite::new()
+        .opt_out_check(
+            "notes-strict",
+            Check::Pipeline,
+            "reads a shape, not a value",
+        )
+        .opt_out_check("notes-strict", Check::Outputs, "never fired")
+        .run_blocking(&kernel(space));
+    assert!(
+        report.of(Check::Authority).next().is_none(),
+        "an unobserved probe is not a violation:\n{report}"
+    );
+    assert!(
+        report.to_string().contains(
+            "unprobed: notes-strict sink AUTHORITY: declares no `requires` and did not resolve"
+        ),
+        "the walk must say what it did not see:\n{report}"
+    );
+}
+
+#[test]
+fn waiving_authority_where_nothing_mutates_is_reported_as_inert() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
+    let report = Suite::new()
+        .pure("upper")
+        .opt_out_check("upper", Check::Authority, "reads only")
+        .run_blocking(&kernel(space));
+    assert_caught(&report, Check::Declarations, "declares no mutating verb");
 }
