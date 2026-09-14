@@ -577,9 +577,11 @@ impl Suite {
                     spec: &spec,
                     minimal: None,
                     fired: None,
+                    no_grants: None,
                     failure_reported: false,
                 };
                 action.enforced(&mut report).await;
+                action.authority(&mut report).await;
                 action.rdf_faces(&mut report, &mut coverage).await;
                 action.cacheable(&mut report, &mut coverage).await;
                 action.pipeline(&mut report).await;
@@ -711,6 +713,13 @@ impl Suite {
                 Some(format!(
                     "it declares no cacheable verb ({}), and CACHEABLE returns early on a \
                      mutating one",
+                    verb_list(&coverage.verbs_of(id))
+                ))
+            }
+            Check::Authority if !coverage.verbs_of(id).iter().any(|v| v.is_mutating()) => {
+                Some(format!(
+                    "it declares no mutating verb ({}), and AUTHORITY looks only at what a \
+                     `Sink` or a `Delete` did under no grants",
                     verb_list(&coverage.verbs_of(id))
                 ))
             }
@@ -1274,6 +1283,9 @@ struct Action<'a> {
     spec: &'a ActionSpec,
     minimal: Option<Result<(Representation, Vec<TraceEvent>), Error>>,
     fired: Option<Result<Representation, Error>>,
+    /// What the action did under a capability holding no grants. ENFORCED and
+    /// AUTHORITY read the same one resolution: two probes would fire a Sink twice.
+    no_grants: Option<Result<Representation, Error>>,
     failure_reported: bool,
 }
 
@@ -1337,13 +1349,26 @@ impl Action<'_> {
 
     // ----- ENFORCED -----------------------------------------------------------
 
-    async fn enforced(&mut self, report: &mut Report) {
-        if !self.runs(Check::Enforced) {
-            return;
+    /// Resolve with minimal inputs under a capability holding NO grants, memoized.
+    /// ENFORCED asks what a declared scope did; AUTHORITY asks what an undeclared
+    /// one let through. One resolution answers both, and a mutating action is fired
+    /// here exactly once however many of the two are selected.
+    async fn probe_no_grants(&mut self) -> Result<Representation, Error> {
+        if let Some(memo) = &self.no_grants {
+            return memo.clone();
         }
         let args = self.suite.args_for(self.id, self.spec);
         let none = Capability::scoped(Vec::<String>::new());
         let result = self.kernel.issue(self.request(&args), &none).await;
+        self.no_grants = Some(result.clone());
+        result
+    }
+
+    async fn enforced(&mut self, report: &mut Report) {
+        if !self.runs(Check::Enforced) {
+            return;
+        }
+        let result = self.probe_no_grants().await;
         if !self.spec.requires.is_empty() {
             match result {
                 Ok(_) => report.findings.push(self.finding(
@@ -1372,6 +1397,53 @@ impl Action<'_> {
                      an enforced scope the manifold does not declare — it over-offers"
                 ),
             ));
+        }
+    }
+
+    // ----- AUTHORITY ----------------------------------------------------------
+
+    /// A mutation that a caller holding no authority at all performed.
+    ///
+    /// ENFORCED walks three cells of a 2x2 — declares and is refused (silent),
+    /// declares and resolves (a finding), declares nothing and is refused (a
+    /// finding: an enforced scope the manifold hides). The fourth cell, declares
+    /// nothing and resolves, is correct for a `Source`: a public read is a decision
+    /// a module makes. For a `Sink` or a `Delete` it is the hole this check closes.
+    /// Nothing gates the write, so nothing can be withheld: a party that should
+    /// read and report cannot be given read alone, because read is all there is.
+    ///
+    /// Evidence, not declaration. A mutating action declaring nothing that fails
+    /// under no grants for an unrelated reason is recorded as unprobed — what an
+    /// ungranted caller could do through it was not observed, and an unobserved
+    /// probe must not read as a pass.
+    async fn authority(&mut self, report: &mut Report) {
+        if !self.runs(Check::Authority) || !self.spec.verb.is_mutating() {
+            return;
+        }
+        // A declared scope is ENFORCED's half, in both directions.
+        if !self.spec.requires.is_empty() {
+            return;
+        }
+        match self.probe_no_grants().await {
+            Ok(_) => report.findings.push(self.finding(
+                Check::Authority,
+                "declares no `requires` and mutated under a capability holding no grants: \
+                 authority over this write cannot be withheld from anyone who can reach the \
+                 endpoint, so no caller can be given read without also getting write. Declare \
+                 the scope it should require (`.requires(\"urn:cap:…\")` on the action, \
+                 enforced by the kernel), or waive it with the reason it is deliberately open",
+            )),
+            // Refused while declaring nothing: ENFORCED's over-offer finding, not this one.
+            Err(Error::Denied(_)) => {}
+            Err(err) => self.unprobed(
+                report,
+                Check::Authority,
+                format!(
+                    "declares no `requires` and did not resolve under no grants ({err}), so \
+                     whether an ungranted caller can mutate through it was not observed: \
+                     supply a `Fixture` with inputs that work, or say why it is open"
+                ),
+            ),
         }
     }
 
@@ -1719,6 +1791,7 @@ impl Action<'_> {
             None => {
                 self.unprobed(
                     report,
+                    Check::Outputs,
                     "never fired under root: a mutating action is fired only by the pipeline \
                      probe (PIPELINE, on an action declaring `content`), so what it serves was \
                      not observed",
@@ -1729,6 +1802,7 @@ impl Action<'_> {
                 self.report_failure(Check::Outputs, &err, report);
                 self.unprobed(
                     report,
+                    Check::Outputs,
                     "the minimal resolution failed, so nothing was served",
                 );
                 return;
@@ -1753,6 +1827,7 @@ impl Action<'_> {
             if label == got {
                 self.unprobed(
                     report,
+                    Check::Outputs,
                     format!(
                         "served the caller's `as={got}` label; the endpoint's own choice of \
                          face was not observed"
@@ -1781,11 +1856,11 @@ impl Action<'_> {
         report.findings.push(self.finding(Check::Outputs, detail));
     }
 
-    fn unprobed(&self, report: &mut Report, reason: impl Into<String>) {
+    fn unprobed(&self, report: &mut Report, check: Check, reason: impl Into<String>) {
         report.unprobed.push(Unprobed {
             endpoint: self.id.to_string(),
             verb: self.spec.verb,
-            check: Check::Outputs,
+            check,
             reason: reason.into(),
         });
     }

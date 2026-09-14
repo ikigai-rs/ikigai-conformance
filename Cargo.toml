@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-conformance"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "What \"done\" means for an ikigai module, as one test: walks every endpoint a kernel binds and reports every violation of the module recipe at once — ArgSpec completeness, requires implies a verb, declared = enforced, declared outputs = served outputs, skolemized RDF faces, vocabulary terms only, the cacheable-twice probe, pipeline citizenship — and says what it did NOT do: what it probed, what it could not, and which of your own declarations reached no check at all."

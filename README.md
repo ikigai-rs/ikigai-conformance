@@ -23,7 +23,7 @@ cms-graph  VOCABULARY  source: the `text/turtle` face uses `https://ikigai-rs.de
 sparql-construct  OUTPUTS  source: served `text/turtle` with its minimal inputs but declares only `application/sparql-results+json`: a face the manifold does not announce and the RDF checks never saw — declare it (`.output("text/turtle")`) or serve what is declared
 link-remove  DECLARATIONS  declared live (`Suite::live`) but nothing held it to it: it declares no cacheable verb (it declares delete), and CACHEABLE returns early on a mutating one. The report prints `declared live: link-remove`, which reads as a check that ran
 7 finding(s) across 4 endpoint(s), 4 action(s)
-checked: ARGSPECS REQUIRES-VERB ENFORCED OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE NAMES DECLARATIONS
+checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE NAMES DECLARATIONS
 probed 3 face(s) across 3 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
 probed: ik-context source `application/ld+json`: 0 triple(s) — nothing was checked
@@ -55,6 +55,7 @@ pointing at the check.
 | `ARGSPECS` | ArgSpecs from day one | at least one action per description; every input has an IRI `class`; a `default` is one of the `one_of` values when both exist; input names unique per action; every template variable (`urn:file:{path}`) is a declared `.binding()` input |
 | `REQUIRES-VERB` | declared = enforced | a `requires` with no verb — a floor `action_specs()` never yields, so the kernel enforces nothing, silently |
 | `ENFORCED` | declared = enforced | under a capability holding no grants, every action with a `requires` is refused with a typed `Denied`; an action declaring nothing is not (an undeclared enforced scope makes the manifold over-offer) |
+| `AUTHORITY` | declared = enforced | the fourth cell of `ENFORCED`'s own probe: a `Sink` or a `Delete` that declares no `requires` and **mutated anyway** under a capability holding no grants. Nothing gates the write, so nothing can be withheld — a party that should read and report cannot be given read alone, because read is all there is. A `Source` is not in scope (a public read is a decision a module makes); a mutating action refused for some *other* reason is recorded as `unprobed`, never as a finding, because what an ungranted caller could do through it was not observed |
 | `OUTPUTS` | faces are declared | the bare media type the action serves with its minimal inputs (`;charset=` and other parameters stripped, no `as=`) is one of its declared `outputs`. A wrong declaration hides a face from every consumer that reads outputs — `SKOLEM-RDF` and `VOCABULARY` included, which filter the declaration for RDF faces before probing; linkeddata's `sparql-construct` declared only `application/sparql-results+json` over Turtle for its whole life and the RDF checks saw nothing. What the check cannot observe (a mutating action never fired under root, a failed minimal resolution, a caller's `as=` label) is printed as `unprobed`, never as a finding |
 | `SKOLEM-RDF` | skolemize; no blank nodes | every declared RDF face (`text/turtle`, `application/ld+json`, `application/rdf+xml`, N-Triples, N-Quads, TriG) resolves with the smallest inputs its ArgSpecs allow, parses, and has no blank node |
 | `VOCABULARY` | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known namespace (rdf, rdfs, xsd, owl, dcterms, foaf, schema, prov, ical, skos, sh) or one the module registers. Because it parses, it also reports an unresolvable, mislabeled or malformed face — under its own name when `SKOLEM-RDF` is not selected, so `VOCABULARY` alone proves a hand-written `@prefix` line is well-formed |
@@ -171,7 +172,7 @@ not reach as loudly as what it found.
 
 ```
 0 finding(s) across 6 endpoint(s), 9 action(s)
-checked: ARGSPECS REQUIRES-VERB ENFORCED OUTPUTS* SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE NAMES DECLARATIONS
+checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS* SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE NAMES DECLARATIONS
 * OUTPUTS ran on 1 of 6 endpoint(s); waived on the rest (see `opted out:`)
 probed 7 face(s) across 5 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
@@ -294,7 +295,12 @@ the RDF checks stayed silent and `OUTPUTS` did not; for `live`, one endpoint the
 kernel returns cacheable and one it returns `Always`, asserting the declaration is
 what separates them; for `opt_out_check`, one endpoint breaking three rules at
 once, asserting a waiver of one leaves the other two reported — and one endpoint
-that breaks nothing, asserting the suite is clean on it. Every `DECLARATIONS`
+that breaks nothing, asserting the suite is clean on it. `AUTHORITY` is proved on
+four fronts, because three of them are silences: an ungated `Sink` is caught
+while `ENFORCED` says nothing about it, the same `Sink` with a declared scope is
+clean, a `Source` declaring no capability is untouched, and a mutating action
+that refuses the minimal call for an unrelated reason produces an `unprobed:`
+line rather than a pass. Every `DECLARATIONS`
 case is falsified the same way — a `live` on a `Sink`, a fixture for an id
 nothing binds, a binding naming no template variable, a waiver for a check that
 could not run, a namespace covering nothing — each asserting the silence is gone,
@@ -306,8 +312,46 @@ cacheable pure functions nobody declared pure — and nothing else.
 
 ## Status
 
-0.2.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.3.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.2.0 → 0.3.0: `AUTHORITY`, and what it will find
+
+One new check, on by default, so this is a minor bump for the same reason 0.2.0
+was: a new default-on check produces new findings across the fleet, and a patch
+would be swallowed silently by every caret pin. `Check::ALL` also grew from
+`[Check; 10]` to `[Check; 11]`, which only matters to code that binds it to a
+sized array.
+
+**What `AUTHORITY` is.** `ENFORCED` walks a 2x2 — declared or not, refused or
+not — and reports three of the four cells. The fourth, *declares nothing and
+resolved anyway*, is correct for a `Source`: serving a public read is a decision
+a module gets to make. For a `Sink` or a `Delete` it is a hole. The write
+happened for a caller holding nothing, so there is no scope to withhold from
+anyone, and read and write cannot be told apart on that action: a sub-agent that
+should read state and report a verdict cannot be handed read alone, because read
+is all the manifold has. That invariant is usually written down as a sentence
+asking the other party not to write. A capability is the same sentence the kernel
+enforces, and this check is whether the module left one there to enforce.
+
+**What to expect.** It fires only on evidence — a mutating action that declares
+nothing **and resolved** under a capability holding no grants. Against the live
+host at the time of writing, 4 of 26 mutating actions declare no capability, and
+the ones that resolve are the finding. Two shapes come up:
+
+- **A demo, a scratch buffer, a test double.** Waive it and the reason is in the
+  record: `opt_out_check(id, Check::Authority, "in-process demo state")`.
+- **A real write nobody gated.** Declare the scope on the action
+  (`.requires("urn:cap:…")`); the kernel enforces declared scopes, so the same
+  edit makes the check silent and the write refusable.
+
+An action that declares nothing and is refused for some other reason is neither:
+it is an `unprobed:` line naming what the walk could not see, because a probe
+that silently matched nothing reads exactly like a pass.
+
+**No new footprint.** `ENFORCED` already issued this resolution; both checks now
+read one shared no-grants probe, so a `Sink` is fired there exactly once
+regardless of which of the two you select.
 
 ### 0.1.1 → 0.2.0: a deliberate bump, and it may turn your green suite red
 

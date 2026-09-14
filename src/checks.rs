@@ -21,6 +21,18 @@ pub enum Check {
     /// is refused with a typed `Denied` under a capability holding no grants; an
     /// action declaring nothing is not.
     Enforced,
+    /// **A mutation no authority gated.** The fourth cell of the same 2x2
+    /// [`Enforced`](Check::Enforced) walks: a `Sink` or a `Delete` that declares no
+    /// `requires` and **resolved anyway** under a capability holding no grants. The
+    /// write happened for a caller who held nothing, so there is no scope to withhold
+    /// from anyone — read and write cannot be told apart on that action, and no
+    /// caller can be given one without the other.
+    ///
+    /// A `Source` is not in scope: a public read is a decision a module gets to make.
+    /// Evidence, not declaration — a mutating action that declares nothing and is
+    /// refused for some *other* reason is recorded as unprobed, never as a finding,
+    /// because what an ungranted caller can do through it was not observed.
+    Authority,
     /// **Declared outputs = served outputs.** The bare media type of the minimal
     /// resolution (parameters such as `;charset=` stripped) is one of the action's
     /// declared `outputs`. A wrong declaration hides a face from every consumer that
@@ -83,10 +95,11 @@ pub enum Check {
 
 impl Check {
     /// Every check, in report order.
-    pub const ALL: [Check; 10] = [
+    pub const ALL: [Check; 11] = [
         Check::ArgSpecs,
         Check::RequiresVerb,
         Check::Enforced,
+        Check::Authority,
         Check::Outputs,
         Check::SkolemRdf,
         Check::Vocabulary,
@@ -102,6 +115,7 @@ impl Check {
             Check::ArgSpecs => "ARGSPECS",
             Check::RequiresVerb => "REQUIRES-VERB",
             Check::Enforced => "ENFORCED",
+            Check::Authority => "AUTHORITY",
             Check::Outputs => "OUTPUTS",
             Check::SkolemRdf => "SKOLEM-RDF",
             Check::Vocabulary => "VOCABULARY",
@@ -118,6 +132,7 @@ impl Check {
         matches!(
             self,
             Check::Enforced
+                | Check::Authority
                 | Check::Outputs
                 | Check::SkolemRdf
                 | Check::Vocabulary
@@ -165,6 +180,8 @@ impl Checks {
     pub const REQUIRES_VERB: Checks = Checks(1 << (Check::RequiresVerb as u16));
     /// [`Check::Enforced`].
     pub const ENFORCED: Checks = Checks(1 << (Check::Enforced as u16));
+    /// [`Check::Authority`].
+    pub const AUTHORITY: Checks = Checks(1 << (Check::Authority as u16));
     /// [`Check::Outputs`].
     pub const OUTPUTS: Checks = Checks(1 << (Check::Outputs as u16));
     /// [`Check::SkolemRdf`].
@@ -293,8 +310,8 @@ mod tests {
 
     #[test]
     fn every_check_has_its_own_bit() {
-        // Ten checks no longer fit a u8; a shared bit would make one check select
-        // another silently.
+        // Eleven checks no longer fit a u8; a shared bit would make one check
+        // select another silently.
         let mut bits: Vec<u16> = Check::ALL.iter().map(|c| c.bit()).collect();
         bits.sort_unstable();
         bits.dedup();
