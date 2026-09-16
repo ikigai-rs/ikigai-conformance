@@ -63,6 +63,24 @@ pub struct OptedOut {
     pub reason: String,
 }
 
+/// One BINDING excluded from the invoking checks, with the reason the module gave
+/// ([`Suite::opt_out_at`](crate::Suite::opt_out_at)).
+///
+/// The scope [`OptedOut`] cannot express: an id is not a unique name for a thing
+/// that can be fired, so two entries sharing one description — `urn:file:{path}`
+/// jailed to a scratch root and `urn:orgfile:{path}` jailed to whatever the config
+/// names — are excluded together or not at all. A pattern names exactly one place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OptedOutAt {
+    /// The bound pattern, exactly as [`SpaceEntry::pattern`](ikigai_core::SpaceEntry)
+    /// reports it.
+    pub pattern: String,
+    /// The verb opted out, or every verb.
+    pub verb: Option<Verb>,
+    /// Why — printed in the report, for the same reason [`OptedOut`]'s is.
+    pub reason: String,
+}
+
 /// One check excluded for one endpoint, with the reason the module gave — the
 /// per-rule waiver ([`Suite::opt_out_check`](crate::Suite::opt_out_check)), as
 /// opposed to [`OptedOut`], which drops every invoking check at once.
@@ -104,6 +122,27 @@ pub struct Probed {
     pub triples: usize,
     /// How many bytes were served — the evidence for a face no check parses.
     pub bytes: usize,
+}
+
+/// Two or more bindings that would have issued the IDENTICAL request, fired once.
+///
+/// The invoking checks are memoized on the request they would issue — verb, target
+/// IRI and arguments — so a space that lists one binding twice (an overlay that
+/// concatenates its targets' entries) probes it once instead of firing every
+/// mutating action twice against the state the first firing left. Without this line
+/// the collapse is invisible: the report simply counted fewer actions than there
+/// were bindings, and could not say the second five were the same five again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Collapsed {
+    /// The endpoint's description id.
+    pub endpoint: String,
+    /// The action's verb.
+    pub verb: Verb,
+    /// The target IRI every one of these bindings resolved the walk to.
+    pub target: String,
+    /// The bound patterns that produced it, in walk order — repeated verbatim when
+    /// a space listed one pattern more than once, which is what that duplication is.
+    pub patterns: Vec<String>,
 }
 
 /// One action a check could not observe, with the reason — printed so a clean
@@ -154,9 +193,11 @@ pub struct Report {
     /// patterns binding one endpoint (`urn:a11y:config` and
     /// `urn:a11y:config:{app}`) count once.
     pub endpoints: usize,
-    /// How many actions were examined: one per bound ENTRY per verb, so the two
-    /// patterns above count their verbs twice — each is a place the action can be
-    /// reached, with its own template variables.
+    /// How many actions were examined: one per distinct FIRING — the request the
+    /// walk would issue (verb, target IRI, arguments) — so the two patterns above
+    /// count their verbs twice (they resolve to different IRIs, each a place the
+    /// action can be reached), while a space that lists one binding twice counts it
+    /// once and says so in [`collapsed`](Self::collapsed).
     pub actions: usize,
     /// The checks that ran.
     pub checks: Checks,
@@ -166,7 +207,12 @@ pub struct Report {
     pub declared: Box<Declarations>,
     /// The actions a check could not observe, with reasons — the gaps in the
     /// walk's coverage, printed beside the findings (`unprobed: …`).
-    pub unprobed: Vec<Unprobed>,
+    ///
+    /// Boxed for the same size reason [`walked`](Self::walked) gives — `Report` is
+    /// the `Err` of [`check`](crate::check) and travels by value. It derefs to the
+    /// `Vec`, so `push`, `len`, `is_empty` and `iter` read exactly as before; only a
+    /// bare `for u in &report.unprobed` needs `.iter()`.
+    pub unprobed: Box<Vec<Unprobed>>,
     /// The faces the walk actually reached and served (`probed: …`) — so a
     /// first-run clean report carries positive evidence of coverage rather than
     /// only the absence of findings.
@@ -181,6 +227,10 @@ pub struct Report {
     /// (a `Vec` here puts it exactly AT the 128-byte threshold, which the lint
     /// rejects).
     pub walked: Box<[String]>,
+    /// The bindings that would have issued the identical request, fired once —
+    /// empty for a module no binding of which is reachable twice. A boxed slice for
+    /// the reason [`walked`](Self::walked) gives.
+    pub collapsed: Box<[Collapsed]>,
 }
 
 /// What a module declared when it configured the [`Suite`](crate::Suite),
@@ -189,6 +239,10 @@ pub struct Report {
 pub struct Declarations {
     /// The actions the module opted out of the invoking checks, with reasons.
     pub opted_out: Vec<OptedOut>,
+    /// The single BINDINGS the module opted out of the invoking checks, with
+    /// reasons ([`Suite::opt_out_at`](crate::Suite::opt_out_at)) — the scope
+    /// [`opted_out`](Self::opted_out) cannot express.
+    pub opted_out_at: Vec<OptedOutAt>,
     /// The single checks the module waived per endpoint, with reasons
     /// ([`Suite::opt_out_check`](crate::Suite::opt_out_check)).
     pub opted_out_checks: Vec<OptedOutCheck>,
@@ -383,6 +437,18 @@ impl fmt::Display for Report {
                 None => writeln!(f, "opted out: {}: {}", out.endpoint, out.reason)?,
             }
         }
+        for out in &declared.opted_out_at {
+            match out.verb {
+                Some(verb) => writeln!(
+                    f,
+                    "opted out at: `{}` {}: {}",
+                    out.pattern,
+                    verb_name(verb),
+                    out.reason
+                )?,
+                None => writeln!(f, "opted out at: `{}`: {}", out.pattern, out.reason)?,
+            }
+        }
         // Grouped by (check, reason): one honest waiver of one check across five
         // endpoints printed its reason verbatim five times and buried every other
         // line of a six-endpoint report. One id reads exactly as it did before.
@@ -421,7 +487,25 @@ impl fmt::Display for Report {
         for fixture in &declared.fixtures {
             writeln!(f, "fixture: {fixture}")?;
         }
-        for u in &self.unprobed {
+        // A collapse is coverage information, not a finding: it says the walk fired
+        // once where the space offered the same request more than once, and names
+        // the bindings so a reader can see the duplication is the SPACE's.
+        for c in self.collapsed.iter() {
+            writeln!(
+                f,
+                "collapsed: {} {} <{}>: {} binding(s) issue the identical request ({}) — fired once",
+                c.endpoint,
+                verb_name(c.verb),
+                c.target,
+                c.patterns.len(),
+                c.patterns
+                    .iter()
+                    .map(|p| format!("`{p}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )?;
+        }
+        for u in self.unprobed.iter() {
             writeln!(
                 f,
                 "unprobed: {} {} {}: {}",
@@ -469,12 +553,18 @@ mod tests {
             endpoints: 2,
             actions: 3,
             walked: vec!["cms-graph".to_string(), "ik-context".to_string()].into_boxed_slice(),
+            collapsed: Box::default(),
             checks: Checks::all() - Checks::RDF,
             declared: Box::new(Declarations {
                 opted_out: vec![OptedOut {
                     endpoint: "email-send".into(),
                     verb: Some(Verb::Sink),
                     reason: "sends real mail".into(),
+                }],
+                opted_out_at: vec![OptedOutAt {
+                    pattern: "urn:orgfile:{path}".into(),
+                    verb: None,
+                    reason: "jailed to the configured org_dir".into(),
                 }],
                 opted_out_checks: vec![OptedOutCheck {
                     endpoint: "browse-review".into(),
@@ -492,12 +582,12 @@ mod tests {
                         "a body that is long enough to be cut short in the report",
                     )],
             }),
-            unprobed: vec![Unprobed {
+            unprobed: Box::new(vec![Unprobed {
                 endpoint: "notes-delete".into(),
                 verb: Verb::Delete,
                 check: Check::Outputs,
                 reason: "never fired under root".into(),
-            }],
+            }]),
             probed: vec![
                 Probed {
                     endpoint: "cms-graph".into(),

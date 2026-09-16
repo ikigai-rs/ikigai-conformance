@@ -90,6 +90,7 @@ Suite::new()
     .fixture(Fixture::new("jsonld-expand", Verb::Source).arg("content", "{}"))
     .fixture(Fixture::new("file", Verb::Source).binding("path", "README.md"))
     .opt_out("email-send", Some(Verb::Sink), "sends real mail")
+    .opt_out_at("urn:orgfile:{path}", None, "jailed to a configured dir")
     .opt_out_check("review", Check::Vocabulary, "ik:quote lands in vocab 0.1.70")
     .namespace("https://example.org/cms#")   // a vocabulary this module serves
     .pure("wc")                              // a pure function: no thread expected
@@ -128,6 +129,18 @@ description-only checks (`NAMES`, `ARGSPECS`) nothing else can silence per id.
 Identical `(check, reason)` waivers print on one line listing their ids, and the
 `checked:` line stars a check that ran on only some endpoints.
 
+**A `Description::id` is a name for a KIND of endpoint, not for a place one can be
+reached** — so `opt_out` excludes an id at *every* pattern it is bound at, and that
+is sometimes exactly wrong. `ikigai-cli` binds `ikigai_fs::FileEndpoint` twice:
+`urn:file:{path}`, jailed to a scratch root and safe to fire, and
+`urn:orgfile:{path}`, jailed to whatever `calendar.json` names — which with no config
+at all is the EMPTY path, i.e. the process's own working directory. Both describe as
+`file`. `opt_out("file", …)` takes the safe one down with the dangerous one and the
+walk loses coverage it was right to have. `opt_out_at(pattern, verb, reason)` names
+**one binding**: the pattern exactly as the space reports it, the template and not an
+expanded IRI (`urn:file:{path}`, never `urn:file:x`). One that excluded nothing is a
+`DECLARATIONS` finding that prints the patterns the walk did reach.
+
 Where the waiver can be made exact, prefer that: **`ikigai_conformance::rdf` is
 public**, and `rdf::parse` + `rdf::terms` + `rdf::is_defined` reproduce
 `VOCABULARY` exactly. A module can pin its undefined terms as an EXACT list that
@@ -136,24 +149,56 @@ missing terms land, which makes the waiver self-destructing. That is strictly
 better than `Suite::namespace` for a module's own namespace: a registration waives
 every term under it forever, including the next one somebody invents.
 
-**What a walk fires, under root** — the footprint a fixture author can count on:
-a `Source` or `Exists` is resolved once (twice when cacheable; the second is the
-cache probe), each declared RDF face beyond the first is resolved once more with
-`as=`, and a `Sink` or `Delete` declaring `content` is fired **once**, by the
-pipeline probe — `OUTPUTS` reads that same firing rather than making another. A
-mutating action without `content` is never fired under root (`ENFORCED` runs
-under no grants and, when the gate is declared, never reaches the endpoint); the
-report lists it as `unprobed`. Sinks land: capture what a fixture reads before the
-walk and assert effects after it.
+**What a walk fires, under root** — the footprint a fixture author can count on.
+It is stated **per FIRING, and a firing is a request**: the verb, the target IRI,
+and the arguments. Per firing: a `Source` or `Exists` is resolved once (twice when
+cacheable; the second is the cache probe), each declared RDF face beyond the first
+is resolved once more with `as=`, and a `Sink` or `Delete` declaring `content` is
+fired **once**, by the pipeline probe — `OUTPUTS` reads that same firing rather than
+making another. A mutating action without `content` is never fired under root
+(`ENFORCED` runs under no grants and, when the gate is declared, never reaches the
+endpoint); the report lists it as `unprobed`. Sinks land: capture what a fixture
+reads before the walk and assert effects after it.
+
+**An endpoint bound N times is fired once per DISTINCT request those bindings
+produce, not N times.** The invoking checks are memoized on the request, because
+that is the only identity the walk can compute that means "the same firing": two
+bindings agreeing on it agree on every byte the walk would send, so firing the
+second can differ from firing the first only in the state the first one left. What
+follows, and the reasoning is worth having in front of you when a walk surprises
+you:
+
+- **Two bindings, identical request** — a space that lists one binding twice, which
+  is what an overlay concatenating its targets' entries produces (`ikigai-throttle`'s
+  `Failover`: two spaces over ONE state). Fired **once**, counted once in
+  `Report.actions`, and named on a `collapsed:` line, because a smaller action count
+  with no explanation is not an explanation. The duplication there is in the SPACE's
+  enumeration and not in the descriptions, so nothing keyed on a description could
+  have seen it at all.
+- **Two bindings, different IRIs** — two requests, **both probed**. This is not a
+  concession, it is the point: two entries can share a `Description` and be two
+  instances over different state (the `file` / `orgfile` pair above), and collapsing
+  them by id would either leave the dangerous one unprobed under a green report or
+  fire it and lose the safe one's coverage. Both are worse than firing twice.
+- **An alias spelled as a second binding** — `urn:iki:ledger:append` beside
+  `urn:iki:ledger:{name}:append` are two IRIs, so the walk probes both. **That is the
+  kernel's own reckoning, not the suite's**: two bindings are two cache entries and
+  two golden threads, so a `Sink` through one spelling does not invalidate a cached
+  read of the other. If the two really are one resource, say so where the kernel can
+  see it — **one `Grammar` matching both spellings** (`ikigai-ledger`'s answer), or
+  core's `Alias`. If they are meant to stay two and you want only one probed, name
+  the binding with `opt_out_at`.
 
 **Fixture bindings are per entry, not per verb.** Every action of an entry
 resolves the same IRI, so the verb on a binding-only fixture is ignored (the first
 fixture for the id that binds the variable wins); arguments are per `(id, verb)`.
 
 **Counts.** `Report.endpoints` counts distinct description ids; `Report.actions`
-counts one per bound entry per verb — `urn:a11y:config` and
-`urn:a11y:config:{app}` sharing one description are one endpoint and, with one
-`Source` each, two actions. `Report.walked` is that first count BY NAME, in walk
+counts one per distinct FIRING — `urn:a11y:config` and `urn:a11y:config:{app}`
+sharing one description are one endpoint and, with one `Source` each, two actions,
+because they resolve to different IRIs. Two bindings that resolve to the SAME IRI
+with the same arguments are one action, and `Report.collapsed` names them.
+`Report.walked` is that first count BY NAME, in walk
 order, so a test can assert the walk reached exactly the endpoints the module
 means to bind (an endpoint that stops being bound is otherwise a report that gets
 *cleaner*).
@@ -190,6 +235,9 @@ unprobed: notes-delete delete OUTPUTS: never fired under root
   printing no section: a module with no graph face used to be indistinguishable
   from a walk that reached nothing.
 - **`unprobed:`** — the actions a check could not observe, with the reason.
+- **`collapsed:`** — bindings that would have issued the identical request, fired
+  once, named so the smaller action count is an explanation rather than a mystery.
+  Nothing was skipped: the second binding was the first one again.
 - **`checked:`** — a starred check ran on some endpoints and is waived on others,
   with the count on its own line. A check waived on five of six endpoints used to
   read as a check that ran. Identical waivers are grouped: one `(check, reason)`
@@ -283,6 +331,17 @@ Honest residue — what no check here can see:
   `Description` spelling in core (`outputs` is a closed list), so `OUTPUTS` reports
   whatever the fixture's origin serves; such a module subtracts `Checks::OUTPUTS`
   and says why.
+- **Whether two DIFFERENT requests reach the same state.** Firing identity is the
+  request, and that is exactly as much as the walk can know: the state behind an
+  endpoint is not observable from the space at all. Two bindings of one endpoint over
+  one store, an overlay that fans out to mirrors, a jail root two templates share —
+  all of those are one state under two names, and nothing in `Kernel::entries()` says
+  so (it hands back pattern strings and an endpoint NAME; two instances of one type
+  report the same name, and pointer identity is not exposed). Core has the concept —
+  an `Alias` reports a canonical, and the kernel keys its cache and its threads on
+  it — but `Kernel::canonicalize` is private, so a walk cannot ask before it fires.
+  Until it can, a module that means two spellings to be one resource says so with one
+  `Grammar` matching both, and the suite probes what the kernel treats as two.
 - Reading through the kernel rather than `std::fs` (a lint, not a test); where a
   fix belongs; when in doubt, don't cache.
 
@@ -310,10 +369,73 @@ the whole point. `tests/builtins.rs` runs the suite against
 and pins the exact findings: three untyped inputs, two pre-convention ids, three
 cacheable pure functions nobody declared pure — and nothing else.
 
+**Firing identity is proved by COUNTING FIRINGS, not by asserting an outcome** — an
+outcome test passes for the wrong reason the moment the endpoint's state is
+idempotent, which is exactly when a returning double-fire stops being visible. A
+`Sink` holding an `AtomicUsize` is bound behind a space that lists its entries twice
+(the `Failover` shape) and must be fired **once**; the same `Sink` is bound as two
+separate instances sharing one `Description::id` and each must be fired **once**,
+which is the assertion that fails — `(1, 0)`, under a clean green report — the moment
+anyone memoizes by id.
+
 ## Status
 
-0.3.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.4.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.3.0 → 0.4.0: the walk fires once per REQUEST, and it may turn your green suite red
+
+**What was wrong.** The walk probed per bound ENTRY. Every invoking check —
+`ENFORCED`, `AUTHORITY`, `SKOLEM-RDF`, `VOCABULARY`, `CACHEABLE`, `PIPELINE`,
+`OUTPUTS` — ran once per entry, so an endpoint reachable at two bindings had its
+destructive actions **fired twice**, and the second firing ran against the state the
+first one left. A module that had done nothing wrong was reported red, and the
+README's own footprint contract ("a `Sink` or `Delete` declaring `content` is fired
+once") was true only for an endpoint bound at exactly one pattern. The contract and
+the code disagreed; the code has been changed to the contract.
+
+**What changed.** The invoking checks are now memoized on the **request** the walk
+would issue — verb, target IRI, arguments. Nothing else about the walk moved: the
+template checks are still per entry (two patterns really are two places, each with
+its own variables) and the description-only checks are still per description id.
+
+**Why the request and not `Description::id`.** Because an id is not a unique name for
+a thing that can be fired. `ikigai-cli` binds `ikigai_fs::FileEndpoint` at both
+`urn:file:{path}` (jailed to a scratch root) and `urn:orgfile:{path}` (jailed to
+whatever the config names — with no config at all, the process's working directory).
+Both describe as `file`. Memoizing by id collapses those to whichever the walk reaches
+first: either the dangerous entry is never probed and the report is green about
+something it never looked at, or it is fired and the safe entry's coverage is lost.
+Both outcomes are worse than firing twice, because today at least both are visible.
+A request is the opposite — two entries sharing one can differ only in the state the
+first firing left. `tests/violations.rs` pins both halves by **counting firings**, so
+the trap cannot be re-entered quietly.
+
+**What to expect.**
+
+- A suite that was red **because** of double-firing goes green. That is the fix.
+- A suite that was accidentally passing because a *second* firing masked something —
+  a first write that made the second one's precondition true, a cache the first
+  resolution warmed — may go red. Read it: the single firing is the honest one.
+- `Report.actions` can come out **lower** than before for a module whose space lists
+  a binding twice. It is not covering less; the duplicates were the same request. The
+  new `collapsed:` line names them, which is what the report could not say before.
+- Nothing changes at all for a module no binding of which is reachable twice.
+
+**New: `Suite::opt_out_at(pattern, verb, reason)`** — the same identity problem on the
+exclusion side. `opt_out` is scoped by id, so opting out `file` above would have
+dropped the safe binding too; `opt_out_at` names one binding by its pattern, verbatim
+as the space reports it. An `opt_out_at` that excluded nothing is a `DECLARATIONS`
+finding, like every other declaration.
+
+**API.** Additive except for two shapes that only affect code CONSTRUCTING a report:
+`Declarations` gained `opted_out_at`, and `Report.unprobed` is now
+`Box<Vec<Unprobed>>` rather than `Vec<Unprobed>` — it derefs, so `push`, `len`,
+`is_empty` and `iter` read exactly as before and only a bare `for u in
+&report.unprobed` needs `.iter()`. (The box is not taste: `Report` is the `Err` of
+`check` and clippy's large-error bar is 128 bytes, which the new `collapsed` field
+would otherwise cross.) `Report` gained `collapsed`; `Collapsed` and `OptedOutAt` are
+new exports.
 
 ### 0.2.0 → 0.3.0: `AUTHORITY`, and what it will find
 

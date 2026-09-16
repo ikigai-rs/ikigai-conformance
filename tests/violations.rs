@@ -1617,3 +1617,208 @@ fn waiving_authority_where_nothing_mutates_is_reported_as_inert() {
         .run_blocking(&kernel(space));
     assert_caught(&report, Check::Declarations, "declares no mutating verb");
 }
+
+// ----- FIRING IDENTITY --------------------------------------------------------
+//
+// What the invoking checks memoize on. `Description::id` is NOT it: two entries can
+// share one description and be two instances over different state, so collapsing
+// them by id either leaves the dangerous one unprobed under a green report or fires
+// it and loses the safe one's coverage. The key is the REQUEST — verb, target IRI,
+// arguments — which two entries can only share by being the same firing.
+//
+// Every test here COUNTS FIRINGS rather than asserting an outcome: an outcome test
+// passes for the wrong reason the moment the endpoint's state is idempotent, which
+// is exactly when a returning double-fire would stop being visible.
+
+/// A space that lists the same bindings twice — the shape an overlay concatenating
+/// its targets' entries produces (`ikigai-throttle`'s `Failover`: two spaces over ONE
+/// state). The duplication is in the ENUMERATION, not in the descriptions, so nothing
+/// keyed on a description can see it.
+struct Doubled(EndpointSpace);
+
+impl ikigai_core::Space for Doubled {
+    fn resolve(
+        &self,
+        request: &ikigai_core::Request,
+        scope: &ikigai_core::Scope,
+    ) -> ikigai_core::Resolution {
+        self.0.resolve(request, scope)
+    }
+
+    fn entries(&self) -> Option<Vec<ikigai_core::SpaceEntry>> {
+        let entries = self.0.entries()?;
+        let mut all = entries.clone();
+        all.extend(entries);
+        Some(all)
+    }
+}
+
+/// A Sink that counts every invocation and stores nothing — the witness. Its id and
+/// description are shared by every instance, which is the point.
+fn counting_sink(counter: Arc<AtomicUsize>) -> FnEndpoint {
+    FnEndpoint::new("notes-write", move |inv: &Invocation<'_>| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Ok(text(format!("stored {}", inv.inline_str("content")?.len())))
+    })
+    .with_description(
+        Description::new("notes-write")
+            .verb(Verb::Sink)
+            .requires("urn:cap:example:write")
+            .input(ArgSpec::new("content").class(XSD_STRING))
+            .output("text/plain"),
+    )
+}
+
+#[test]
+fn a_space_that_lists_one_binding_twice_fires_it_once() {
+    let fired = Arc::new(AtomicUsize::new(0));
+    let space = EndpointSpace::new().bind(
+        Exact::new("urn:example:notes-write"),
+        counting_sink(fired.clone()),
+    );
+    let report = Suite::new().run_blocking(&Kernel::new(Arc::new(Doubled(space))));
+    assert!(report.is_clean(), "{report}");
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        1,
+        "two entries issuing the identical request are one firing:\n{report}"
+    );
+    // The counts follow the firings, and the report SAYS the second entry was the
+    // first one again — a smaller action count with no explanation is what the
+    // report could not say before.
+    assert_eq!(report.endpoints, 1, "{report}");
+    assert_eq!(report.actions, 1, "{report}");
+    assert_eq!(report.collapsed.len(), 1, "{report}");
+    assert_eq!(report.collapsed[0].endpoint, "notes-write");
+    assert_eq!(report.collapsed[0].patterns.len(), 2);
+    assert!(
+        report.to_string().contains(
+            "collapsed: notes-write sink <urn:example:notes-write>: 2 binding(s) issue the \
+             identical request (`urn:example:notes-write`, `urn:example:notes-write`) — fired once"
+        ),
+        "{report}"
+    );
+}
+
+#[test]
+fn two_instances_sharing_one_description_are_both_fired() {
+    // ★ The case that makes `Description::id` unsafe as the key. Two endpoints, one
+    // description, DIFFERENT state behind each — `ikigai-cli` binds
+    // `ikigai_fs::FileEndpoint` at `urn:file:{path}` (jailed to a scratch root) and
+    // at `urn:orgfile:{path}` (jailed to whatever the config names, which with no
+    // config at all is the process's working directory). Memoizing by id probes
+    // whichever is walked first and reports green about the other.
+    let safe = Arc::new(AtomicUsize::new(0));
+    let hazardous = Arc::new(AtomicUsize::new(0));
+    let space = EndpointSpace::new()
+        .bind(Exact::new("urn:example:notes"), counting_sink(safe.clone()))
+        .bind(
+            Exact::new("urn:example:other-notes"),
+            counting_sink(hazardous.clone()),
+        );
+    let report = Suite::new().run_blocking(&kernel(space));
+    assert!(report.is_clean(), "{report}");
+    assert_eq!(
+        (
+            safe.load(Ordering::SeqCst),
+            hazardous.load(Ordering::SeqCst)
+        ),
+        (1, 1),
+        "each instance is its own firing; neither hides behind the other:\n{report}"
+    );
+    assert_eq!(report.endpoints, 1, "one description id:\n{report}");
+    assert_eq!(report.actions, 2, "two firings:\n{report}");
+    assert!(report.collapsed.is_empty(), "nothing collapsed:\n{report}");
+}
+
+#[test]
+fn opt_out_at_excludes_one_binding_and_leaves_the_other_probed() {
+    let safe = Arc::new(AtomicUsize::new(0));
+    let hazardous = Arc::new(AtomicUsize::new(0));
+    let space = EndpointSpace::new()
+        .bind(Exact::new("urn:example:notes"), counting_sink(safe.clone()))
+        .bind(
+            Exact::new("urn:example:other-notes"),
+            counting_sink(hazardous.clone()),
+        );
+    let report = Suite::new()
+        .opt_out_at(
+            "urn:example:other-notes",
+            None,
+            "writes outside the scratch root",
+        )
+        .run_blocking(&kernel(space));
+    assert!(report.is_clean(), "{report}");
+    assert_eq!(
+        (
+            safe.load(Ordering::SeqCst),
+            hazardous.load(Ordering::SeqCst)
+        ),
+        (1, 0),
+        "the named binding is excluded; the other keeps its coverage:\n{report}"
+    );
+    assert!(
+        report
+            .to_string()
+            .contains("opted out at: `urn:example:other-notes`: writes outside the scratch root"),
+        "{report}"
+    );
+    // `opt_out("notes-write", …)` would have taken both: the id is the same.
+    let safe = Arc::new(AtomicUsize::new(0));
+    let hazardous = Arc::new(AtomicUsize::new(0));
+    let space = EndpointSpace::new()
+        .bind(Exact::new("urn:example:notes"), counting_sink(safe.clone()))
+        .bind(
+            Exact::new("urn:example:other-notes"),
+            counting_sink(hazardous.clone()),
+        );
+    let report = Suite::new()
+        .opt_out("notes-write", None, "writes outside the scratch root")
+        .run_blocking(&kernel(space));
+    assert_eq!(
+        (
+            safe.load(Ordering::SeqCst),
+            hazardous.load(Ordering::SeqCst)
+        ),
+        (0, 0),
+        "the coarse lever is why the fine one exists:\n{report}"
+    );
+}
+
+#[test]
+fn an_opt_out_at_that_excluded_nothing_is_reported() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
+    let report = Suite::new()
+        .pure("upper")
+        .opt_out_at("urn:example:typo", None, "a pattern nothing binds")
+        .run_blocking(&kernel(space));
+    assert_caught(
+        &report,
+        Check::Declarations,
+        "opted out of the invoking checks at `urn:example:typo` (a pattern nothing binds) but \
+         excluded nothing: the walk reached no binding with that pattern",
+    );
+    assert!(
+        report
+            .of(Check::Declarations)
+            .any(|f| f.detail.contains("The walk reached: `urn:example:upper`")),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_template_pattern_is_matched_verbatim_not_expanded() {
+    let space = EndpointSpace::new().bind(
+        UriTemplate::parse("urn:example:notes/{name}").expect("valid template"),
+        counting_sink(Arc::new(AtomicUsize::new(0))),
+    );
+    // The expanded IRI is not the pattern: this one names nothing.
+    let report = Suite::new()
+        .opt_out_at("urn:example:notes/x", None, "the expanded form")
+        .run_blocking(&kernel(space));
+    assert_caught(
+        &report,
+        Check::Declarations,
+        "the walk reached no binding with that pattern (it is matched verbatim",
+    );
+}
