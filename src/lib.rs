@@ -54,7 +54,7 @@
 //! | [`Cacheable`](Check::Cacheable) | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and carries a golden thread unless the endpoint is declared pure; a result declared live ([`Suite::live`]) is `Expiry::Always` |
 //! | [`Pipeline`](Check::Pipeline) | pipeline citizenship | a mutating action with by-value inputs declares `content` (where the pipe's value arrives); an action declaring `content` reads it |
 //! | [`Names`](Check::Names) | naming convention | the id is a kebab-case noun (the convention `ikigai-core`'s crate docs state) |
-//! | [`Declarations`](Check::Declarations) | — | every declaration the module made ([`Suite::live`], [`Suite::cacheable`], [`Suite::pure`], [`Suite::namespace`], a [`Fixture`], an [`opt_out`](Suite::opt_out), an [`opt_out_check`](Suite::opt_out_check)) reached the check that would honour it |
+//! | [`Declarations`](Check::Declarations) | — | every declaration the module made ([`Suite::live`], [`Suite::cacheable`], [`Suite::pure`], [`Suite::namespace`], a [`Fixture`], an [`opt_out`](Suite::opt_out), an [`opt_out_at`](Suite::opt_out_at), an [`opt_out_check`](Suite::opt_out_check)) reached the check that would honour it |
 //!
 //! Both RDF checks resolve and **parse** the face, so an unresolvable, mislabeled
 //! or malformed graph is reported whichever of the two is selected — under
@@ -199,6 +199,20 @@
 //! under no grants, off **one** shared resolution however many of the two are
 //! selected) and is listed as unprobed. Fixture bindings are per entry, not per verb (see [`Fixture::binding`]).
 //!
+//! **That footprint is per FIRING, and a firing is a request** — the verb, the target
+//! IRI and the arguments. The invoking checks are memoized on it, so an endpoint
+//! bound N times is fired once for every DISTINCT request those bindings produce, not
+//! N times: a space that lists one binding twice (an overlay concatenating its
+//! targets' entries) fires it once and says so on a `collapsed:` line. Two bindings at
+//! different patterns resolve to different IRIs, so they are two requests and both are
+//! probed — including the case that makes `Description::id` the wrong key, two
+//! instances of one endpoint type over different state (`urn:file:{path}` jailed to a
+//! scratch root, `urn:orgfile:{path}` jailed to a configured directory). A module that
+//! wants one of those bindings left alone names it with [`Suite::opt_out_at`]; a module
+//! whose two spellings really are ONE resource says so where the kernel can see it —
+//! one `Grammar` matching both, or core's `Alias` — because two bindings are two cache
+//! entries and two golden threads whatever the suite does.
+//!
 //! The kernel's own `urn:kernel:*` operations are listed by [`Kernel::entries`] but
 //! are core's, not the module's; the walk skips them unless
 //! [`Suite::include_kernel_ops`] says otherwise.
@@ -210,7 +224,9 @@ mod report;
 mod suite;
 
 pub use checks::{Check, Checks};
-pub use report::{Declarations, Finding, OptedOut, OptedOutCheck, Probed, Report, Unprobed};
+pub use report::{
+    Collapsed, Declarations, Finding, OptedOut, OptedOutAt, OptedOutCheck, Probed, Report, Unprobed,
+};
 pub use suite::{Fixture, Suite};
 
 use ikigai_core::Kernel;

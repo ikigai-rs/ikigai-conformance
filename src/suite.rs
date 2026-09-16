@@ -12,7 +12,9 @@ use ikigai_core::{
 
 use crate::checks::{Check, Checks};
 use crate::rdf;
-use crate::report::{Declarations, Finding, OptedOut, OptedOutCheck, Probed, Report, Unprobed};
+use crate::report::{
+    Collapsed, Declarations, Finding, OptedOut, OptedOutAt, OptedOutCheck, Probed, Report, Unprobed,
+};
 
 /// The kernel's own operations are listed by [`Kernel::entries`] ahead of the root
 /// space's bindings; they are core's, not the module's, so the walk skips them
@@ -151,6 +153,55 @@ struct OptOut {
     reason: String,
 }
 
+#[derive(Clone, Debug)]
+struct OptOutAt {
+    pattern: String,
+    verb: Option<Verb>,
+    reason: String,
+}
+
+/// The identity of a FIRING: the request the walk would issue for one action of one
+/// bound entry — the verb, the target IRI, and the arguments derived from the
+/// ArgSpecs and the fixtures.
+///
+/// ★ **This is the key the invoking checks memoize on, and `Description::id` is not.**
+/// An id is a name for a KIND of endpoint, not for a thing that can be fired: two
+/// entries sharing one description can be two instances over different state
+/// (`urn:file:{path}` jailed to a scratch root, `urn:orgfile:{path}` jailed to
+/// whatever the config names — with no config at all, the process's working
+/// directory). Memoizing on the id would collapse those to whichever the walk
+/// reached first: either the dangerous entry goes unprobed and the report says green
+/// about something it never looked at, or it is fired and the safe entry's coverage
+/// is lost. A request is the opposite: two entries agreeing on it agree on every byte
+/// the walk would send, so firing the second can differ from firing the first only in
+/// the state the first one left — which is exactly the defect.
+///
+/// What it does NOT cover: two DIFFERENT requests that reach one state. An alias
+/// spelled as a second binding (`urn:iki:ledger:append` beside
+/// `urn:iki:ledger:{name}:append`) is two IRIs, and to the kernel that is two
+/// resources — two cache entries, two golden threads — so the walk probes both, and
+/// is right to. A module that means them to be ONE resource says so where the kernel
+/// can see it: one `Grammar` matching both spellings, or core's `Alias`. A module
+/// that means them to be two and wants only one probed says so with
+/// [`Suite::opt_out_at`].
+///
+/// `Verb` is not `Ord`, so the verb is keyed by its printed name.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Firing {
+    target: String,
+    verb: &'static str,
+    args: BTreeMap<String, String>,
+}
+
+/// One firing the walk considered, and every binding that would have issued it.
+#[derive(Debug)]
+struct Fired {
+    endpoint: String,
+    verb: Verb,
+    target: String,
+    patterns: Vec<String>,
+}
+
 /// What the walk actually covered, recorded as it goes — the evidence
 /// [`Check::Declarations`] reads to say which declarations were never consulted.
 ///
@@ -168,10 +219,21 @@ struct Coverage {
     actions: Vec<(String, Verb)>,
     /// The actions the walk skipped because of [`Suite::opt_out`].
     opted_out: Vec<(String, Verb)>,
+    /// The actions for which the invoking checks actually ran, at some binding.
+    /// Distinct from the complement of `opted_out`: [`Suite::opt_out_at`] excludes
+    /// one BINDING, and the same action may still be invoked at another.
+    invoked: Vec<(String, Verb)>,
     /// Ids declaring at least one RDF face, the only thing the graph checks probe.
     rdf_faces: BTreeSet<String>,
     /// The template variables of every pattern an id is bound at.
     vars: BTreeMap<String, BTreeSet<String>>,
+    /// Every pattern the walk reached, in walk order — what an `opt_out_at` names,
+    /// and the list a finding about one that named nothing has to print.
+    patterns: Vec<String>,
+    /// The `opt_out_at` patterns that excluded at least one action of one entry.
+    patterns_excluded: BTreeSet<String>,
+    /// The ids at least one binding of which an `opt_out_at` excluded.
+    ids_excluded_at: BTreeSet<String>,
     /// Ids for which `CACHEABLE` ran at all — past its non-cacheable-verb guard,
     /// which is where `live` and `cacheable` are read.
     cacheable_ran: BTreeSet<String>,
@@ -199,6 +261,18 @@ impl Coverage {
         if !list.iter().any(|(i, v)| i == id && *v == verb) {
             list.push((id.to_string(), verb));
         }
+    }
+
+    /// Record that the invoking checks ran for an action, once.
+    fn record_invoked(&mut self, id: &str, verb: Verb) {
+        if !self.invoked.iter().any(|(i, v)| i == id && *v == verb) {
+            self.invoked.push((id.to_string(), verb));
+        }
+    }
+
+    /// Whether the invoking checks ran for any action of `id`.
+    fn any_invoked(&self, id: &str) -> bool {
+        self.invoked.iter().any(|(i, _)| i == id)
     }
 
     /// Whether `(id, verb)` is an action the walk saw declared.
@@ -263,6 +337,7 @@ pub struct Suite {
     checks: Checks,
     fixtures: Vec<Fixture>,
     opt_outs: Vec<OptOut>,
+    opt_outs_at: Vec<OptOutAt>,
     opt_out_checks: Vec<OptOutCheck>,
     namespaces: Vec<String>,
     pure: Vec<String>,
@@ -284,6 +359,7 @@ impl Suite {
             checks: Checks::all(),
             fixtures: Vec::new(),
             opt_outs: Vec::new(),
+            opt_outs_at: Vec::new(),
             opt_out_checks: Vec::new(),
             namespaces: Vec::new(),
             pure: Vec::new(),
@@ -308,6 +384,12 @@ impl Suite {
     /// Exclude one action (`verb`), or every action of an endpoint (`None`), from
     /// the checks that invoke it — for an action with real side effects. The reason
     /// is printed in the report. The description-only checks still run.
+    ///
+    /// Scoped by `Description::id`, which is a name for a KIND of endpoint: an id
+    /// bound at more than one pattern is excluded at every one of them. When only one
+    /// of those bindings is the hazardous one — one instance jailed to a scratch root
+    /// and another to the working directory — use [`opt_out_at`](Self::opt_out_at),
+    /// which names the binding.
     pub fn opt_out(
         mut self,
         id: impl Into<String>,
@@ -316,6 +398,57 @@ impl Suite {
     ) -> Self {
         self.opt_outs.push(OptOut {
             id: id.into(),
+            verb,
+            reason: reason.into(),
+        });
+        self
+    }
+
+    /// Exclude one BINDING — one `pattern` exactly as the space reports it — from
+    /// the checks that invoke it, for one `verb` or for every verb (`None`).
+    ///
+    /// The scope [`opt_out`](Self::opt_out) cannot express, and the reason it cannot
+    /// is the same reason `Description::id` is the wrong key to memoize a firing on:
+    /// **an id names a kind of endpoint, not a place one can be reached.** `ikigai-cli`
+    /// binds `ikigai_fs::FileEndpoint` twice — `urn:file:{path}` jailed to a scratch
+    /// root and safe to fire, `urn:orgfile:{path}` jailed to whatever `calendar.json`
+    /// names, which with no config at all is the EMPTY path, i.e. the process's own
+    /// working directory. Both describe as `file`, so `opt_out("file", …)` excludes
+    /// the safe one too and the walk loses the coverage it was right to have.
+    ///
+    /// ```no_run
+    /// # use ikigai_conformance::Suite;
+    /// # use ikigai_core::Kernel;
+    /// # fn my_kernel() -> Kernel { unimplemented!() }
+    /// Suite::new()
+    ///     .opt_out_at(
+    ///         "urn:orgfile:{path}",
+    ///         None,
+    ///         "jailed to the configured org_dir, which is the CWD when there is no config",
+    ///     )
+    ///     .run_blocking(&my_kernel())
+    ///     .assert_clean();
+    /// ```
+    ///
+    /// The pattern is matched as an exact string against
+    /// [`SpaceEntry::pattern`](ikigai_core::SpaceEntry) — the template, not an
+    /// expanded IRI (`urn:file:{path}`, not `urn:file:x`). One that excluded nothing
+    /// is reported by [`Check::Declarations`](crate::Check::Declarations), with the
+    /// patterns the walk did reach.
+    ///
+    /// ⚠ One ordering wrinkle, from the interaction with firing identity: when two
+    /// bindings would issue the IDENTICAL request and only one of them is excluded
+    /// here, the first in walk order decides, because the collapse is recorded before
+    /// the second binding's opt-out is consulted. Exclude both bindings, or exclude
+    /// by id.
+    pub fn opt_out_at(
+        mut self,
+        pattern: impl Into<String>,
+        verb: Option<Verb>,
+        reason: impl Into<String>,
+    ) -> Self {
+        self.opt_outs_at.push(OptOutAt {
+            pattern: pattern.into(),
             verb,
             reason: reason.into(),
         });
@@ -468,6 +601,15 @@ impl Suite {
                         reason: o.reason.clone(),
                     })
                     .collect(),
+                opted_out_at: self
+                    .opt_outs_at
+                    .iter()
+                    .map(|o| OptedOutAt {
+                        pattern: o.pattern.clone(),
+                        verb: o.verb,
+                        reason: o.reason.clone(),
+                    })
+                    .collect(),
                 opted_out_checks: self
                     .opt_out_checks
                     .iter()
@@ -483,9 +625,10 @@ impl Suite {
                 namespaces: self.namespaces.clone(),
                 fixtures: self.fixtures.clone(),
             }),
-            unprobed: Vec::new(),
+            unprobed: Box::default(),
             probed: Vec::new(),
             walked: Box::default(),
+            collapsed: Box::default(),
         };
 
         let Some(entries) = kernel.entries() else {
@@ -502,6 +645,10 @@ impl Suite {
         let mut seen: BTreeSet<String> = BTreeSet::new();
         let mut walk_order: Vec<String> = Vec::new();
         let mut coverage = Coverage::default();
+        // Every firing the walk has already considered, keyed by the request it
+        // issues, with the index of its record so a repeat can name both bindings.
+        let mut firings: BTreeMap<Firing, usize> = BTreeMap::new();
+        let mut fired: Vec<Fired> = Vec::new();
         for entry in entries {
             if entry.pattern.starts_with(KERNEL_NS) && !self.kernel_ops {
                 continue;
@@ -532,6 +679,9 @@ impl Suite {
             // declared, so a template that fails to expand must not also make every
             // fixture for that id read as inert.
             coverage.walked.insert(description.id.clone());
+            if !coverage.patterns.contains(&entry.pattern) {
+                coverage.patterns.push(entry.pattern.clone());
+            }
             if let Some(vars) = template_vars(&entry.pattern) {
                 coverage
                     .vars
@@ -564,11 +714,47 @@ impl Suite {
                 }
             };
             for spec in description.action_specs() {
+                // The identity of what would be FIRED, computed before anything is:
+                // a second binding issuing the identical request adds nothing but a
+                // second mutation, landing on the state the first one left. The
+                // template checks above stay per entry — two patterns really are two
+                // places, each with its own variables — and only the invoking checks
+                // are memoized here.
+                let key = Firing {
+                    target: target.as_str().to_string(),
+                    verb: crate::report::verb_name(spec.verb),
+                    args: self.args_for(&description.id, &spec),
+                };
+                // Read BEFORE the collapse, so a waiver naming a binding the walk
+                // reached is never reported inert merely because another binding got
+                // there first. NOT recorded as an opted-out ACTION: this lever
+                // excludes one binding, and the same action may still be invoked at
+                // another — `Coverage::invoked` is what says whether anything ran.
+                let excluded_at = self.opted_out_at(&entry.pattern, spec.verb);
+                if let Some(out) = excluded_at {
+                    coverage.patterns_excluded.insert(out.pattern.clone());
+                    coverage.ids_excluded_at.insert(description.id.clone());
+                }
+                if let Some(index) = firings.get(&key) {
+                    fired[*index].patterns.push(entry.pattern.clone());
+                    continue;
+                }
+                firings.insert(key, fired.len());
+                fired.push(Fired {
+                    endpoint: description.id.clone(),
+                    verb: spec.verb,
+                    target: target.as_str().to_string(),
+                    patterns: vec![entry.pattern.clone()],
+                });
                 report.actions += 1;
                 if self.opted_out(&description.id, spec.verb) {
                     coverage.record_action(&description.id, spec.verb, true);
                     continue;
                 }
+                if excluded_at.is_some() {
+                    continue;
+                }
+                coverage.record_invoked(&description.id, spec.verb);
                 let mut action = Action {
                     suite: self,
                     kernel,
@@ -596,6 +782,17 @@ impl Suite {
             }
         }
         report.walked = walk_order.into_boxed_slice();
+        report.collapsed = fired
+            .into_iter()
+            .filter(|f| f.patterns.len() > 1)
+            .map(|f| Collapsed {
+                endpoint: f.endpoint,
+                verb: f.verb,
+                target: f.target,
+                patterns: f.patterns,
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         self.declaration_checks(&coverage, &mut report);
         report
     }
@@ -705,6 +902,12 @@ impl Suite {
         if check.invokes() && coverage.wholly_opted_out(id) {
             return Some(
                 "every action of it is opted out (`Suite::opt_out`), and this check invokes"
+                    .to_string(),
+            );
+        }
+        if check.invokes() && coverage.ids_excluded_at.contains(id) && !coverage.any_invoked(id) {
+            return Some(
+                "every binding of it is excluded (`Suite::opt_out_at`), and this check invokes"
                     .to_string(),
             );
         }
@@ -851,6 +1054,48 @@ impl Suite {
                 ),
             );
         }
+        for out in &self.opt_outs_at {
+            if coverage.patterns_excluded.contains(&out.pattern) {
+                continue;
+            }
+            // A pattern is matched verbatim against what the space reports, so the
+            // two ways to miss are a typo and an expanded IRI in place of the
+            // template. Print what the walk did reach: that is the difference.
+            let why = if coverage.patterns.contains(&out.pattern) {
+                match out.verb {
+                    Some(verb) => format!(
+                        "the binding was reached, but nothing bound there declares a {} action",
+                        crate::report::verb_name(verb)
+                    ),
+                    None => "the binding was reached, but nothing bound there declares an action"
+                        .to_string(),
+                }
+            } else {
+                format!(
+                    "the walk reached no binding with that pattern (it is matched verbatim \
+                     against the space's own pattern — the template, not an expanded IRI). \
+                     The walk reached: {}",
+                    if coverage.patterns.is_empty() {
+                        "no pattern at all".to_string()
+                    } else {
+                        coverage
+                            .patterns
+                            .iter()
+                            .map(|p| format!("`{p}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                )
+            };
+            self.inert(
+                report,
+                SUITE,
+                format!(
+                    "opted out of the invoking checks at `{}` ({}) but excluded nothing: {why}",
+                    out.pattern, out.reason
+                ),
+            );
+        }
         for out in &self.opt_out_checks {
             // A waiver is judged against the check it waives, with ITSELF discounted
             // — otherwise every waiver would report as its own reason to be inert.
@@ -934,6 +1179,14 @@ impl Suite {
         self.opt_outs
             .iter()
             .any(|o| o.id == id && o.verb.is_none_or(|v| v == verb))
+    }
+
+    /// The `opt_out_at` excluding this action at this BINDING, if any — matched on
+    /// the pattern exactly as the space reports it.
+    fn opted_out_at(&self, pattern: &str, verb: Verb) -> Option<&OptOutAt> {
+        self.opt_outs_at
+            .iter()
+            .find(|o| o.pattern == pattern && o.verb.is_none_or(|v| v == verb))
     }
 
     /// Whether `check` runs for `id`: selected suite-wide ([`Suite::checks`]) and not
