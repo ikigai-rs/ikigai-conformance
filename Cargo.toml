@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-conformance"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "What \"done\" means for an ikigai module, as one test: walks every endpoint a kernel binds and reports every violation of the module recipe at once — ArgSpec completeness, requires implies a verb, declared = enforced, declared outputs = served outputs, skolemized RDF faces, vocabulary terms only, the cacheable-twice probe, pipeline citizenship — and says what it did NOT do: what it probed, what it could not, and which of your own declarations reached no check at all."
@@ -26,7 +26,13 @@ categories = ["development-tools::testing"]
 # endpoint that takes writes through that name is right only because the kernel's
 # auto-cut then reaches the cached read. Below 0.1.73 the exemption would pass a
 # read that a write never invalidates. No API changed; the floor is a SEMANTIC one.
-ikigai-core = "0.1.73"
+#
+# 0.1.77 since 0.5.0, TRANSITIVELY: the vocab pin below tracks the head (0.1.84), and
+# ikigai-vocab 0.1.84 declares `ikigai-core = "0.1.66"` while its lib.rs uses
+# `Transreption::lossless` (core 0.1.77), so with core 0.1.73-0.1.76 it does not compile
+# (E0609; reported to core as a vocab floor bug). Stating 0.1.77 here keeps a consumer's
+# resolve from landing on that pair. Drop back to 0.1.73 once vocab states its own floor.
+ikigai-core = "0.1.77"
 # The vocabulary is the ORACLE for the terms check: a predicate is "defined" iff it
 # is a subject in `ikigai_vocab::VOCABULARY`. So the floor is the newest published
 # vocabulary, not the oldest API this crate compiles against — an older pin would
@@ -49,7 +55,8 @@ ikigai-core = "0.1.73"
 # raised to it. This crate commits no lockfile, so a fresh resolve already took
 # 0.1.70 through the old caret; raising the FLOOR is what stops a consumer with an
 # older resolved vocabulary from being told a term it can see is invented.
-ikigai-vocab = "0.1.70"
+# 0.5.0: re-checked — 0.1.84 is the head in the registry index; raised to it.
+ikigai-vocab = "0.1.84"
 # One parser for every RDF face a module can declare (Turtle, N-Triples, N-Quads,
 # TriG, RDF/XML, JSON-LD). 0.2.5 is the version whose `for_slice` and
 # `RdfFormat::from_media_type` this crate was written against.
