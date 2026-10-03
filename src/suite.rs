@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use ikigai_core::{
     ActionSpec, ArgRef, ArgSpec, Capability, Description, Error, Expiry, InputSource, Iri, Kernel,
-    Representation, Request, SpaceEntry, TraceEvent, Tracer, UriTemplate, Verb,
+    Representation, Request, SpaceEntry, Thread, TraceEvent, Tracer, UriTemplate, Verb,
 };
 
 use crate::checks::{Check, Checks};
@@ -518,8 +518,9 @@ impl Suite {
     }
 
     /// Declare an endpoint a pure function of its inputs, so a cacheable result
-    /// with an empty golden-thread set is correct rather than a representation that
-    /// caches forever with nothing to cut it.
+    /// with no golden thread but its own name is correct rather than a
+    /// representation that caches forever with nothing to cut it. (The kernel hangs
+    /// every cacheable read on its own name, so "no thread" is never observable.)
     pub fn pure(mut self, id: impl Into<String>) -> Self {
         self.pure.push(id.into());
         self
@@ -713,6 +714,13 @@ impl Suite {
                     continue;
                 }
             };
+            // Whether a write can land on this target through the description's own
+            // verbs: the kernel's auto-cut fires on the thread named for it, which is
+            // the thread it hangs every cacheable read of the same name from.
+            let written_here = description
+                .action_specs()
+                .iter()
+                .any(|s| s.verb.is_mutating());
             for spec in description.action_specs() {
                 // The identity of what would be FIRED, computed before anything is:
                 // a second binding issuing the identical request adds nothing but a
@@ -761,6 +769,7 @@ impl Suite {
                     id: &description.id,
                     target: &target,
                     spec: &spec,
+                    written_here,
                     minimal: None,
                     fired: None,
                     no_grants: None,
@@ -850,7 +859,7 @@ impl Suite {
                 id,
                 format!(
                 "declared pure (`Suite::pure`) but nothing consulted it: {why}. `pure` exempts \
-                 a CACHEABLE result from the empty-golden-thread finding and does nothing else"
+                 a CACHEABLE result from the no-thread-but-its-own-name finding and does nothing else"
             ),
             );
         }
@@ -1534,6 +1543,9 @@ struct Action<'a> {
     id: &'a str,
     target: &'a Iri,
     spec: &'a ActionSpec,
+    /// The description declares a `Sink` or `Delete`, so a write lands on `target`
+    /// through this endpoint and the kernel's auto-cut fires on its thread.
+    written_here: bool,
     minimal: Option<Result<(Representation, Vec<TraceEvent>), Error>>,
     fired: Option<Result<Representation, Error>>,
     /// What the action did under a capability holding no grants. ENFORCED and
@@ -1975,12 +1987,25 @@ impl Action<'_> {
                  cacheable part's — or the result carries `Expiry::At` on a clockless kernel",
             ));
         }
-        if first.threads().is_empty() && !self.suite.pure.iter().any(|p| p == self.id) {
+        // Purity is "no thread but its own name", not an empty set. Since core 0.1.73
+        // the kernel hangs every cacheable `Source`/`Exists` answer on the thread
+        // named for its own canonical target (formalism R4.4, ledger #512 hole A), so
+        // `threads().is_empty()` can never be observed and a check spelled that way
+        // fires for nothing (ledger #549). The own-name thread is cut only by a write
+        // through that same name, so it answers "what cuts this?" exactly when the
+        // endpoint takes writes there; otherwise the result still has nothing to cut
+        // it. A thread the module declared that happens to equal its own name is
+        // indistinguishable from the kernel's, and reads the same way.
+        let own = Thread::from(self.target.as_str());
+        let foreign = first.threads().iter().any(|t| *t != own);
+        if !foreign && !self.written_here && !self.suite.pure.iter().any(|p| p == self.id) {
             report.findings.push(self.finding(
                 Check::Cacheable,
-                "cacheable with an empty golden-thread set: it will be served forever with \
-                 nothing to cut it. `Suite::pure(id)` if it is a pure function of its inputs; \
-                 otherwise `depends_on` the thread of the state it reads",
+                "cacheable with no golden thread but its own name: it will be served forever \
+                 with nothing to cut it. The kernel hangs every cacheable read on the name it \
+                 was read through, and only a write through that same name cuts it — this \
+                 endpoint declares no `Sink` or `Delete`. `Suite::pure(id)` if it is a pure \
+                 function of its inputs; otherwise `depends_on` the thread of the state it reads",
             ));
         }
     }

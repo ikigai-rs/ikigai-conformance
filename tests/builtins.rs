@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use ikigai_conformance::{check, Check, Suite};
 use ikigai_core::builtins;
-use ikigai_core::{EndpointSpace, Exact, Kernel, UriTemplate};
+use ikigai_core::{
+    Capability, EndpointSpace, Exact, Iri, Kernel, Request, Thread, UriTemplate, Verb,
+};
 
 fn builtins_kernel() -> Kernel {
     let root = EndpointSpace::new()
@@ -43,13 +45,13 @@ fn the_builtins_report_exactly_the_findings_their_age_predicts() {
     assert_eq!(names, ["toUpper", "reverseList"], "{report}");
 
     // CACHEABLE: all three are pure functions nobody declared pure, so each
-    // cacheable result has an empty thread set. The cache itself works (no
-    // "recomputed" finding).
+    // cacheable result carries no thread but the one the kernel hangs it on, its
+    // own name (core 0.1.73). The cache itself works (no "recomputed" finding).
     let cache: Vec<_> = report.of(Check::Cacheable).collect();
     assert_eq!(cache.len(), 3, "{report}");
     assert!(cache
         .iter()
-        .all(|f| f.detail.contains("empty golden-thread set")));
+        .all(|f| f.detail.contains("no golden thread but its own name")));
 
     // Nothing else: the builtins declare no capability and enforce none, serve
     // the `text/plain;charset=utf-8` they declare (parameters stripped, the same
@@ -119,20 +121,38 @@ fn the_kernel_operations_reported_for_the_record() {
             .all(|f| !f.detail.contains("recomputed")),
         "{report}"
     );
-    // What the cache probe DOES see on the manifold: cached `Never` with no thread —
-    // a rebind leaves it stale forever (ikigai-core audit item 7).
+    // The cache probe used to see `kernel-actions` cached `Never` with no thread, so
+    // a rebind left it stale forever (ikigai-core audit item 7). Since core 0.1.74
+    // the intrinsics hang from `urn:kernel:bindings`, which a rebind cuts (ledger
+    // #510): a thread besides their own name, so the purity rule stays silent. On
+    // 0.1.73 exactly they hang from nothing and the rule reports it. Either way the
+    // verdict must agree with the threads the kernel actually hangs it on.
+    let actions = futures::executor::block_on(builtins_kernel().issue(
+        Request::new(Verb::Source, Iri::parse("urn:kernel:actions").unwrap()),
+        &Capability::root(),
+    ))
+    .unwrap();
+    let rebind_cuts_it = actions
+        .threads()
+        .contains(&Thread::new("urn:kernel:bindings"));
+    let reported = kernel_findings.iter().any(|f| {
+        f.endpoint == "kernel-actions"
+            && f.check == Check::Cacheable
+            && f.detail.contains("no golden thread but its own name")
+    });
+    assert_eq!(reported, !rebind_cuts_it, "{report}");
     assert!(
         kernel_findings
             .iter()
-            .any(|f| f.endpoint == "kernel-actions"
-                && f.check == Check::Cacheable
-                && f.detail.contains("empty golden-thread set")),
+            .filter(|f| f.endpoint != "kernel-actions")
+            .all(|f| !f.detail.contains("golden thread")),
         "{report}"
     );
-    // Every kernel op serves what it declares. Two cannot be resolved with minimal
+    // Every kernel op serves what it declares. Some cannot be resolved with minimal
     // inputs on a bare kernel (`kernel-catalog` needs a Meta renderer,
-    // `kernel-validate` a proposal), and OUTPUTS lists them as unprobed rather than
-    // reporting a face it never saw.
+    // `kernel-validate` a proposal, and `kernel-cached` — core 0.1.82 — a `target`
+    // IRI the minimal sample value is not), and OUTPUTS lists them as unprobed
+    // rather than reporting a face it never saw.
     assert!(
         kernel_findings.iter().all(|f| f.check != Check::Outputs),
         "{report}"
@@ -143,6 +163,15 @@ fn the_kernel_operations_reported_for_the_record() {
         .filter(|u| u.check == Check::Outputs)
         .map(|u| u.endpoint.as_str())
         .collect();
-    assert_eq!(unprobed, ["kernel-catalog", "kernel-validate"], "{report}");
+    let binds_cached = report
+        .findings
+        .iter()
+        .any(|f| f.endpoint == "kernel-cached");
+    let expected: &[&str] = if binds_cached {
+        &["kernel-cached", "kernel-catalog", "kernel-validate"]
+    } else {
+        &["kernel-catalog", "kernel-validate"]
+    };
+    assert_eq!(unprobed, expected, "{report}");
     eprintln!("{report}");
 }

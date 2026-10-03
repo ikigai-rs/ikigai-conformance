@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use ikigai_conformance::{check, Check, Checks, Fixture, Report, Suite};
 use ikigai_core::{
-    ActionSpec, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, FnEndpoint,
-    Invocation, Kernel, ReprType, Representation, Result, UriTemplate, Verb,
+    ActionSpec, ArgRef, ArgSpec, Capability, Description, Endpoint, EndpointSpace, Error, Exact,
+    FnEndpoint, Invocation, Iri, Kernel, ReprType, Representation, Request, Result, Thread,
+    UriTemplate, Verb,
 };
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -619,9 +620,8 @@ fn cacheable_catches_a_recomputing_composite_and_a_threadless_result() {
     );
     assert!(report.to_string().contains("declared cacheable: composite"));
     assert!(
-        report
-            .against("config")
-            .any(|f| f.check == Check::Cacheable && f.detail.contains("empty golden-thread set")),
+        report.against("config").any(|f| f.check == Check::Cacheable
+            && f.detail.contains("no golden thread but its own name")),
         "{report}"
     );
     assert!(
@@ -656,6 +656,104 @@ fn cacheable_catches_a_recomputing_composite_and_a_threadless_result() {
 
 #[test]
 fn cacheable_passes_a_threaded_stateful_read() {
+    // The thread names the STATE (`notes-store`), not the endpoint: a thread named
+    // for the endpoint itself is the one the kernel adds anyway, and reads as no
+    // declaration at all (`cacheable_reads_a_thread_named_for_the_endpoint_as_none`).
+    let stateful = FnEndpoint::new("notes", |_inv: &Invocation<'_>| {
+        Ok(text("hello")
+            .cacheable()
+            .depends_on("urn:example:notes-store"))
+    })
+    .with_description(
+        Description::new("notes")
+            .verb(Verb::Source)
+            .output("text/plain"),
+    );
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:notes"), stateful);
+    let report = report_of(space);
+    assert!(report.of(Check::Cacheable).next().is_none(), "{report}");
+}
+
+/// A read/write resource over one piece of state: `Source` serves it cacheable and
+/// declares no thread, `Sink` replaces it. Correct since core 0.1.73 with no
+/// `depends_on` at all: the kernel hangs the cached read on its own name, and the
+/// `Sink` through that name cuts it.
+fn notes_read_write(state: Arc<std::sync::Mutex<String>>) -> FnEndpoint {
+    FnEndpoint::new("notes", move |inv: &Invocation<'_>| {
+        match inv.request.verb {
+            Verb::Sink => {
+                *state.lock().unwrap() = inv.inline_str("content")?.to_string();
+                Ok(text("written"))
+            }
+            _ => Ok(text(state.lock().unwrap().clone()).cacheable()),
+        }
+    })
+    .with_description(
+        Description::new("notes")
+            .verb(Verb::Source)
+            .action(
+                ActionSpec::new(Verb::Sink)
+                    .requires("urn:cap:notes:write")
+                    .input(ArgSpec::new("content").class(XSD_STRING))
+                    .output("text/plain"),
+            )
+            .output("text/plain"),
+    )
+}
+
+/// The premise the purity rule now rests on, pinned against the core this crate
+/// resolves: an empty thread set is UNOBSERVABLE on a cacheable read (core 0.1.73,
+/// ledger #512 hole A), so the rule is "no thread but its own name" (ledger #549).
+/// Before 0.1.73 the first assertion fails — and the rule spelled `is_empty()`
+/// was right; after it, that spelling fires for nothing.
+#[test]
+fn the_kernel_hangs_every_cacheable_read_on_its_own_name() {
+    let state = Arc::new(std::sync::Mutex::new("first".to_string()));
+    let space = EndpointSpace::new()
+        .bind(Exact::new("urn:example:config"), threadless())
+        .bind(Exact::new("urn:example:notes"), notes_read_write(state));
+    let kernel = kernel(space);
+    let read = |iri: &str| Request::new(Verb::Source, Iri::parse(iri).unwrap());
+    let root = Capability::root();
+
+    let config =
+        futures::executor::block_on(kernel.issue(read("urn:example:config"), &root)).unwrap();
+    assert_eq!(
+        config.threads().iter().collect::<Vec<_>>(),
+        [&Thread::new("urn:example:config")],
+        "a cacheable read declaring no thread carries exactly its own name"
+    );
+
+    // The exemption for a written resource: a Sink through the same name cuts it.
+    let first =
+        futures::executor::block_on(kernel.issue(read("urn:example:notes"), &root)).unwrap();
+    assert_eq!(first.bytes, b"first");
+    assert!(kernel.is_cached(&read("urn:example:notes"), &root));
+    let write = Request::new(Verb::Sink, Iri::parse("urn:example:notes").unwrap())
+        .with_arg("content", ArgRef::Inline(b"second".to_vec()));
+    futures::executor::block_on(kernel.issue(write, &root)).unwrap();
+    assert!(
+        !kernel.is_cached(&read("urn:example:notes"), &root),
+        "a Sink through the same name invalidates the cached read"
+    );
+    let second =
+        futures::executor::block_on(kernel.issue(read("urn:example:notes"), &root)).unwrap();
+    assert_eq!(second.bytes, b"second");
+}
+
+#[test]
+fn cacheable_passes_a_read_written_through_its_own_name() {
+    let state = Arc::new(std::sync::Mutex::new("hello".to_string()));
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:notes"), notes_read_write(state));
+    let report = report_of(space);
+    assert!(report.of(Check::Cacheable).next().is_none(), "{report}");
+}
+
+#[test]
+fn cacheable_reads_a_thread_named_for_the_endpoint_as_none() {
+    // Source only, so nothing writes through `urn:example:notes`: the one thread it
+    // declares is the one the kernel adds, and from outside the two are the same
+    // thread. The documented limit — name the STATE, or opt out with a reason.
     let stateful = FnEndpoint::new("notes", |_inv: &Invocation<'_>| {
         Ok(text("hello").cacheable().depends_on("urn:example:notes"))
     })
@@ -666,7 +764,11 @@ fn cacheable_passes_a_threaded_stateful_read() {
     );
     let space = EndpointSpace::new().bind(Exact::new("urn:example:notes"), stateful);
     let report = report_of(space);
-    assert!(report.of(Check::Cacheable).next().is_none(), "{report}");
+    assert!(
+        report.against("notes").any(|f| f.check == Check::Cacheable
+            && f.detail.contains("no golden thread but its own name")),
+        "{report}"
+    );
 }
 
 #[test]

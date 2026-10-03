@@ -16,7 +16,7 @@ endpoint id first, so a failing test is a checklist rather than the first miss:
 
 ```text
 tag-suggest  ARGSPECS  source: input `book` has no class: declare an rdfs:Class IRI for an entity or an XSD datatype IRI for a scalar (…)
-tag-suggest  CACHEABLE  source: cacheable with an empty golden-thread set: it will be served forever with nothing to cut it. `Suite::pure(id)` if it is a pure function of its inputs; otherwise `depends_on` the thread of the state it reads
+tag-suggest  CACHEABLE  source: cacheable with no golden thread but its own name: it will be served forever with nothing to cut it. The kernel hangs every cacheable read on the name it was read through, and only a write through that same name cuts it — this endpoint declares no `Sink` or `Delete`. `Suite::pure(id)` if it is a pure function of its inputs; otherwise `depends_on` the thread of the state it reads
 link-remove  REQUIRES-VERB  declares requires `urn:cap:fs:write:*` but no verb: `action_specs()` iterates verbs, so this scope is silently inert — the kernel enforces nothing (add `.verb(…)`)
 cms-graph  SKOLEM-RDF  source: the `text/turtle` face has 4 blank node(s) (_:b0, _:b1, _:b2, …): skolemize — mint a stable IRI per node (`urn:ikigai:endpoint:{id}:…`, `urn:event:{uid}`), never a counter
 cms-graph  VOCABULARY  source: the `text/turtle` face uses `https://ikigai-rs.dev/ns#shelf`, which ikigai-vocab does not define and no well-known or registered namespace covers: an invented term with no definition (…)
@@ -59,7 +59,7 @@ pointing at the check.
 | `OUTPUTS` | faces are declared | the bare media type the action serves with its minimal inputs (`;charset=` and other parameters stripped, no `as=`) is one of its declared `outputs`. A wrong declaration hides a face from every consumer that reads outputs — `SKOLEM-RDF` and `VOCABULARY` included, which filter the declaration for RDF faces before probing; linkeddata's `sparql-construct` declared only `application/sparql-results+json` over Turtle for its whole life and the RDF checks saw nothing. What the check cannot observe (a mutating action never fired under root, a failed minimal resolution, a caller's `as=` label) is printed as `unprobed`, never as a finding |
 | `SKOLEM-RDF` | skolemize; no blank nodes | every declared RDF face (`text/turtle`, `application/ld+json`, `application/rdf+xml`, N-Triples, N-Quads, TriG) resolves with the smallest inputs its ArgSpecs allow, parses, and has no blank node |
 | `VOCABULARY` | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known namespace (rdf, rdfs, xsd, owl, dcterms, foaf, schema, prov, ical, skos, sh) or one the module registers. Because it parses, it also reports an unresolvable, mislabeled or malformed face — under its own name when `SKOLEM-RDF` is not selected, so `VOCABULARY` alone proves a hand-written `@prefix` line is well-formed |
-| `CACHEABLE` | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and carries a golden thread unless the endpoint is declared pure; a result declared live (`Suite::live`) is `Expiry::Always` |
+| `CACHEABLE` | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; a result declared live (`Suite::live`) is `Expiry::Always` |
 | `PIPELINE` | pipeline citizenship | a mutating action with by-value inputs declares `content` (where a pipe's value and a `sink`'s body arrive); an action declaring `content` reads it |
 | `NAMES` | naming convention | the description id is a kebab-case noun (`tag-suggest`, `kernel-catalog`) — the MCP projection derives an agent's tool name from it |
 | `DECLARATIONS` | — | every declaration the module made (`live`, `cacheable`, `pure`, `namespace`, a `Fixture`, an `opt_out`, an `opt_out_check`) reached the check that would honour it. A `live` on a `Sink` reached nothing and the report printed `declared live:` anyway |
@@ -93,7 +93,7 @@ Suite::new()
     .opt_out_at("urn:orgfile:{path}", None, "jailed to a configured dir")
     .opt_out_check("review", Check::Vocabulary, "ik:quote lands in vocab 0.1.70")
     .namespace("https://example.org/cms#")   // a vocabulary this module serves
-    .pure("wc")                              // a pure function: no thread expected
+    .pure("wc")                              // a pure function: no thread but its own name
     .cacheable("catalog")                    // marks .cacheable(): hold it to that
     .live("secret")                          // uncacheable by decision: hold it to that
     .run_blocking(&my_kernel())
@@ -318,7 +318,7 @@ Honest residue — what no check here can see:
   wrong. Newline-separated list output (the `..` map convention) is a shape no
   ArgSpec states.
 - **A declared golden thread is a promise a host must keep.** `CACHEABLE` checks
-  the thread set is non-empty, not that anything cuts it; a module declaring
+  the thread set names something besides the endpoint, not that anything cuts it; a module declaring
   `urn:file:` threads over a config home no host watches is clean here. The suite
   cannot see the host.
 - **"Required" that is actually optional.** The minimal call supplies every
@@ -382,6 +382,44 @@ anyone memoizes by id.
 
 0.4.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### Unreleased: purity is "no thread but its own name" (ledger #549), and it may turn your green suite red
+
+**What was wrong.** Since `ikigai-core` 0.1.73 the kernel hangs every cacheable
+`Source`/`Exists` answer on the thread named for its own canonical target (ledger
+#512 hole A, formalism R4.4), so an empty thread set can no longer be observed on a
+cacheable read. `CACHEABLE`'s purity rule was spelled "the thread set is empty", so
+on any core past 0.1.72 it **fired for nothing**: an endpoint caching state it never
+named, which this rule exists to catch, reported clean. A crate that commits no lock
+(this one) resolved past 0.1.72 on its first fresh build, and its own pinned
+findings went red.
+
+**What changed.** The rule is now "no thread but its own name": a cacheable result
+whose threads are all the endpoint's own name, from an endpoint not declared
+`Suite::pure`, is a finding — **unless the endpoint declares a `Sink` or `Delete`**.
+A write through that name fires the kernel's auto-cut on exactly the thread the
+kernel hung the read on, so a read/write resource needs no `depends_on(itself)` any
+more, and is clean without one. `tests/violations.rs` pins the premise against the
+core it resolves (the own-name thread is there, and a `Sink` through the name drops
+the cached read) as well as the verdict.
+
+**Floor.** `ikigai-core` is raised from `0.1.67` to `0.1.73`. No API this crate calls
+changed; the exemption above is right only on a kernel that hangs the read on its
+own name, so below 0.1.73 it would pass a read a write never invalidates.
+
+**What to expect.**
+
+- An endpoint that caches state it never named goes red again — the rule was blind
+  to it on every core past 0.1.72. Name the state's thread, or declare it pure.
+- ⚠ **A thread named after the endpoint itself reads as no thread.** A Source-only
+  endpoint that `depends_on` its own IRI (the old recipe for "my state is me") is
+  indistinguishable from one that names nothing, and is reported. If something
+  outside the endpoint really cuts that name (a watcher, `urn:kernel:cut`), name the
+  thread after the state rather than the endpoint, or opt out with a reason.
+- A read/write endpoint that was red for lacking `depends_on(itself)` goes clean.
+- Own name means the name the walk probed. An endpoint reached through an `Alias`
+  hangs from its BACKING name, which reads here as a thread besides its own, so the
+  rule cannot see it (`Kernel::canonicalize` is private; see "What stays prose").
 
 ### 0.3.0 → 0.4.0: the walk fires once per REQUEST, and it may turn your green suite red
 
