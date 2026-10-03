@@ -13,13 +13,20 @@ categories = ["development-tools::testing"]
 
 [dependencies]
 # The released kernel, consumed from crates.io — the SAME version the module under
-# test links, so a host links exactly one `ikigai-core`. 0.1.67 is the true minimum:
+# test links, so a host links exactly one `ikigai-core`. 0.1.67 is the API minimum:
 # `Kernel::entries()` first listed the kernel's own `urn:kernel:*` operations there
 # (#103), and the walk — and the tests that pin how it skips or includes them —
 # depend on that shape. Everything else this crate reads (`issue_traced`,
 # `describe_pattern`, `TraceEvent::cache_hit`, `Error::Denied`, `InputSource`)
 # is older.
-ikigai-core = "0.1.67"
+#
+# 0.1.73 since the purity rule became "no thread but its own name" (ledger #549):
+# from 0.1.73 the kernel hangs every cacheable `Source`/`Exists` answer on the
+# thread named for its own canonical target, and the rule's exemption for an
+# endpoint that takes writes through that name is right only because the kernel's
+# auto-cut then reaches the cached read. Below 0.1.73 the exemption would pass a
+# read that a write never invalidates. No API changed; the floor is a SEMANTIC one.
+ikigai-core = "0.1.73"
 # The vocabulary is the ORACLE for the terms check: a predicate is "defined" iff it
 # is a subject in `ikigai_vocab::VOCABULARY`. So the floor is the newest published
 # vocabulary, not the oldest API this crate compiles against — an older pin would

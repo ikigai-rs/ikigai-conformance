@@ -51,7 +51,7 @@
 //! | [`Outputs`](Check::Outputs) | faces are declared | the bare media type the action serves with its minimal inputs (parameters stripped) is one of its declared `outputs` — a wrong declaration hides a face from every consumer that reads outputs, the two RDF checks included |
 //! | [`SkolemRdf`](Check::SkolemRdf) | skolemize; no blank nodes | every declared RDF face ([`rdf::RDF_FACES`]) resolves with minimal inputs, parses, and has no blank node |
 //! | [`Vocabulary`](Check::Vocabulary) | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known ([`rdf::WELL_KNOWN_NAMESPACES`]) or module-registered namespace |
-//! | [`Cacheable`](Check::Cacheable) | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and carries a golden thread unless the endpoint is declared pure; a result declared live ([`Suite::live`]) is `Expiry::Always` |
+//! | [`Cacheable`](Check::Cacheable) | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; a result declared live ([`Suite::live`]) is `Expiry::Always` |
 //! | [`Pipeline`](Check::Pipeline) | pipeline citizenship | a mutating action with by-value inputs declares `content` (where the pipe's value arrives); an action declaring `content` reads it |
 //! | [`Names`](Check::Names) | naming convention | the id is a kebab-case noun (the convention `ikigai-core`'s crate docs state) |
 //! | [`Declarations`](Check::Declarations) | — | every declaration the module made ([`Suite::live`], [`Suite::cacheable`], [`Suite::pure`], [`Suite::namespace`], a [`Fixture`], an [`opt_out`](Suite::opt_out), an [`opt_out_at`](Suite::opt_out_at), an [`opt_out_check`](Suite::opt_out_check)) reached the check that would honour it |
@@ -134,18 +134,23 @@
 //!   comes back indistinguishable from one that never marked it. No published core
 //!   API exposes the declared expiry; [`Suite::cacheable`] is the declaration that
 //!   closes the gap and makes that recomputation a finding.
-//! - **Purity and threads** (see above): an empty thread set is a finding until
-//!   declared pure. The declaration is the mechanism; the judgment is still the
-//!   author's.
+//! - **Purity and threads** (see above): a cacheable result with no golden thread
+//!   but its own name is a finding until declared pure, unless the endpoint
+//!   declares a `Sink` or `Delete` (a write through that name cuts the thread the
+//!   kernel hangs every cacheable read on, since `ikigai-core` 0.1.73). The
+//!   declaration is the mechanism; the judgment is still the author's. A module
+//!   that names its state's thread after the endpoint itself is indistinguishable
+//!   from one that names nothing: name the state, or opt out with a reason.
 //! - **Pipeline routing for `Source`.** The engine routes a piped value into the
 //!   sole unnamed required input by contract; nothing an endpoint does makes that
 //!   right or wrong, so only the mutating verbs' `content` rule and "declares
 //!   `content` ⇒ reads it" are checked. Newline-separated list output (the `..`
 //!   map convention) is a shape no ArgSpec states.
 //! - **A declared golden thread is a promise a host must keep.** [`Cacheable`](Check::Cacheable)
-//!   checks the thread set is non-empty, not that anything ever cuts a thread in
-//!   it; a module declaring `urn:file:` threads over a config home no host watches
-//!   is clean here and stale in production. The suite cannot see the host.
+//!   checks the thread set names something besides the endpoint, not that
+//!   anything ever cuts a thread in it; a module declaring `urn:file:` threads over
+//!   a config home no host watches is clean here and stale in production. The
+//!   suite cannot see the host.
 //! - **"Required" that is actually optional.** [`ArgSpecs`](Check::ArgSpecs) reads
 //!   the declaration; the minimal call supplies every required input, so an input
 //!   marked required that the endpoint would happily do without is invisible.
