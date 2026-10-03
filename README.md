@@ -383,7 +383,7 @@ anyone memoizes by id.
 0.4.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
 
-### Unreleased: purity is "no thread but its own name" (ledger #549), and it may turn your green suite red
+### 0.5.0: purity is "no thread but its own name" (ledger #549), and it may turn your green suite red
 
 **What was wrong.** Since `ikigai-core` 0.1.73 the kernel hangs every cacheable
 `Source`/`Exists` answer on the thread named for its own canonical target (ledger
