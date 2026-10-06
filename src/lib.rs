@@ -45,7 +45,7 @@
 //! | check | recipe row | what it sees |
 //! |---|---|---|
 //! | [`ArgSpecs`](Check::ArgSpecs) | ArgSpecs from day one | ≥1 action per description; every input has an IRI `class`; a `default` ∈ `one_of` when both exist; input names unique per action; every template variable is a declared binding input |
-//! | [`RequiresVerb`](Check::RequiresVerb) | declared = enforced | a `requires` with no verb — a floor `action_specs()` never yields, so the kernel enforces nothing |
+//! | [`RequiresVerb`](Check::RequiresVerb) | declared = enforced | a `requires` with no verb — enforced on every verb since core 0.1.85, but the catalog cannot say which actions it gates |
 //! | [`Enforced`](Check::Enforced) | declared = enforced | under a capability holding no grants, an action with `requires` is refused with a typed `Denied`; an action declaring nothing is not |
 //! | [`Authority`](Check::Authority) | declared = enforced | the fourth cell of the same probe: a `Sink` or a `Delete` that declares no `requires` and **mutated anyway** under a capability holding no grants — no scope to withhold, so no caller can be given read without write. A `Source` is not in scope; a mutating action refused for some other reason is unprobed, never a finding |
 //! | [`Outputs`](Check::Outputs) | faces are declared | the bare media type the action serves with its minimal inputs (parameters stripped) is one of its declared `outputs` — a wrong declaration hides a face from every consumer that reads outputs, the two RDF checks included |

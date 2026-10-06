@@ -132,14 +132,14 @@ fn argspecs_catches_a_template_variable_that_is_not_a_binding_input() {
 // ----- REQUIRES-VERB ----------------------------------------------------------
 
 #[test]
-fn requires_without_a_verb_is_caught_statically_and_is_indeed_inert() {
-    let inert = FnEndpoint::new("link-remove", |_inv: &Invocation<'_>| Ok(text("removed")))
+fn requires_without_a_verb_is_caught_statically_and_is_enforced_on_every_verb() {
+    let verbless = FnEndpoint::new("link-remove", |_inv: &Invocation<'_>| Ok(text("removed")))
         .with_description(
             Description::new("link-remove")
                 .summary("Strike one URL (Sink executes)")
-                .requires("urn:cap:fs:write:*"), // no .verb() — inert
+                .requires("urn:cap:fs:write:*"), // no .verb()
         );
-    let space = EndpointSpace::new().bind(Exact::new("urn:example:link-remove"), inert);
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:link-remove"), verbless);
     let k = kernel(space);
     let report = check(&k).unwrap_err();
     assert_caught(
@@ -147,7 +147,9 @@ fn requires_without_a_verb_is_caught_statically_and_is_indeed_inert() {
         Check::RequiresVerb,
         "declares requires `urn:cap:fs:write:*` but no verb",
     );
-    // The finding is not theoretical: the kernel lets the Sink through under no grants.
+    // Since ikigai-core 0.1.85 (ledger #750, A3) a verbless requires gates EVERY verb, so
+    // the finding is about legibility, not enforcement: the kernel refuses the Sink under no
+    // grants, but the catalog cannot say which actions the scope gates.
     let none = ikigai_core::Capability::scoped(Vec::<String>::new());
     let request = ikigai_core::Request::new(
         Verb::Sink,
@@ -155,8 +157,8 @@ fn requires_without_a_verb_is_caught_statically_and_is_indeed_inert() {
     );
     let ran = futures::executor::block_on(k.issue(request, &none));
     assert!(
-        ran.is_ok(),
-        "the undeclared-verb floor enforces nothing: {ran:?}"
+        matches!(ran, Err(ikigai_core::Error::Denied(_))),
+        "a verbless requires must be enforced on every verb: {ran:?}"
     );
 }
 
