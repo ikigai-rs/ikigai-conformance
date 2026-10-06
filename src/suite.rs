@@ -1446,8 +1446,9 @@ fn requires_verb(description: &Description, report: &mut Report) {
             None,
             Check::RequiresVerb,
             format!(
-                "declares requires {} but no verb: `action_specs()` iterates verbs, so this \
-                 scope is silently inert — the kernel enforces nothing (add `.verb(…)`)",
+                "declares requires {} but no verb: since ikigai-core 0.1.85 the kernel enforces \
+                 it on every verb, but the catalog cannot say which actions it gates \
+                 (add `.verb(…)`)",
                 description
                     .requires
                     .iter()

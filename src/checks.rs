@@ -14,8 +14,9 @@ pub enum Check {
     /// declared binding input.
     ArgSpecs,
     /// **`requires` implies a verb.** A description carrying `requires` and no verb
-    /// (other than `Meta`) declares a floor the kernel never enforces: `action_specs()`
-    /// iterates verbs, so the scope is silently inert.
+    /// (other than `Meta`): since ikigai-core 0.1.85 the kernel enforces it on every verb
+    /// (before, `action_specs()` iterated verbs and the scope was silently inert), but the
+    /// catalog still cannot say which actions it gates, so declare the verb.
     RequiresVerb,
     /// **Declared = enforced, the half a test can see.** Every action with a `requires`
     /// is refused with a typed `Denied` under a capability holding no grants; an
