@@ -543,6 +543,13 @@ declared on an `At` endpoint is still counted as consulted, not reported inert,
 because the same endpoint may answer `Never` under another kernel (a pinned clock).
 An `opt_out_check(…, Check::Cacheable, …)` taken only for this reason can go.
 
+**Also in 0.6.1: `Check::ALL` is derived, not hand-kept (ledger #1035).** A `Check`
+variant left out of the hand-written `ALL` array compiled, passed every test, and
+was silently never selected by `Checks::all()` nor listed as skipped: a check that
+existed and never ran. `ALL` is now generated from the enum declaration by one
+macro, so it cannot omit a variant. No consumer-visible change: `ALL` is still
+`[Check; 12]` in the same order.
+
 ### 0.5.x → 0.6.0: `SPACE-NAME` (ledger #987)
 
 **What is new.** A twelfth check, `SPACE-NAME`, and the two declarations it reads,
