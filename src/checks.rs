@@ -3,6 +3,31 @@
 use std::fmt;
 use std::ops::{BitOr, Sub};
 
+/// Declares [`Check`] and derives [`Check::ALL`] from the same variant list, so a
+/// variant cannot exist without being selectable. A hand-kept `ALL` drifted silently:
+/// a variant left out of it compiled, passed every test, and was never selected by
+/// [`Checks::all`] nor listed by [`Checks::skipped`] (ledger #1035).
+macro_rules! declare_checks {
+    (
+        $(#[$meta:meta])*
+        pub enum Check {
+            $( $(#[$vmeta:meta])* $variant:ident, )+
+        }
+    ) => {
+        $(#[$meta])*
+        pub enum Check {
+            $( $(#[$vmeta])* $variant, )+
+        }
+
+        impl Check {
+            /// Every check, in report order: declaration order, because this array is
+            /// generated from the declaration.
+            pub const ALL: [Check; [$(Check::$variant),+].len()] = [$(Check::$variant),+];
+        }
+    };
+}
+
+declare_checks! {
 /// One rule of the module recipe, as a check. Each names the recipe row it
 /// mechanizes; the crate docs state what each can and cannot see.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -115,24 +140,9 @@ pub enum Check {
     /// release, say — and say why in the same place you would say it to a reviewer.
     Declarations,
 }
+}
 
 impl Check {
-    /// Every check, in report order.
-    pub const ALL: [Check; 12] = [
-        Check::ArgSpecs,
-        Check::RequiresVerb,
-        Check::Enforced,
-        Check::Authority,
-        Check::Outputs,
-        Check::SkolemRdf,
-        Check::Vocabulary,
-        Check::Cacheable,
-        Check::Pipeline,
-        Check::Names,
-        Check::SpaceName,
-        Check::Declarations,
-    ];
-
     /// The short upper-case label a report line carries.
     pub fn label(self) -> &'static str {
         match self {
@@ -298,6 +308,18 @@ impl fmt::Debug for Checks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_is_every_variant_in_declaration_order() {
+        // `ALL` is generated from the enum (`declare_checks!`), so it cannot omit a
+        // variant. This pins what report order and `Checks` rely on beyond that: no
+        // duplicate, position = discriminant (the bit a `Checks` holds), and every
+        // discriminant fits the `u16` bitset.
+        for (i, c) in Check::ALL.iter().enumerate() {
+            assert_eq!(*c as usize, i, "{c} is at {i} in Check::ALL");
+        }
+        assert!(Check::ALL.len() <= u16::BITS as usize);
+    }
 
     #[test]
     fn all_selects_every_check_and_none_selects_nothing() {
