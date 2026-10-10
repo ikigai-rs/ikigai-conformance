@@ -519,7 +519,7 @@ anyone memoizes by id.
 
 ## Status
 
-0.4.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.6.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
 
 ### 0.5.x → 0.6.0: `SPACE-NAME` (ledger #987)
