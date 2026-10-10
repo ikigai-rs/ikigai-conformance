@@ -571,6 +571,11 @@ impl Suite {
     /// with no golden thread but its own name is correct rather than a
     /// representation that caches forever with nothing to cut it. (The kernel hangs
     /// every cacheable read on its own name, so "no thread" is never observable.)
+    ///
+    /// Only an `Expiry::Never` result needs it: an `Expiry::At` deadline already
+    /// bounds the answer, so a clock reading cacheable to the minute is not asked to
+    /// be pure. A `pure` on such an endpoint is still counted as consulted, since
+    /// the same endpoint may answer `Never` under another kernel (a pinned clock).
     pub fn pure(mut self, id: impl Into<String>) -> Self {
         self.pure.push(id.into());
         self
@@ -2351,9 +2356,21 @@ impl Action<'_> {
         // endpoint takes writes there; otherwise the result still has nothing to cut
         // it. A thread the module declared that happens to equal its own name is
         // indistinguishable from the kernel's, and reads the same way.
+        //
+        // Only `Expiry::Never` is unbounded. `Always` returned above; an `At` deadline
+        // is a bound in TIME — the kernel stops serving the answer when the deadline
+        // passes, cut or not — so "served forever" is false of it and a clock reading
+        // (a `tz-now` cacheable to the minute) owes no `pure` declaration (ledger
+        // #1000). Every `At` counts, however distant: the suite judges the kind of
+        // bound, not its length. On a clockless kernel an `At` answer is never cached
+        // at all, which the recomputation finding above already names.
         let own = Thread::from(self.target.as_str());
         let foreign = first.threads().iter().any(|t| *t != own);
-        if !foreign && !self.written_here && !self.suite.pure.iter().any(|p| p == self.id) {
+        if first.expiry == Expiry::Never
+            && !foreign
+            && !self.written_here
+            && !self.suite.pure.iter().any(|p| p == self.id)
+        {
             report.findings.push(self.finding(
                 Check::Cacheable,
                 "cacheable with no golden thread but its own name: it will be served forever \

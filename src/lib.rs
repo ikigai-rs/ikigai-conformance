@@ -51,7 +51,7 @@
 //! | [`Outputs`](Check::Outputs) | faces are declared | the bare media type the action serves with its minimal inputs (parameters stripped) is one of its declared `outputs` — a wrong declaration hides a face from every consumer that reads outputs, the two RDF checks included |
 //! | [`SkolemRdf`](Check::SkolemRdf) | skolemize; no blank nodes | every declared RDF face ([`rdf::RDF_FACES`]) resolves with minimal inputs, parses, and has no blank node |
 //! | [`Vocabulary`](Check::Vocabulary) | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known ([`rdf::WELL_KNOWN_NAMESPACES`]) or module-registered namespace |
-//! | [`Cacheable`](Check::Cacheable) | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; a result declared live ([`Suite::live`]) is `Expiry::Always` |
+//! | [`Cacheable`](Check::Cacheable) | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and — if it never expires (`Expiry::Never`; an `Expiry::At` deadline is a bound) — carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; a result declared live ([`Suite::live`]) is `Expiry::Always` |
 //! | [`Pipeline`](Check::Pipeline) | pipeline citizenship | a mutating action with by-value inputs declares `content` (where the pipe's value arrives); an action declaring `content` reads it |
 //! | [`Names`](Check::Names) | naming convention | the id is a kebab-case noun (the convention `ikigai-core`'s crate docs state) |
 //! | [`SpaceName`](Check::SpaceName) | a name is a claim: same name, same doors | a space declared self-named ([`Suite::self_named_space`]) claims [`space_iri`](ikigai_core::space_iri)`(module)` under [`SPACE_PREFIX`](ikigai_core::SPACE_PREFIX), on its topology root too, and two calls hold the same doors; a space declared host-named ([`Suite::host_named_space`]) claims nothing |
@@ -135,10 +135,13 @@
 //!   comes back indistinguishable from one that never marked it. No published core
 //!   API exposes the declared expiry; [`Suite::cacheable`] is the declaration that
 //!   closes the gap and makes that recomputation a finding.
-//! - **Purity and threads** (see above): a cacheable result with no golden thread
-//!   but its own name is a finding until declared pure, unless the endpoint
-//!   declares a `Sink` or `Delete` (a write through that name cuts the thread the
-//!   kernel hangs every cacheable read on, since `ikigai-core` 0.1.73). The
+//! - **Purity and threads** (see above): a result that never expires
+//!   (`Expiry::Never`) with no golden thread but its own name is a finding until
+//!   declared pure, unless the endpoint declares a `Sink` or `Delete` (a write
+//!   through that name cuts the thread the kernel hangs every cacheable read on,
+//!   since `ikigai-core` 0.1.73). An `Expiry::At` deadline is a bound and owes
+//!   nothing here, however distant it is: the suite judges the kind of bound, not
+//!   its length. The
 //!   declaration is the mechanism; the judgment is still the author's. A module
 //!   that names its state's thread after the endpoint itself is indistinguishable
 //!   from one that names nothing: name the state, or opt out with a reason.
