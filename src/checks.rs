@@ -63,6 +63,8 @@ pub enum Check {
     /// cache the second time, byte-identical, and — unless the endpoint is declared
     /// pure or takes writes through its own name — depends on at least one golden
     /// thread besides the one the kernel hangs it on (its own name, core ≥ 0.1.73).
+    /// That last rule is about a result served FOREVER, so it holds only
+    /// `Expiry::Never`: an `Expiry::At` deadline is a bound in time, whatever its length.
     /// Both polarities are declarations the module makes: [`Suite::cacheable`](crate::Suite::cacheable)
     /// holds an endpoint to being cacheable, [`Suite::live`](crate::Suite::live) to
     /// being `Expiry::Always`. An endpoint declaring neither is held to neither.

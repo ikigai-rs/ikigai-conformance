@@ -9,8 +9,9 @@ use std::sync::Arc;
 use ikigai_conformance::{check, Check, Checks, Fixture, Report, Suite};
 use ikigai_core::{
     space_iri, ActionSpec, ArgRef, ArgSpec, Capability, Description, Endpoint, EndpointSpace,
-    Error, Exact, FnEndpoint, Invocation, Iri, Kernel, ReprType, Representation, Request,
-    Resolution, Result, Scope, Space, SpaceEntry, SpaceKind, Thread, Topology, UriTemplate, Verb,
+    Error, Exact, Expiry, FixedClock, FnEndpoint, Invocation, Iri, Kernel, ReprType,
+    Representation, Request, Resolution, Result, Scope, Space, SpaceEntry, SpaceKind, Thread, Time,
+    Topology, UriTemplate, Verb,
 };
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -770,6 +771,87 @@ fn cacheable_reads_a_thread_named_for_the_endpoint_as_none() {
         report.against("notes").any(|f| f.check == Check::Cacheable
             && f.detail.contains("no golden thread but its own name")),
         "{report}"
+    );
+}
+
+/// 2026-09-27T12:34:56Z, and the next minute boundary after it.
+const NOW: u64 = 1_790_512_496_000;
+const NEXT_MINUTE: u64 = 1_790_512_500_000;
+
+/// A clock reading: cacheable until the next minute (`Expiry::At`) and threaded on
+/// nothing, because a clock is not a resource anything could cut. The deadline is
+/// the bound — the shape `ikigai-tz`'s `tz-now` has (ledger #1000).
+fn minute_clock() -> FnEndpoint {
+    FnEndpoint::new("minute", |_inv: &Invocation<'_>| {
+        Ok(text("12:34").cacheable_until(Time::from_millis(NEXT_MINUTE)))
+    })
+    .with_description(
+        Description::new("minute")
+            .verb(Verb::Source)
+            .output("text/plain"),
+    )
+}
+
+/// The purity rule is about a result that would be served FOREVER: `Expiry::Never`
+/// with nothing to cut it. An `Expiry::At` deadline bounds the answer in time, so it
+/// is not that, and the rule does not ask it to be declared pure (ledger #1000).
+#[test]
+fn cacheable_reads_an_at_deadline_as_a_bound() {
+    // A clocked kernel honors the deadline: the second read is a cache hit, and
+    // nothing about the answer is "forever".
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:minute"), minute_clock());
+    let clocked = kernel(space).with_clock(Arc::new(FixedClock::at(NOW)));
+    let first = futures::executor::block_on(clocked.issue(
+        Request::new(Verb::Source, Iri::parse("urn:example:minute").unwrap()),
+        &Capability::root(),
+    ))
+    .unwrap();
+    assert_eq!(
+        first.expiry,
+        Expiry::At(Time::from_millis(NEXT_MINUTE)),
+        "the premise: the kernel hands the deadline back unchanged"
+    );
+    assert_eq!(
+        first.threads().iter().collect::<Vec<_>>(),
+        [&Thread::new("urn:example:minute")],
+        "the premise: no golden thread but its own name"
+    );
+    let report = Suite::new().run_blocking(&clocked);
+    assert!(report.of(Check::Cacheable).next().is_none(), "{report}");
+
+    // A clockless kernel declines to cache a deadline, and THAT is a finding with
+    // its true cause — but still not "served forever".
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:minute"), minute_clock());
+    let report = report_of(space);
+    assert_caught(
+        &report,
+        Check::Cacheable,
+        "the result carries `Expiry::At` on a clockless kernel",
+    );
+    assert!(
+        report
+            .of(Check::Cacheable)
+            .all(|f| !f.detail.contains("no golden thread but its own name")),
+        "{report}"
+    );
+
+    // The bound is the deadline, not the clock: the same endpoint answering
+    // `Expiry::Never` on the same clocked kernel is still caught.
+    let forever = FnEndpoint::new("minute", |_inv: &Invocation<'_>| {
+        Ok(text("12:34").cacheable())
+    })
+    .with_description(
+        Description::new("minute")
+            .verb(Verb::Source)
+            .output("text/plain"),
+    );
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:minute"), forever);
+    let clocked = kernel(space).with_clock(Arc::new(FixedClock::at(NOW)));
+    let report = Suite::new().run_blocking(&clocked);
+    assert_caught(
+        &report,
+        Check::Cacheable,
+        "no golden thread but its own name",
     );
 }
 

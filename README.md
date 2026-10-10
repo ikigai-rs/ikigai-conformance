@@ -59,7 +59,7 @@ pointing at the check.
 | `OUTPUTS` | faces are declared | the bare media type the action serves with its minimal inputs (`;charset=` and other parameters stripped, no `as=`) is one of its declared `outputs`. A wrong declaration hides a face from every consumer that reads outputs — `SKOLEM-RDF` and `VOCABULARY` included, which filter the declaration for RDF faces before probing; linkeddata's `sparql-construct` declared only `application/sparql-results+json` over Turtle for its whole life and the RDF checks saw nothing. What the check cannot observe (a mutating action never fired under root, a failed minimal resolution, a caller's `as=` label) is printed as `unprobed`, never as a finding |
 | `SKOLEM-RDF` | skolemize; no blank nodes | every declared RDF face (`text/turtle`, `application/ld+json`, `application/rdf+xml`, N-Triples, N-Quads, TriG) resolves with the smallest inputs its ArgSpecs allow, parses, and has no blank node |
 | `VOCABULARY` | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known namespace (rdf, rdfs, xsd, owl, dcterms, foaf, schema, prov, ical, skos, sh) or one the module registers. Because it parses, it also reports an unresolvable, mislabeled or malformed face — under its own name when `SKOLEM-RDF` is not selected, so `VOCABULARY` alone proves a hand-written `@prefix` line is well-formed |
-| `CACHEABLE` | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; a result declared live (`Suite::live`) is `Expiry::Always` |
+| `CACHEABLE` | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and — if it never expires (`Expiry::Never`; an `Expiry::At` deadline is a bound) — carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; a result declared live (`Suite::live`) is `Expiry::Always` |
 | `PIPELINE` | pipeline citizenship | a mutating action with by-value inputs declares `content` (where a pipe's value and a `sink`'s body arrive); an action declaring `content` reads it |
 | `NAMES` | naming convention | the description id is a kebab-case noun (`tag-suggest`, `kernel-catalog`) — the MCP projection derives an agent's tool name from it |
 | `SPACE-NAME` | a name is a claim: same name, same doors | a space the module declares **self-named** claims `space_iri("<module>")` (`urn:iki:space:<module>`), on its topology root too, and two calls of its constructor claim the same name over the same doors; a space it declares **host-named** claims nothing. See [A space's name](#a-spaces-name-space-name) |
@@ -521,6 +521,27 @@ anyone memoizes by id.
 
 0.6.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.6.0 → 0.6.1: an `Expiry::At` deadline is a bound (ledger #1000)
+
+**What was wrong.** `CACHEABLE`'s purity rule fired on any cacheable result with no
+golden thread but its own name, and said it "will be served forever with nothing to
+cut it". That is false of an `Expiry::At` answer: the kernel stops serving it at the
+deadline, cut or not. A clock reading cacheable to the minute (`ikigai-tz`'s
+`tz-now`) is not a pure function and has no state to name a thread for, so every
+such module needed an opt-out or a `pure` declaration it could not honestly make.
+
+**What changed.** The rule holds only `Expiry::Never`, the one expiry that is
+unbounded. Every `At` counts as a bound, however distant: the suite judges the kind
+of bound, not its length. Nothing else in `CACHEABLE` moved: an `At` answer on a
+clockless kernel is still reported as recomputing (the kernel declines to cache a
+deadline it cannot read), and the `live` rule still reports an `At` answer as
+cacheable.
+
+**Will it turn a green suite red?** No; the check refuses less. A `pure` already
+declared on an `At` endpoint is still counted as consulted, not reported inert,
+because the same endpoint may answer `Never` under another kernel (a pinned clock).
+An `opt_out_check(…, Check::Cacheable, …)` taken only for this reason can go.
 
 ### 0.5.x → 0.6.0: `SPACE-NAME` (ledger #987)
 
