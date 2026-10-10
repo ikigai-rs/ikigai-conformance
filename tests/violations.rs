@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use ikigai_conformance::{check, Check, Checks, Fixture, Report, Suite};
 use ikigai_core::{
-    ActionSpec, ArgRef, ArgSpec, Capability, Description, Endpoint, EndpointSpace, Error, Exact,
-    FnEndpoint, Invocation, Iri, Kernel, ReprType, Representation, Request, Result, Thread,
-    UriTemplate, Verb,
+    space_iri, ActionSpec, ArgRef, ArgSpec, Capability, Description, Endpoint, EndpointSpace,
+    Error, Exact, FnEndpoint, Invocation, Iri, Kernel, ReprType, Representation, Request,
+    Resolution, Result, Scope, Space, SpaceEntry, SpaceKind, Thread, Topology, UriTemplate, Verb,
 };
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -1925,4 +1925,360 @@ fn a_template_pattern_is_matched_verbatim_not_expanded() {
         Check::Declarations,
         "the walk reached no binding with that pattern (it is matched verbatim",
     );
+}
+
+// ----- SPACE-NAME ---------------------------------------------------------------
+
+/// One door, an echo, at `urn:example:{name}`: the smallest space a constructor
+/// can build.
+fn one_door(name: &str) -> EndpointSpace {
+    EndpointSpace::new().bind(
+        Exact::new(format!("urn:example:{name}")),
+        ikigai_core::builtins::echo(),
+    )
+}
+
+/// The space check alone, so a fixture's other findings never mask it.
+fn spaces_only() -> Suite {
+    Suite::new().checks(Checks::SPACE_NAME | Checks::DECLARATIONS)
+}
+
+/// A hand-built space that claims whatever it is told to, in `id()`, in its
+/// topology and in its listing separately — the three places a name or a door set
+/// can be read, made to disagree on purpose.
+struct Says {
+    id: Option<Iri>,
+    top: Topology,
+    entries: Option<Vec<SpaceEntry>>,
+}
+
+impl Space for Says {
+    fn resolve(&self, _request: &Request, _scope: &Scope) -> Resolution {
+        Resolution::Miss
+    }
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        self.entries.clone()
+    }
+    fn id(&self) -> Option<Iri> {
+        self.id.clone()
+    }
+    fn topology(&self) -> Topology {
+        self.top.clone()
+    }
+}
+
+fn space_report(suite: Suite) -> Report {
+    suite.run_blocking(&kernel(
+        EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming()),
+    ))
+}
+
+#[test]
+fn space_name_catches_a_self_named_space_that_claims_nothing() {
+    fn anonymous() -> EndpointSpace {
+        one_door("echo")
+    }
+    let report = space_report(spaces_only().self_named_space("example", anonymous));
+    assert_caught(
+        &report,
+        Check::SpaceName,
+        "claims no name, but it is declared self-named: a configuration-free space names \
+         itself — end the constructor with `.named(ikigai_core::space_iri(\"example\"))`, \
+         which is `urn:iki:space:example`",
+    );
+    let finding = report.of(Check::SpaceName).next().expect("one finding");
+    assert_eq!(finding.endpoint, "urn:iki:space:example", "{report}");
+    assert!(
+        finding.detail.contains("anonymous"),
+        "names the constructor:\n{report}"
+    );
+    assert_eq!(report.of(Check::SpaceName).count(), 1, "{report}");
+}
+
+#[test]
+fn space_name_catches_a_name_outside_the_prefix() {
+    // The pre-#987 spelling: `urn:ikigai:space:`, not `urn:iki:space:`.
+    fn legacy() -> EndpointSpace {
+        one_door("echo").named(Iri::parse("urn:ikigai:space:example").unwrap())
+    }
+    let report = space_report(spaces_only().self_named_space("example", legacy));
+    assert_caught(
+        &report,
+        Check::SpaceName,
+        "claims `urn:ikigai:space:example`, outside `urn:iki:space:`: a module's \
+         configuration-free space is named `ikigai_core::space_iri(\"example\")`, which is \
+         `urn:iki:space:example`",
+    );
+    assert_eq!(report.of(Check::SpaceName).count(), 1, "{report}");
+}
+
+#[test]
+fn space_name_catches_a_name_other_than_the_one_declared() {
+    fn other() -> EndpointSpace {
+        one_door("echo").named(space_iri("other"))
+    }
+    let report = space_report(spaces_only().self_named_space("example", other));
+    assert_caught(
+        &report,
+        Check::SpaceName,
+        "claims `urn:iki:space:other`, but it is declared as `urn:iki:space:example`",
+    );
+}
+
+#[test]
+fn space_name_catches_a_host_named_constructor_that_names_itself() {
+    // Parameterized, so the doors depend on what it was handed; naming it anyway
+    // claims one name for every instance.
+    fn space(name: &str) -> EndpointSpace {
+        one_door(name).named(space_iri("example"))
+    }
+    let report = space_report(spaces_only().host_named_space("space(name)", space("echo")));
+    assert_caught(
+        &report,
+        Check::SpaceName,
+        "claims `urn:iki:space:example`, but it is declared host-named: its doors depend on \
+         what it was handed, so only the host knows which instance it is. Drop `.named(..)` \
+         and let the host name it — a name is a claim: same name, same doors",
+    );
+    assert_eq!(
+        report.of(Check::SpaceName).next().unwrap().endpoint,
+        "space(name)",
+        "{report}"
+    );
+}
+
+#[test]
+fn space_name_catches_a_host_named_space_whose_topology_names_it() {
+    let says = Says {
+        id: None,
+        top: Topology::new(SpaceKind::Fallback).with_id(Some(space_iri("example"))),
+        entries: Some(vec![]),
+    };
+    let report = space_report(spaces_only().host_named_space("says", says));
+    assert_caught(
+        &report,
+        Check::SpaceName,
+        "`id()` claims nothing, but the topology's root node names `urn:iki:space:example`",
+    );
+}
+
+#[test]
+fn space_name_catches_a_self_named_space_whose_two_calls_hold_different_doors() {
+    // The shape of a constructor that reads configuration while building: every
+    // call answers to the same name over doors of its own.
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn drifting() -> EndpointSpace {
+        let n = CALLS.fetch_add(1, Ordering::SeqCst);
+        one_door(&format!("echo-{n}")).named(space_iri("example"))
+    }
+    let report = space_report(spaces_only().self_named_space("example", drifting));
+    assert_caught(
+        &report,
+        Check::SpaceName,
+        "hold different doors (first call: `/ door 0 `urn:example:echo-0` (exact) -> echo`; \
+         second call: `/ door 0 `urn:example:echo-1` (exact) -> echo`): a name is a claim — \
+         same name, same doors — and every call answers to `urn:iki:space:example`",
+    );
+    assert_caught(
+        &report,
+        Check::SpaceName,
+        "declare it with `Suite::host_named_space`",
+    );
+    assert_eq!(report.of(Check::SpaceName).count(), 1, "{report}");
+}
+
+#[test]
+fn space_name_catches_a_self_named_space_whose_two_calls_claim_different_names() {
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn renaming() -> EndpointSpace {
+        let n = CALLS.fetch_add(1, Ordering::SeqCst);
+        let name = if n == 0 { "example" } else { "example:again" };
+        one_door("echo").named(space_iri(name))
+    }
+    let report = space_report(spaces_only().self_named_space("example", renaming));
+    assert_caught(
+        &report,
+        Check::SpaceName,
+        "claim different names (`urn:iki:space:example` then `urn:iki:space:example:again`)",
+    );
+}
+
+#[test]
+fn space_name_catches_doors_only_the_listing_can_see() {
+    // An opaque topology hides every door; `entries()` is the second witness.
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn opaque() -> Says {
+        let n = CALLS.fetch_add(1, Ordering::SeqCst);
+        Says {
+            id: Some(space_iri("example")),
+            top: Topology::opaque(Some(space_iri("example"))),
+            entries: Some(vec![SpaceEntry::new(format!("urn:example:{n}"), "echo")]),
+        }
+    }
+    let report = space_report(spaces_only().self_named_space("example", opaque));
+    assert_caught(
+        &report,
+        Check::SpaceName,
+        "hold different doors (first call: `entry `urn:example:0` -> echo`; second call: \
+         `entry `urn:example:1` -> echo`)",
+    );
+    // And the evidence line says the topology compared nothing behind the node.
+    let text = report.to_string();
+    assert!(
+        text.contains(
+            "two calls, 0 door(s) compared; 1 opaque node(s), whose doors only `entries()` can see"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn space_name_catches_a_topology_root_that_does_not_carry_the_name() {
+    fn half_named() -> Says {
+        Says {
+            id: Some(space_iri("example")),
+            top: Topology::new(SpaceKind::Fallback),
+            entries: Some(vec![]),
+        }
+    }
+    let report = space_report(spaces_only().self_named_space("example", half_named));
+    assert_caught(
+        &report,
+        Check::SpaceName,
+        "the topology's root node names no name while `id()` claims `urn:iki:space:example`",
+    );
+}
+
+#[test]
+fn space_name_catches_two_declarations_of_one_name_over_different_doors() {
+    // Each passes alone: the part claims the whole's name.
+    fn whole() -> EndpointSpace {
+        one_door("echo")
+            .bind(
+                Exact::new("urn:example:part"),
+                ikigai_core::builtins::to_upper(),
+            )
+            .named(space_iri("example"))
+    }
+    fn part() -> EndpointSpace {
+        one_door("echo").named(space_iri("example"))
+    }
+    let report = space_report(
+        spaces_only()
+            .self_named_space("example", whole)
+            .self_named_space("example", part),
+    );
+    let findings: Vec<_> = report.of(Check::SpaceName).collect();
+    assert_eq!(findings.len(), 1, "{report}");
+    assert!(
+        findings[0].detail.contains(
+            "are both declared as `urn:iki:space:example` but hold \
+             different doors (first call: `/ door 1 `urn:example:part` (exact) -> toUpper`; \
+             second call: nothing)"
+        ),
+        "{report}"
+    );
+    assert!(
+        findings[0]
+            .detail
+            .contains("`space_iri(\"<module>:<part>\")`"),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_space_declared_while_space_name_is_not_selected_is_inert() {
+    fn named() -> EndpointSpace {
+        one_door("echo").named(space_iri("example"))
+    }
+    let report = space_report(
+        Suite::new()
+            .checks(Checks::DECLARATIONS)
+            .self_named_space("example", named),
+    );
+    assert_caught(
+        &report,
+        Check::Declarations,
+        "declared self-named (`Suite::self_named_space`) but SPACE-NAME is not selected",
+    );
+    assert!(
+        report
+            .to_string()
+            .contains("space: urn:iki:space:example self-named by"),
+        "{report}"
+    );
+    assert!(report.to_string().contains(": not compared"), "{report}");
+}
+
+#[test]
+fn a_space_name_waiver_is_per_declared_space() {
+    fn legacy() -> EndpointSpace {
+        one_door("echo").named(Iri::parse("urn:ikigai:space:example").unwrap())
+    }
+    let report = space_report(
+        spaces_only()
+            .self_named_space("example", legacy)
+            .opt_out_check(
+                "urn:iki:space:example",
+                Check::SpaceName,
+                "renamed in the module wave",
+            )
+            .opt_out_check(
+                "urn:iki:space:typo",
+                Check::SpaceName,
+                "a label nothing declares",
+            ),
+    );
+    assert_eq!(report.of(Check::SpaceName).count(), 0, "waived:\n{report}");
+    assert_caught(
+        &report,
+        Check::Declarations,
+        "waived SPACE-NAME (a label nothing declares) but that check could not have run for \
+         it anyway: no space is declared under that label",
+    );
+    assert_eq!(report.of(Check::Declarations).count(), 1, "{report}");
+    assert!(
+        report
+            .to_string()
+            .contains("* SPACE-NAME ran on 0 of 1 space(s); waived on the rest"),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_report_with_no_space_declared_says_so() {
+    let report = space_report(spaces_only());
+    assert!(report.is_clean(), "{report}");
+    assert!(
+        report.to_string().contains("space: none declared"),
+        "{report}"
+    );
+    // Not selected, not mentioned.
+    let report = space_report(Suite::new().checks(Checks::NAMES));
+    assert!(!report.to_string().contains("space: "), "{report}");
+}
+
+#[test]
+fn space_name_runs_when_the_kernel_cannot_be_walked() {
+    fn named_wrong() -> EndpointSpace {
+        one_door("echo")
+    }
+    let unlisted = Says {
+        id: None,
+        top: Topology::opaque(None),
+        entries: None,
+    };
+    let report = spaces_only()
+        .self_named_space("example", named_wrong)
+        .run_blocking(&Kernel::new(Arc::new(unlisted)));
+    assert_caught(&report, Check::SpaceName, "claims no name");
+}
+
+#[test]
+#[should_panic(expected = "drop the crate's `ikigai-` prefix")]
+fn a_crate_name_in_place_of_a_module_name_is_refused_where_it_is_written() {
+    fn space() -> EndpointSpace {
+        one_door("echo")
+    }
+    let _ = Suite::new().self_named_space("ikigai-example", space);
 }

@@ -36,7 +36,12 @@ categories = ["development-tools::testing"]
 # 0.1.85 since 0.5.1, SEMANTIC again (ledger #756): from 0.1.85 a `requires` declared with
 # no verb is enforced on every verb (ledger #750, A3). The REQUIRES-VERB finding's text and
 # its test say so, which is true only on 0.1.85+; below it the scope is silently inert.
-ikigai-core = "0.1.85"
+#
+# 0.1.89 since 0.6.0, an API floor (ledger #987): SPACE-NAME calls `space_iri` and reads
+# `SPACE_PREFIX`, both new in 0.1.89, which is also the release where binding a door onto
+# a named `EndpointSpace` drops its name. Under 0.x caret rules this is the RANGE
+# >=0.1.89, <0.2.0: a core 0.2 is a deliberate re-pin here, not a silent float.
+ikigai-core = "0.1.89"
 # The vocabulary is the ORACLE for the terms check: a predicate is "defined" iff it
 # is a subject in `ikigai_vocab::VOCABULARY`. So the floor is the newest published
 # vocabulary, not the oldest API this crate compiles against — an older pin would
@@ -60,7 +65,8 @@ ikigai-core = "0.1.85"
 # 0.1.70 through the old caret; raising the FLOOR is what stops a consumer with an
 # older resolved vocabulary from being told a term it can see is invented.
 # 0.5.0: re-checked — 0.1.84 is the head in the registry index; raised to it.
-ikigai-vocab = "0.1.85"
+# 0.6.0: re-checked — 0.1.89 is the head in the registry index; raised to it.
+ikigai-vocab = "0.1.89"
 # One parser for every RDF face a module can declare (Turtle, N-Triples, N-Quads,
 # TriG, RDF/XML, JSON-LD). 0.2.5 is the version whose `for_slice` and
 # `RdfFormat::from_media_type` this crate was written against.

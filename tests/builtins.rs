@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 
-use ikigai_conformance::{check, Check, Suite};
+use ikigai_conformance::{check, Check, Checks, Suite};
 use ikigai_core::builtins;
 use ikigai_core::{
-    Capability, EndpointSpace, Exact, Iri, Kernel, Request, Thread, UriTemplate, Verb,
+    space_iri, Capability, EndpointSpace, Exact, Iri, Kernel, Request, Thread, UriTemplate, Verb,
 };
 
 fn builtins_kernel() -> Kernel {
@@ -150,9 +150,10 @@ fn the_kernel_operations_reported_for_the_record() {
     );
     // Every kernel op serves what it declares. Some cannot be resolved with minimal
     // inputs on a bare kernel (`kernel-catalog` needs a Meta renderer,
-    // `kernel-validate` a proposal, and `kernel-cached` — core 0.1.82 — a `target`
-    // IRI the minimal sample value is not), and OUTPUTS lists them as unprobed
-    // rather than reporting a face it never saw.
+    // `kernel-validate` a proposal, and `kernel-cached` (core 0.1.82) and
+    // `kernel-explain` (core 0.1.87) a `target` IRI the minimal sample value is
+    // not), and OUTPUTS lists them as unprobed rather than reporting a face it never
+    // saw. The core floor (0.1.89) binds all four, so the list is fixed.
     assert!(
         kernel_findings.iter().all(|f| f.check != Check::Outputs),
         "{report}"
@@ -163,15 +164,84 @@ fn the_kernel_operations_reported_for_the_record() {
         .filter(|u| u.check == Check::Outputs)
         .map(|u| u.endpoint.as_str())
         .collect();
-    let binds_cached = report
-        .findings
-        .iter()
-        .any(|f| f.endpoint == "kernel-cached");
-    let expected: &[&str] = if binds_cached {
-        &["kernel-cached", "kernel-catalog", "kernel-validate"]
-    } else {
-        &["kernel-catalog", "kernel-validate"]
-    };
-    assert_eq!(unprobed, expected, "{report}");
+    assert_eq!(
+        unprobed,
+        [
+            "kernel-cached",
+            "kernel-catalog",
+            "kernel-explain",
+            "kernel-validate"
+        ],
+        "{report}"
+    );
     eprintln!("{report}");
+}
+
+/// The builtins as a module would ship them: one configuration-free constructor.
+fn builtins_space() -> EndpointSpace {
+    EndpointSpace::new()
+        .bind(Exact::new("urn:example:toUpper"), builtins::to_upper())
+        .bind(
+            Exact::new("urn:example:reverseList"),
+            builtins::reverse_list(),
+        )
+        .bind(
+            UriTemplate::parse("urn:example:echo/{message}").unwrap(),
+            builtins::echo(),
+        )
+        .named(space_iri("example"))
+}
+
+/// A part of it with doors of its own, under a name of its own (the shape of
+/// `ikigai_sexpr::arrangement_space`, `urn:iki:space:sexpr:arrangement`).
+fn echo_part() -> EndpointSpace {
+    EndpointSpace::new()
+        .bind(
+            UriTemplate::parse("urn:example:echo/{message}").unwrap(),
+            builtins::echo(),
+        )
+        .named(space_iri("example:echo"))
+}
+
+/// An instance-built constructor: its doors depend on the prefix it is handed.
+fn echo_under(prefix: &str) -> EndpointSpace {
+    EndpointSpace::new().bind(
+        UriTemplate::parse(format!("{prefix}{{message}}")).unwrap(),
+        builtins::echo(),
+    )
+}
+
+#[test]
+fn the_builtins_space_passes_space_name_self_named_with_a_part_and_host_named() {
+    let report = Suite::new()
+        .checks(Checks::SPACE_NAME | Checks::DECLARATIONS)
+        .self_named_space("example", builtins_space)
+        .self_named_space("example:echo", echo_part)
+        .host_named_space("echo_under(prefix)", echo_under("urn:example:say/"))
+        .run_blocking(&Kernel::new(Arc::new(builtins_space())));
+    report.assert_clean();
+    let text = report.to_string();
+    assert!(
+        text.contains(
+            "space: urn:iki:space:example self-named by `builtins::builtins_space`: two calls, 3 \
+             door(s) compared\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("space: urn:iki:space:example:echo self-named by `builtins::echo_part`: two calls, 1 door(s) compared\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("space: echo_under(prefix) host-named\n"),
+        "{text}"
+    );
+    // Extending the named space drops the claim (core 0.1.89), so a host that adds
+    // a door to a module's space cannot carry the module's name over it.
+    let extended = builtins_space().bind(Exact::new("urn:example:more"), builtins::to_upper());
+    let report = Suite::new()
+        .checks(Checks::SPACE_NAME)
+        .host_named_space("builtins_space().bind(..)", extended)
+        .run_blocking(&builtins_kernel());
+    report.assert_clean();
 }

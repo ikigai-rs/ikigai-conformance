@@ -62,7 +62,8 @@ pointing at the check.
 | `CACHEABLE` | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; a result declared live (`Suite::live`) is `Expiry::Always` |
 | `PIPELINE` | pipeline citizenship | a mutating action with by-value inputs declares `content` (where a pipe's value and a `sink`'s body arrive); an action declaring `content` reads it |
 | `NAMES` | naming convention | the description id is a kebab-case noun (`tag-suggest`, `kernel-catalog`) — the MCP projection derives an agent's tool name from it |
-| `DECLARATIONS` | — | every declaration the module made (`live`, `cacheable`, `pure`, `namespace`, a `Fixture`, an `opt_out`, an `opt_out_check`) reached the check that would honour it. A `live` on a `Sink` reached nothing and the report printed `declared live:` anyway |
+| `SPACE-NAME` | a name is a claim: same name, same doors | a space the module declares **self-named** claims `space_iri("<module>")` (`urn:iki:space:<module>`), on its topology root too, and two calls of its constructor claim the same name over the same doors; a space it declares **host-named** claims nothing. See [A space's name](#a-spaces-name-space-name) |
+| `DECLARATIONS` | — | every declaration the module made (`live`, `cacheable`, `pure`, `namespace`, a `Fixture`, an `opt_out`, an `opt_out_check`, a declared space) reached the check that would honour it. A `live` on a `Sink` reached nothing and the report printed `declared live:` anyway |
 
 Every check is independently selectable, so a module adopts incrementally, and
 every skipped check is printed as skipped:
@@ -72,6 +73,127 @@ use ikigai_conformance::{check_with, Checks};
 
 check_with(&my_kernel(), Checks::all() - Checks::RDF).unwrap();
 ```
+
+## A space's name (`SPACE-NAME`)
+
+A space's `id()` is a **cache claim**: any space named `n` holds the same doors, the
+cache partitions on the name, a corridor built from a named space shares cache
+entries with every other instance of it, and `urn:kernel:topology` and the space
+diagrams show the node by it. So a name goes on only where the claim is known to be
+true (the convention is on `ikigai_core::Space::id`):
+
+- a **configuration-free** `space()` (no parameters, and nothing read while building
+  it: no config home, environment, files or ambient platform backend) names itself
+  `urn:iki:space:<module>`, the crate name without `ikigai-`;
+- an **instance-built or parameterized** constructor (`space(root)`,
+  `space_with_budget(..)`, a config) stays anonymous, and the HOST names it, because
+  only the host knows which instance it passed in;
+- a **different set of doors** gets a different name or none: a part of a module's
+  space with doors of its own is `urn:iki:space:<module>:<part>`
+  (`ikigai_sexpr::arrangement_space` is `urn:iki:space:sexpr:arrangement`);
+- a **stateful** zero-argument constructor (fresh state on every call) stays
+  anonymous.
+
+The check is about a CONSTRUCTOR, not the kernel the walk is given, so the module
+states which kind each of its constructors is, and the suite holds it to that.
+
+### Adopting it
+
+**In the module**, where `space()` is configuration-free: name the space LAST
+(binding a door after naming drops the name, since core 0.1.89), and export the
+name.
+
+```rust
+use ikigai_core::{space_iri, EndpointSpace};
+
+/// The name [`space`] claims: `urn:iki:space:text`.
+pub const SPACE_ID: &str = "urn:iki:space:text";
+
+pub fn space() -> EndpointSpace {
+    EndpointSpace::new()
+        .bind(/* … every door … */)
+        .named(space_iri("text"))
+}
+```
+
+`Fallback`, `Mount` and every other core combinator have the same `.named(..)`.
+Raise the module's pins to `ikigai-core = "0.1.89"` and
+`ikigai-conformance = "0.6.0"`.
+
+**In the module's conformance test**, one line on the `Suite` it already builds,
+plus one assertion that the exported const is the name the suite checked:
+
+```rust
+let report = Suite::new()
+    // … the declarations the test already makes …
+    .self_named_space("text", ikigai_text::space)
+    .run_blocking(&kernel);
+report.assert_clean();
+assert_eq!(ikigai_core::space_iri("text").as_str(), ikigai_text::SPACE_ID);
+```
+
+**An instance-built constructor** is declared host-named, by value. Build it once
+in an `Arc` and hand the same space to the kernel and the suite (`Arc<S>` is a
+`Space`); the label is what findings name it by, so write the call:
+
+```rust
+let space = Arc::new(ikigai_fs::space(root.clone()));
+let kernel = Kernel::new(space.clone());
+let report = Suite::new()
+    // … the declarations the test already makes …
+    .host_named_space("ikigai_fs::space(root)", space)
+    .run_blocking(&kernel);
+report.assert_clean();
+```
+
+A module with both kinds declares both (`ikigai-sparql`: `space()` self-named,
+`space_with_budget(..)` host-named), and a part with doors of its own is just
+another self-named space under its own name:
+`.self_named_space("sexpr:arrangement", ikigai_sexpr::arrangement_space)`. There is
+no third form: `space_iri` takes `<module>:<part>`.
+
+### What it asserts
+
+For a **self-named** space, the constructor is called twice, and:
+
+- `id()` is `space_iri("<module>")`, which lies under `SPACE_PREFIX`
+  (`urn:iki:space:`). The older spelling `urn:ikigai:space:…` is reported as
+  outside the prefix;
+- both calls claim the same name;
+- both calls hold **the same doors**: equal `topology()` (the whole tree, compared
+  structurally: every door's pattern, match kind and endpoint name, every confined
+  corridor, every enclosed space, in order, with the root's own name set aside) and
+  equal `entries()` (the second witness, for a space whose topology is opaque).
+  The finding prints the first line where the two calls disagree;
+- the topology's root node carries the name (`urn:kernel:topology` and the diagram
+  read the node, not `id()`);
+- any other self-named declaration under the same name holds the same doors, which
+  catches a part declared under the whole's name (each passes alone).
+
+For a **host-named** space: `id()` is `None` and the topology root is anonymous.
+
+Findings read like every other check's, labeled by the space (its IRI, or the
+host-named label) and naming the rule:
+
+```text
+urn:iki:space:example  SPACE-NAME  `my_module::space` claims `urn:ikigai:space:example`, outside `urn:iki:space:`: a module's configuration-free space is named `ikigai_core::space_iri("example")`, which is `urn:iki:space:example`
+urn:iki:space:example  SPACE-NAME  two calls of `my_module::space` hold different doors (first call: `/ door 0 `urn:example:echo-0` (exact) -> echo`; second call: `/ door 0 `urn:example:echo-1` (exact) -> echo`): a name is a claim — same name, same doors — and every call answers to `urn:iki:space:example`. A constructor whose doors vary per call (…) is host-named: declare it with `Suite::host_named_space` and drop the name
+ikigai_fs::space(root)  SPACE-NAME  claims `urn:iki:space:fs`, but it is declared host-named: its doors depend on what it was handed, so only the host knows which instance it is. Drop `.named(..)` and let the host name it — a name is a claim: same name, same doors
+```
+
+and every declared space gets a `space:` line saying what was compared:
+
+```text
+space: urn:iki:space:text self-named by `ikigai_text::space`: two calls, 8 door(s) compared
+space: ikigai_fs::space(root) host-named
+```
+
+**A module that declares no space is held to nothing**, as an endpoint declaring
+neither `cacheable` nor `live` is held to neither, and the report says so rather
+than reading as a name that was checked:
+`space: none declared — SPACE-NAME checked no constructor (…)`. A space declared
+while `SPACE-NAME` is not selected is a `DECLARATIONS` finding, and
+`opt_out_check("<label>", Check::SpaceName, "why")` waives one declared space.
 
 ## Fixtures, opt-outs, declarations
 
@@ -342,6 +464,13 @@ Honest residue — what no check here can see:
   it — but `Kernel::canonicalize` is private, so a walk cannot ask before it fires.
   Until it can, a module that means two spellings to be one resource says so with one
   `Grammar` matching both, and the suite probes what the kernel treats as two.
+- **Whether a self-named constructor is really configuration-free.** `SPACE-NAME`
+  calls it twice in one process, so a constructor that reads the config home or the
+  environment reads the same thing both times and passes; and it compares doors by
+  pattern, match kind and endpoint NAME, so a zero-argument constructor that
+  allocates fresh state per call builds equal doors over different state. Both are
+  host-named by rule; which kind a constructor is stays the author's declaration,
+  and the check proves only that the declaration is consistent.
 - Reading through the kernel rather than `std::fs` (a lint, not a test); where a
   fix belongs; when in doubt, don't cache.
 
@@ -369,6 +498,16 @@ the whole point. `tests/builtins.rs` runs the suite against
 and pins the exact findings: three untyped inputs, two pre-convention ids, three
 cacheable pure functions nobody declared pure — and nothing else.
 
+`SPACE-NAME` is falsified one failure at a time in `tests/violations.rs`: a
+self-named space claiming nothing, a name outside the prefix, a name other than the
+one declared, two calls claiming different names, two calls over different doors
+(seen through the topology, and again through `entries()` behind an opaque node), a
+topology root that does not carry the name, a part declared under the whole's name,
+a host-named constructor that names itself, and a host-named space whose topology
+names it. `tests/builtins.rs` passes a self-named space, a part under its own name
+and a host-named one, and shows that extending a named space with `bind` leaves it
+anonymous.
+
 **Firing identity is proved by COUNTING FIRINGS, not by asserting an outcome** — an
 outcome test passes for the wrong reason the moment the endpoint's state is
 idempotent, which is exactly when a returning double-fire stops being visible. A
@@ -382,6 +521,22 @@ anyone memoizes by id.
 
 0.4.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.5.x → 0.6.0: `SPACE-NAME` (ledger #987)
+
+**What is new.** A twelfth check, `SPACE-NAME`, and the two declarations it reads,
+`Suite::self_named_space` and `Suite::host_named_space`. See
+[A space's name](#a-spaces-name-space-name).
+
+**Will it turn a green suite red?** Not by itself: a module that declares no space
+is held to nothing, and its report gains one `space: none declared` line. What can
+go red on the upgrade is the floor: `ikigai-core` is now `0.1.89` (the API minimum,
+for `space_iri` and `SPACE_PREFIX`) and `ikigai-vocab` `0.1.89`, so a module pinned
+below either resolves up.
+
+**Source changes for a consumer:** `Check::ALL` is `[Check; 12]`; `Declarations`
+gained a `spaces` field (a struct literal of it needs one more line), with the new
+`DeclaredSpace` and `SpaceNaming` types.
 
 ### 0.5.0: purity is "no thread but its own name" (ledger #549), and it may turn your green suite red
 

@@ -6,14 +6,16 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use ikigai_core::{
-    ActionSpec, ArgRef, ArgSpec, Capability, Description, Error, Expiry, InputSource, Iri, Kernel,
-    Representation, Request, SpaceEntry, Thread, TraceEvent, Tracer, UriTemplate, Verb,
+    space_iri, ActionSpec, ArgRef, ArgSpec, Capability, Description, Error, Expiry, InputSource,
+    Iri, Kernel, Representation, Request, Space, SpaceEntry, SpaceKind, Thread, Topology,
+    TraceEvent, Tracer, UriTemplate, Verb, SPACE_PREFIX,
 };
 
 use crate::checks::{Check, Checks};
 use crate::rdf;
 use crate::report::{
-    Collapsed, Declarations, Finding, OptedOut, OptedOutAt, OptedOutCheck, Probed, Report, Unprobed,
+    Collapsed, Declarations, DeclaredSpace, Finding, OptedOut, OptedOutAt, OptedOutCheck, Probed,
+    Report, SpaceNaming, Unprobed,
 };
 
 /// The kernel's own operations are listed by [`Kernel::entries`] ahead of the root
@@ -303,6 +305,52 @@ impl Coverage {
     }
 }
 
+/// A configuration-free constructor, called twice by [`Check::SpaceName`].
+type MakeSpace = Arc<dyn Fn() -> Arc<dyn Space> + Send + Sync>;
+
+/// One space a module declared to [`Check::SpaceName`].
+#[derive(Clone)]
+struct SpaceDecl {
+    /// What findings and waivers name it by (the IRI, or the host-named label).
+    label: String,
+    /// The constructor's Rust path, for a self-named space; empty otherwise.
+    constructor: String,
+    kind: SpaceDeclKind,
+}
+
+#[derive(Clone)]
+enum SpaceDeclKind {
+    /// `space_iri(module)` is claimed by every call of `make`.
+    SelfNamed {
+        module: String,
+        iri: Iri,
+        make: MakeSpace,
+    },
+    /// The space the module built for the host to name: it claims nothing.
+    HostNamed { space: Arc<dyn Space> },
+}
+
+impl SpaceDecl {
+    fn naming(&self) -> SpaceNaming {
+        match self.kind {
+            SpaceDeclKind::SelfNamed { .. } => SpaceNaming::SelfNamed,
+            SpaceDeclKind::HostNamed { .. } => SpaceNaming::HostNamed,
+        }
+    }
+}
+
+/// By hand: a constructor and a space are not `Debug`, and the label says which
+/// declaration this is.
+impl fmt::Debug for SpaceDecl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SpaceDecl")
+            .field("label", &self.label)
+            .field("constructor", &self.constructor)
+            .field("naming", &self.naming())
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug)]
 struct OptOutCheck {
     id: String,
@@ -343,6 +391,7 @@ pub struct Suite {
     pure: Vec<String>,
     cacheable: Vec<String>,
     live: Vec<String>,
+    spaces: Vec<SpaceDecl>,
     kernel_ops: bool,
 }
 
@@ -365,6 +414,7 @@ impl Suite {
             pure: Vec::new(),
             cacheable: Vec::new(),
             live: Vec::new(),
+            spaces: Vec::new(),
             kernel_ops: false,
         }
     }
@@ -571,6 +621,112 @@ impl Suite {
         self
     }
 
+    /// Declare `constructor` the module's **configuration-free** space, which names
+    /// itself [`space_iri`]`(module)`, and hold it to that ([`Check::SpaceName`]).
+    ///
+    /// `module` is the crate name without `ikigai-` (`"text"` claims
+    /// `urn:iki:space:text`), or a module and a part for a space with doors of its
+    /// own (`"sexpr:arrangement"`). The check calls `constructor` twice and asserts:
+    ///
+    /// - `id()` is `space_iri(module)`, which lies under [`SPACE_PREFIX`];
+    /// - both calls claim the same name and hold the same doors: equal `topology()`
+    ///   (the whole tree: every door's pattern, match kind and endpoint name, every
+    ///   confined corridor, every enclosed space) and equal `entries()`;
+    /// - the topology's root node carries the name, which is where
+    ///   `urn:kernel:topology` and the space diagram read it;
+    /// - any other self-named declaration under the same name holds the same doors.
+    ///
+    /// A name is a claim: same name, same doors. The cache partitions on it, and a
+    /// corridor built from it shares cache entries with every other instance, so a
+    /// constructor that reads configuration, the environment or files while building,
+    /// or allocates fresh state per call, is not self-named: declare it with
+    /// [`host_named_space`](Self::host_named_space).
+    ///
+    /// ```
+    /// use ikigai_conformance::Suite;
+    /// use ikigai_core::{builtins, space_iri, EndpointSpace, Exact, Kernel};
+    /// use std::sync::Arc;
+    ///
+    /// fn space() -> EndpointSpace {
+    ///     EndpointSpace::new()
+    ///         .bind(Exact::new("urn:example:echo"), builtins::echo())
+    ///         .named(space_iri("example"))
+    /// }
+    ///
+    /// let report = Suite::new()
+    ///     .checks(ikigai_conformance::Checks::SPACE_NAME)
+    ///     .self_named_space("example", space)
+    ///     .run_blocking(&Kernel::new(Arc::new(space())));
+    /// report.assert_clean();
+    /// assert!(report.to_string().contains("space: urn:iki:space:example self-named"));
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// When `module` is not a [`space_iri`] segment list (`"ikigai-text"` still
+    /// carries the crate prefix): the literal is wrong where it is written.
+    pub fn self_named_space<F, S>(mut self, module: &str, constructor: F) -> Self
+    where
+        F: Fn() -> S + Send + Sync + 'static,
+        S: Space + 'static,
+    {
+        let iri = space_iri(module);
+        self.spaces.push(SpaceDecl {
+            label: iri.as_str().to_string(),
+            constructor: std::any::type_name::<F>().to_string(),
+            kind: SpaceDeclKind::SelfNamed {
+                module: module.to_string(),
+                iri,
+                make: Arc::new(move || Arc::new(constructor()) as Arc<dyn Space>),
+            },
+        });
+        self
+    }
+
+    /// Declare `space` built by an **instance-built or parameterized** constructor
+    /// (`space(root)`, `space_with_budget(..)`, a config), which the HOST names, and
+    /// hold it to claiming nothing itself ([`Check::SpaceName`]): its `id()` is
+    /// `None` and its topology root is anonymous.
+    ///
+    /// Only the host knows which instance it passed in, so a module that names such
+    /// a space claims one name for doors that depend on what it was handed. `label`
+    /// is what findings and waivers name it by; the constructor's call is a good one
+    /// (`"space(root)"`). The space is passed by value because one is enough: `None`
+    /// is `None` on every call. Pass an `Arc` clone of the space the test's kernel
+    /// is built from, if you like (`Arc<S>` is a `Space`).
+    ///
+    /// ```
+    /// use ikigai_conformance::{Check, Checks, Suite};
+    /// use ikigai_core::{builtins, EndpointSpace, Exact, Kernel};
+    /// use std::sync::Arc;
+    ///
+    /// fn space(prefix: &str) -> EndpointSpace {
+    ///     EndpointSpace::new().bind(Exact::new(format!("{prefix}echo")), builtins::echo())
+    /// }
+    ///
+    /// let built = Arc::new(space("urn:example:"));
+    /// let report = Suite::new()
+    ///     .checks(Checks::SPACE_NAME)
+    ///     .host_named_space("space(prefix)", built.clone())
+    ///     .run_blocking(&Kernel::new(built));
+    /// report.assert_clean();
+    /// assert_eq!(report.of(Check::SpaceName).count(), 0);
+    /// ```
+    pub fn host_named_space(
+        mut self,
+        label: impl Into<String>,
+        space: impl Space + 'static,
+    ) -> Self {
+        self.spaces.push(SpaceDecl {
+            label: label.into(),
+            constructor: String::new(),
+            kind: SpaceDeclKind::HostNamed {
+                space: Arc::new(space),
+            },
+        });
+        self
+    }
+
     /// Walk the kernel's own `urn:kernel:*` operations too. They are core's
     /// endpoints, not the module's — off by default so a module's report is about
     /// the module.
@@ -625,6 +781,17 @@ impl Suite {
                 live: self.live.clone(),
                 namespaces: self.namespaces.clone(),
                 fixtures: self.fixtures.clone(),
+                spaces: self
+                    .spaces
+                    .iter()
+                    .map(|d| DeclaredSpace {
+                        label: d.label.clone(),
+                        naming: d.naming(),
+                        constructor: d.constructor.clone(),
+                        doors: None,
+                        opaque: 0,
+                    })
+                    .collect(),
             }),
             unprobed: Box::default(),
             probed: Vec::new(),
@@ -640,6 +807,9 @@ impl Suite {
                 "the root space is not enumerable (`Kernel::entries()` is `None`): \
                  nothing can be walked — bind the module in an `EndpointSpace`",
             ));
+            // The spaces are the module's constructors, not the kernel: checkable
+            // whatever the kernel lists.
+            self.space_checks(&mut report);
             return report;
         };
 
@@ -802,8 +972,150 @@ impl Suite {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
+        self.space_checks(&mut report);
         self.declaration_checks(&coverage, &mut report);
         report
+    }
+
+    // ----- SPACE-NAME ---------------------------------------------------------
+
+    /// Every declared space against the kind the module said it is. Builds spaces
+    /// and reads them; resolves nothing.
+    fn space_checks(&self, report: &mut Report) {
+        // (label, constructor, rootless topology) of every self-named space checked,
+        // for the cross-declaration rule: one name, one set of doors.
+        let mut claimed: Vec<(String, String, Topology)> = Vec::new();
+        for (index, decl) in self.spaces.iter().enumerate() {
+            if !self.runs(&decl.label, Check::SpaceName) {
+                continue;
+            }
+            let mut findings = Vec::new();
+            match &decl.kind {
+                SpaceDeclKind::SelfNamed { module, iri, make } => {
+                    let (first, second) = (make(), make());
+                    let ctor = &decl.constructor;
+                    let id = first.id();
+                    match &id {
+                        None => findings.push(format!(
+                            "`{ctor}` claims no name, but it is declared self-named: a \
+                             configuration-free space names itself — end the constructor with \
+                             `.named(ikigai_core::space_iri(\"{module}\"))`, which is `{iri}`",
+                            iri = iri.as_str()
+                        )),
+                        Some(id) if !id.as_str().starts_with(SPACE_PREFIX) => {
+                            findings.push(format!(
+                                "`{ctor}` claims `{id}`, outside `{SPACE_PREFIX}`: a module's \
+                                 configuration-free space is named \
+                                 `ikigai_core::space_iri(\"{module}\")`, which is `{iri}`",
+                                id = id.as_str(),
+                                iri = iri.as_str()
+                            ))
+                        }
+                        Some(id) if id != iri => findings.push(format!(
+                            "`{ctor}` claims `{id}`, but it is declared as `{iri}`: declare the \
+                             name it claims, or name it `ikigai_core::space_iri(\"{module}\")`. A \
+                             part of a module's space with doors of its own is \
+                             `space_iri(\"<module>:<part>\")`",
+                            id = id.as_str(),
+                            iri = iri.as_str()
+                        )),
+                        Some(_) => {}
+                    }
+                    let again = second.id();
+                    if again != id {
+                        findings.push(format!(
+                            "two calls of `{ctor}` claim different names ({} then {}): a name is \
+                             a claim — same name, same doors — and one that changes per call \
+                             claims nothing a cache can share",
+                            show_id(id.as_ref()),
+                            show_id(again.as_ref())
+                        ));
+                    }
+                    let top = first.topology();
+                    if top.id != id {
+                        findings.push(format!(
+                            "the topology's root node names {} while `id()` claims {}: \
+                             `urn:kernel:topology` and the space diagram read the node, so a \
+                             space that overrides `id()` names its node too \
+                             (`Topology::with_id(self.id())`)",
+                            show_id(top.id.as_ref()),
+                            show_id(id.as_ref())
+                        ));
+                    }
+                    let (a, b) = (top.clone().with_id(None), second.topology().with_id(None));
+                    let difference = if a != b {
+                        Some(first_difference(&lines_of(&a), &lines_of(&b)))
+                    } else if first.entries() != second.entries() {
+                        Some(first_difference(
+                            &entry_lines(first.entries()),
+                            &entry_lines(second.entries()),
+                        ))
+                    } else {
+                        None
+                    };
+                    if let Some(difference) = difference {
+                        findings.push(format!(
+                            "two calls of `{ctor}` hold different doors ({difference}): a name \
+                             is a claim — same name, same doors — and every call answers to \
+                             `{iri}`. A constructor whose doors vary per call (it reads \
+                             configuration, the environment or files while building) is \
+                             host-named: declare it with `Suite::host_named_space` and drop the \
+                             name",
+                            iri = iri.as_str()
+                        ));
+                    }
+                    let evidence = &mut report.declared.spaces[index];
+                    evidence.doors = Some(count_doors(&a));
+                    evidence.opaque = count_opaque(&a);
+                    claimed.push((decl.label.clone(), ctor.clone(), a));
+                }
+                SpaceDeclKind::HostNamed { space } => {
+                    let top = space.topology();
+                    if let Some(id) = space.id() {
+                        findings.push(format!(
+                            "claims `{}`, but it is declared host-named: its doors depend on what \
+                             it was handed, so only the host knows which instance it is. Drop \
+                             `.named(..)` and let the host name it — a name is a claim: same \
+                             name, same doors",
+                            id.as_str()
+                        ));
+                    } else if let Some(id) = top.id {
+                        findings.push(format!(
+                            "`id()` claims nothing, but the topology's root node names `{}`: a \
+                             host-named space is anonymous in both places, or the diagram shows \
+                             a name the cache never partitions on",
+                            id.as_str()
+                        ));
+                    }
+                }
+            }
+            for detail in findings {
+                report
+                    .findings
+                    .push(Finding::new(&decl.label, None, Check::SpaceName, detail));
+            }
+        }
+        // One name, one set of doors, across declarations too: each passes alone
+        // when a module declares a PART of its space under the whole's name.
+        for (i, (label, ctor, top)) in claimed.iter().enumerate() {
+            let clash = claimed[..i]
+                .iter()
+                .find(|(other, _, other_top)| other == label && other_top != top);
+            if let Some((_, first_ctor, first_top)) = clash {
+                report.findings.push(Finding::new(
+                    label,
+                    None,
+                    Check::SpaceName,
+                    format!(
+                        "`{first_ctor}` and `{ctor}` are both declared as `{label}` but hold \
+                         different doors ({}): a name is a claim — same name, same doors. A part \
+                         of a module's space with doors of its own is \
+                         `space_iri(\"<module>:<part>\")`",
+                        first_difference(&lines_of(first_top), &lines_of(top))
+                    ),
+                ));
+            }
+        }
     }
 
     // ----- DECLARATIONS -------------------------------------------------------
@@ -864,6 +1176,7 @@ impl Suite {
             );
         }
         self.namespace_declarations(coverage, report);
+        self.space_declarations(report);
         self.fixture_declarations(coverage, report);
         self.opt_out_declarations(coverage, report);
     }
@@ -886,6 +1199,23 @@ impl Suite {
         coverage: &Coverage,
         waivers: bool,
     ) -> Option<String> {
+        if check == Check::SpaceName {
+            // Waived per declared SPACE, by label, never per endpoint.
+            if !self.checks.contains(check) {
+                return Some(format!(
+                    "{check} is not selected (`Suite::checks`), so it is already skipped everywhere"
+                ));
+            }
+            if !self.spaces.iter().any(|s| s.label == id) {
+                return Some(
+                    "no space is declared under that label (a self-named space's label is its \
+                     IRI, `urn:iki:space:<module>`; a host-named one's is the label given to \
+                     `Suite::host_named_space`)"
+                        .to_string(),
+                );
+            }
+            return None;
+        }
         if !coverage.walked.contains(id) {
             return Some(
                 "the walk reached no endpoint with that id (the id is the `Description::id`, \
@@ -940,6 +1270,30 @@ impl Suite {
                     .to_string(),
             ),
             _ => None,
+        }
+    }
+
+    /// A space declared while SPACE-NAME is not selected was checked by nothing,
+    /// and its `space:` line reads as a check that ran.
+    fn space_declarations(&self, report: &mut Report) {
+        if self.checks.contains(Check::SpaceName) {
+            return;
+        }
+        for decl in &self.spaces {
+            let how = match decl.naming() {
+                SpaceNaming::SelfNamed => "self-named (`Suite::self_named_space`)",
+                SpaceNaming::HostNamed => "host-named (`Suite::host_named_space`)",
+            };
+            self.inert(
+                report,
+                &decl.label,
+                format!(
+                    "declared {how} but SPACE-NAME is not selected (`Suite::checks`), so \
+                     nothing checked it. The report prints `space: {}`, which reads as a check \
+                     that ran",
+                    decl.label
+                ),
+            );
         }
     }
 
@@ -2143,6 +2497,104 @@ impl Action<'_> {
             reason: reason.into(),
         });
     }
+}
+
+// ----- SPACE-NAME helpers -------------------------------------------------------
+
+/// An id as a report shows it: the IRI in backticks, or `no name`.
+fn show_id(id: Option<&Iri>) -> String {
+    match id {
+        Some(id) => format!("`{}`", id.as_str()),
+        None => "no name".to_string(),
+    }
+}
+
+/// A topology as one line per node and door, each with its path from the root —
+/// what the first difference between two calls is printed from.
+fn lines_of(top: &Topology) -> Vec<String> {
+    let mut out = Vec::new();
+    push_lines(top, "/", &mut out);
+    out
+}
+
+fn push_lines(node: &Topology, path: &str, out: &mut Vec<String>) {
+    let id = node
+        .id
+        .as_ref()
+        .map(|i| format!(" <{}>", i.as_str()))
+        .unwrap_or_default();
+    match &node.kind {
+        SpaceKind::EndpointSpace { doors } => {
+            out.push(format!("{path} endpoint space{id}"));
+            for (i, door) in doors.iter().enumerate() {
+                out.push(format!(
+                    "{path} door {i} `{}` ({}) -> {}",
+                    door.pattern,
+                    door.kind.keyword(),
+                    door.endpoint
+                ));
+                if let Some(corridor) = &door.confined {
+                    push_lines(corridor, &format!("{path}door{i}/confined/"), out);
+                }
+            }
+        }
+        other => out.push(format!("{path} {other:?}{id}")),
+    }
+    for (i, child) in node.children.iter().enumerate() {
+        push_lines(child, &format!("{path}{i}/"), out);
+    }
+}
+
+/// `entries()` as lines, for a space whose topology says less than its listing.
+fn entry_lines(entries: Option<Vec<SpaceEntry>>) -> Vec<String> {
+    match entries {
+        None => vec!["(not enumerable)".to_string()],
+        Some(entries) => entries
+            .iter()
+            .map(|e| format!("entry `{}` -> {}", e.pattern, e.endpoint))
+            .collect(),
+    }
+}
+
+/// The first line where two calls disagree, both sides quoted.
+fn first_difference(first: &[String], second: &[String]) -> String {
+    let at = first
+        .iter()
+        .zip(second)
+        .position(|(a, b)| a != b)
+        .unwrap_or_else(|| first.len().min(second.len()));
+    let side = |lines: &[String]| {
+        lines
+            .get(at)
+            .map(|l| format!("`{}`", l.trim()))
+            .unwrap_or_else(|| "nothing".to_string())
+    };
+    format!("first call: {}; second call: {}", side(first), side(second))
+}
+
+/// Every door in a tree, confined corridors included.
+fn count_doors(node: &Topology) -> usize {
+    let here = match &node.kind {
+        SpaceKind::EndpointSpace { doors } => doors
+            .iter()
+            .map(|d| 1 + d.confined.as_deref().map_or(0, count_doors))
+            .sum(),
+        _ => 0,
+    };
+    here + node.children.iter().map(count_doors).sum::<usize>()
+}
+
+/// Every node that reports nothing about what it encloses.
+fn count_opaque(node: &Topology) -> usize {
+    let here = match &node.kind {
+        SpaceKind::EndpointSpace { doors } => doors
+            .iter()
+            .map(|d| d.confined.as_deref().map_or(0, count_opaque))
+            .sum(),
+        SpaceKind::Opaque => 1,
+        _ => 0,
+    };
+    here + node.children.iter().map(count_opaque).sum::<usize>()
 }
 
 #[cfg(test)]
