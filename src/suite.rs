@@ -2257,7 +2257,7 @@ impl Action<'_> {
                  is certainly false — keep the one the module means",
             ));
         }
-        let (first, _) = match self.resolve_minimal(false).await {
+        let (first, first_events) = match self.resolve_minimal(false).await {
             Ok(first) => first,
             Err(err) => {
                 // Nothing can be said about `pure` here: the endpoint might well be
@@ -2364,8 +2364,23 @@ impl Action<'_> {
         // #1000). Every `At` counts, however distant: the suite judges the kind of
         // bound, not its length. On a clockless kernel an `At` answer is never cached
         // at all, which the recomputation finding above already names.
-        let own = Thread::from(self.target.as_str());
-        let foreign = first.threads().iter().any(|t| *t != own);
+        //
+        // "Its own name" is the CANONICAL target, which is not always the name the
+        // walk asked for: a space that lists a logical name and reports a rewrite
+        // (`Resolved::canonical`) has the kernel hang the read on the BACKING name.
+        // Compared against the listed name alone, that thread read as foreign and the
+        // rule could not fire for any endpoint behind such a space (ledger #596). The
+        // root trace event names the canonical target; the requested name stays in
+        // the set for the intrinsic `urn:kernel:*` path, which records no event.
+        let mut own: BTreeSet<Thread> = BTreeSet::from([Thread::from(self.target.as_str())]);
+        own.extend(
+            first_events
+                .iter()
+                .chain(events.iter())
+                .filter(|e| e.parent.is_none())
+                .map(|e| Thread::from(e.target.as_str())),
+        );
+        let foreign = first.threads().iter().any(|t| !own.contains(t));
         if first.expiry == Expiry::Never
             && !foreign
             && !self.written_here
