@@ -95,6 +95,48 @@ pub struct OptedOutCheck {
     pub reason: String,
 }
 
+/// Which kind of space a module said its constructor builds
+/// ([`Check::SpaceName`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SpaceNaming {
+    /// A configuration-free space that names itself
+    /// [`space_iri`](ikigai_core::space_iri)`(module)`
+    /// ([`Suite::self_named_space`](crate::Suite::self_named_space)).
+    SelfNamed,
+    /// An instance-built space the host names, so it claims nothing itself
+    /// ([`Suite::host_named_space`](crate::Suite::host_named_space)).
+    HostNamed,
+}
+
+/// One space a module declared to [`Check::SpaceName`], and what checking it saw.
+///
+/// The declaration half (`label`, `naming`, `constructor`) is what the module
+/// said; `doors` and `opaque` are what the run compared, so a clean `space:` line
+/// says how much the "same doors" claim was actually checked over.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DeclaredSpace {
+    /// What findings and waivers name it by: the claimed IRI for a self-named space
+    /// (`urn:iki:space:text`), the label the module gave for a host-named one.
+    pub label: String,
+    /// Which kind the module said it is.
+    pub naming: SpaceNaming,
+    /// The constructor's Rust path for a self-named space
+    /// ([`std::any::type_name`], so `ikigai_text::space` for a function, and a
+    /// `{{closure}}` path for a closure), for locating it. Empty for a host-named
+    /// one, which is declared by value.
+    pub constructor: String,
+    /// How many doors the two calls were compared over, counted through the whole
+    /// topology (confined corridors included); `None` when no comparison ran (a
+    /// host-named space, or the check not selected).
+    pub doors: Option<usize>,
+    /// How many [`Opaque`](ikigai_core::SpaceKind::Opaque) nodes the topology has:
+    /// doors behind one are not in the topology comparison, and only `entries()`
+    /// (when the space enumerates) still sees them.
+    pub opaque: usize,
+}
+
 /// One face that was reached and served — positive evidence of what a walk
 /// actually looked at.
 ///
@@ -260,6 +302,9 @@ pub struct Declarations {
     /// The fixtures the module supplied, printed one per line (`fixture: file
     /// source path="README.md"`) so a reader can tell which inputs a walk ran over.
     pub fixtures: Vec<Fixture>,
+    /// The spaces the module declared to [`Check::SpaceName`], in declaration order,
+    /// each with what checking it compared (`space: …`).
+    pub spaces: Vec<DeclaredSpace>,
 }
 
 impl Report {
@@ -363,6 +408,22 @@ impl fmt::Display for Report {
         writeln!(f, "checked: {}", ran.join(" "))?;
         for (check, ids) in &waived {
             if !self.checks.contains(*check) {
+                continue;
+            }
+            if *check == Check::SpaceName {
+                // Waived per SPACE, by label: the endpoint count says nothing here.
+                let spaces = &declared.spaces;
+                let reached = ids
+                    .iter()
+                    .filter(|id| spaces.iter().any(|s| s.label == **id))
+                    .count();
+                writeln!(
+                    f,
+                    "* {} ran on {} of {} space(s); waived on the rest (see `opted out:`)",
+                    check.label(),
+                    spaces.len().saturating_sub(reached),
+                    spaces.len()
+                )?;
                 continue;
             }
             // Only a waiver for an id the walk REACHED took the check off an
@@ -487,6 +548,41 @@ impl fmt::Display for Report {
         for fixture in &declared.fixtures {
             writeln!(f, "fixture: {fixture}")?;
         }
+        // What SPACE-NAME looked at. A module that declares no space is held to
+        // nothing, and a clean report must not read as one whose name was checked.
+        if self.checks.contains(Check::SpaceName) && declared.spaces.is_empty() {
+            writeln!(
+                f,
+                "space: none declared — SPACE-NAME checked no constructor (declare one with \
+                 `Suite::self_named_space` or `Suite::host_named_space`)"
+            )?;
+        }
+        for space in &declared.spaces {
+            match space.naming {
+                SpaceNaming::SelfNamed => {
+                    write!(
+                        f,
+                        "space: {} self-named by `{}`",
+                        space.label, space.constructor
+                    )?;
+                    match space.doors {
+                        Some(doors) => {
+                            write!(f, ": two calls, {doors} door(s) compared")?;
+                            if space.opaque > 0 {
+                                write!(
+                                    f,
+                                    "; {} opaque node(s), whose doors only `entries()` can see",
+                                    space.opaque
+                                )?;
+                            }
+                        }
+                        None => write!(f, ": not compared")?,
+                    }
+                }
+                SpaceNaming::HostNamed => write!(f, "space: {} host-named", space.label)?,
+            }
+            writeln!(f)?;
+        }
         // A collapse is coverage information, not a finding: it says the walk fired
         // once where the space offered the same request more than once, and names
         // the bindings so a reader can see the duplication is the SPACE's.
@@ -581,6 +677,22 @@ mod tests {
                         "content",
                         "a body that is long enough to be cut short in the report",
                     )],
+                spaces: vec![
+                    DeclaredSpace {
+                        label: "urn:iki:space:text".into(),
+                        naming: SpaceNaming::SelfNamed,
+                        constructor: "ikigai_text::space".into(),
+                        doors: Some(8),
+                        opaque: 0,
+                    },
+                    DeclaredSpace {
+                        label: "space(root)".into(),
+                        naming: SpaceNaming::HostNamed,
+                        constructor: String::new(),
+                        doors: None,
+                        opaque: 0,
+                    },
+                ],
             }),
             unprobed: Box::new(vec![Unprobed {
                 endpoint: "notes-delete".into(),
@@ -658,6 +770,15 @@ mod tests {
             text.contains("unprobed: notes-delete delete OUTPUTS: never fired under root"),
             "{text}"
         );
+        assert!(
+            text.contains(
+                "space: urn:iki:space:text self-named by `ikigai_text::space`: two calls, 8 \
+                 door(s) compared\n"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("space: space(root) host-named\n"), "{text}");
+        assert!(!text.contains("space: none declared"), "{text}");
         assert!(report.is_clean());
         assert!(report.into_result().is_ok());
     }

@@ -54,7 +54,8 @@
 //! | [`Cacheable`](Check::Cacheable) | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; a result declared live ([`Suite::live`]) is `Expiry::Always` |
 //! | [`Pipeline`](Check::Pipeline) | pipeline citizenship | a mutating action with by-value inputs declares `content` (where the pipe's value arrives); an action declaring `content` reads it |
 //! | [`Names`](Check::Names) | naming convention | the id is a kebab-case noun (the convention `ikigai-core`'s crate docs state) |
-//! | [`Declarations`](Check::Declarations) | — | every declaration the module made ([`Suite::live`], [`Suite::cacheable`], [`Suite::pure`], [`Suite::namespace`], a [`Fixture`], an [`opt_out`](Suite::opt_out), an [`opt_out_at`](Suite::opt_out_at), an [`opt_out_check`](Suite::opt_out_check)) reached the check that would honour it |
+//! | [`SpaceName`](Check::SpaceName) | a name is a claim: same name, same doors | a space declared self-named ([`Suite::self_named_space`]) claims [`space_iri`](ikigai_core::space_iri)`(module)` under [`SPACE_PREFIX`](ikigai_core::SPACE_PREFIX), on its topology root too, and two calls hold the same doors; a space declared host-named ([`Suite::host_named_space`]) claims nothing |
+//! | [`Declarations`](Check::Declarations) | — | every declaration the module made ([`Suite::live`], [`Suite::cacheable`], [`Suite::pure`], [`Suite::namespace`], a [`Fixture`], an [`opt_out`](Suite::opt_out), an [`opt_out_at`](Suite::opt_out_at), an [`opt_out_check`](Suite::opt_out_check), a declared space) reached the check that would honour it |
 //!
 //! Both RDF checks resolve and **parse** the face, so an unresolvable, mislabeled
 //! or malformed graph is reported whichever of the two is selected — under
@@ -230,7 +231,8 @@ mod suite;
 
 pub use checks::{Check, Checks};
 pub use report::{
-    Collapsed, Declarations, Finding, OptedOut, OptedOutAt, OptedOutCheck, Probed, Report, Unprobed,
+    Collapsed, Declarations, DeclaredSpace, Finding, OptedOut, OptedOutAt, OptedOutCheck, Probed,
+    Report, SpaceNaming, Unprobed,
 };
 pub use suite::{Fixture, Suite};
 

@@ -74,12 +74,31 @@ pub enum Check {
     /// **Naming convention.** A description id is a short noun in `kebab-case`
     /// (the convention `ikigai-core`'s crate docs state).
     Names,
+    /// **A name is a claim: same name, same doors.** A module states what kind of
+    /// space its constructor builds, and the check holds it to that
+    /// ([`Suite::self_named_space`](crate::Suite::self_named_space),
+    /// [`Suite::host_named_space`](crate::Suite::host_named_space)):
+    ///
+    /// - **self-named** (a configuration-free `space()`): `id()` is
+    ///   [`space_iri`](ikigai_core::space_iri)`(module)`, under
+    ///   [`SPACE_PREFIX`](ikigai_core::SPACE_PREFIX); two calls claim the same name
+    ///   and hold the same doors (equal `topology()` and equal `entries()`); the
+    ///   topology's root node carries the name. Two declarations under one name hold
+    ///   the same doors too.
+    /// - **host-named** (an instance-built or parameterized constructor): `id()` is
+    ///   `None` and the topology root is anonymous, so the module cannot claim a name
+    ///   for doors that depend on what it was handed. The host names it.
+    ///
+    /// It builds spaces and reads them; it resolves nothing, and it never sees the
+    /// kernel the walk is given. A module that declares no space is held to nothing,
+    /// and the report says so on a `space:` line.
+    SpaceName,
     /// **Every declaration reached the check that would honour it.** A
     /// [`Suite`](crate::Suite) declaration — `live`, `cacheable`, `pure`,
     /// `namespace`, a [`Fixture`](crate::Fixture), an
-    /// [`opt_out`](crate::Suite::opt_out) or an
-    /// [`opt_out_check`](crate::Suite::opt_out_check) — that the walk never
-    /// consulted is reported, because a declaration printed in a clean report reads
+    /// [`opt_out`](crate::Suite::opt_out), an
+    /// [`opt_out_check`](crate::Suite::opt_out_check) or a declared space — that
+    /// the walk never consulted is reported, because a declaration printed in a clean report reads
     /// as a check that ran.
     ///
     /// The hole it closes: `Suite::live("notes-write")` on a `Sink` did nothing at
@@ -97,7 +116,7 @@ pub enum Check {
 
 impl Check {
     /// Every check, in report order.
-    pub const ALL: [Check; 11] = [
+    pub const ALL: [Check; 12] = [
         Check::ArgSpecs,
         Check::RequiresVerb,
         Check::Enforced,
@@ -108,6 +127,7 @@ impl Check {
         Check::Cacheable,
         Check::Pipeline,
         Check::Names,
+        Check::SpaceName,
         Check::Declarations,
     ];
 
@@ -124,6 +144,7 @@ impl Check {
             Check::Cacheable => "CACHEABLE",
             Check::Pipeline => "PIPELINE",
             Check::Names => "NAMES",
+            Check::SpaceName => "SPACE-NAME",
             Check::Declarations => "DECLARATIONS",
         }
     }
@@ -196,6 +217,8 @@ impl Checks {
     pub const PIPELINE: Checks = Checks(1 << (Check::Pipeline as u16));
     /// [`Check::Names`].
     pub const NAMES: Checks = Checks(1 << (Check::Names as u16));
+    /// [`Check::SpaceName`].
+    pub const SPACE_NAME: Checks = Checks(1 << (Check::SpaceName as u16));
     /// [`Check::Declarations`].
     pub const DECLARATIONS: Checks = Checks(1 << (Check::Declarations as u16));
     /// Both RDF-face checks: [`Check::SkolemRdf`] and [`Check::Vocabulary`] — the
@@ -312,7 +335,7 @@ mod tests {
 
     #[test]
     fn every_check_has_its_own_bit() {
-        // Eleven checks no longer fit a u8; a shared bit would make one check
+        // Twelve checks no longer fit a u8; a shared bit would make one check
         // select another silently.
         let mut bits: Vec<u16> = Check::ALL.iter().map(|c| c.bit()).collect();
         bits.sort_unstable();
