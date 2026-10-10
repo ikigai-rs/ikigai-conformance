@@ -1700,6 +1700,117 @@ fn pipeline_catches_a_sink_without_content_and_a_content_nobody_reads() {
     );
 }
 
+/// A Sink whose `content` has a grammar (a TOML layer, say), with `content` OPTIONAL —
+/// the shape `urn:log:config` took (ledger #1071). Only the pipeline probe puts a
+/// `content` in the request, and the suite's generic sample is not a document.
+/// `refuse` picks how it says no: naming `content`, or as an untyped endpoint error.
+fn grammar_sink(id: &'static str, refuse: fn(&str) -> Error) -> FnEndpoint {
+    FnEndpoint::new(id, move |inv: &Invocation<'_>| {
+        match inv.inline_str("content") {
+            Ok(body) if !body.contains('=') => Err(refuse(body)),
+            _ => Ok(text("applied")),
+        }
+    })
+    .with_description(
+        Description::new(id)
+            .verb(Verb::Sink)
+            .input(ArgSpec::new("content").class(XSD_STRING).optional())
+            .output("text/plain"),
+    )
+}
+
+#[test]
+fn a_refused_generic_content_sample_is_named_as_the_cause() {
+    let space = EndpointSpace::new().bind(
+        Exact::new("urn:example:config"),
+        grammar_sink("toml-config", |body| Error::InvalidArgument {
+            name: "content".into(),
+            detail: format!("not a TOML layer: {body:?}"),
+        }),
+    );
+    let report = report_of(space);
+    // The finding stays where it was (OUTPUTS, the first check that needed the
+    // firing), and now says the sample was the cause and what fixes it.
+    assert_caught(
+        &report,
+        Check::Outputs,
+        "did not resolve with the minimal inputs",
+    );
+    assert_caught(
+        &report,
+        Check::Outputs,
+        "it refused `content`, and the `content` it was sent is the suite's generic sample \
+         `x`, not a value from a Fixture",
+    );
+    assert_caught(
+        &report,
+        Check::Outputs,
+        "`Fixture::new(\"toml-config\", Verb::Sink).arg(\"content\", …)`",
+    );
+}
+
+#[test]
+fn an_untyped_refusal_of_a_generic_content_sample_names_it_as_the_likely_cause() {
+    let space = EndpointSpace::new().bind(
+        Exact::new("urn:example:config"),
+        grammar_sink("toml-config", |_| {
+            Error::Endpoint("expected `=` at line 1".into())
+        }),
+    );
+    let report = report_of(space);
+    assert_caught(
+        &report,
+        Check::Outputs,
+        "the `content` it was sent is the suite's generic sample `x`, not a value from a \
+         Fixture; if it parses `content`, that sample is the likely cause",
+    );
+    assert_caught(
+        &report,
+        Check::Outputs,
+        "`Fixture::new(\"toml-config\", Verb::Sink).arg(\"content\", …)`",
+    );
+}
+
+#[test]
+fn a_fixture_supplied_content_is_not_blamed_on_the_sample() {
+    // The fixture's own `content` is refused too: the failure is real, and the
+    // generic sample had nothing to do with it, so the hint must not appear.
+    let space = EndpointSpace::new().bind(
+        Exact::new("urn:example:config"),
+        grammar_sink("toml-config", |body| Error::InvalidArgument {
+            name: "content".into(),
+            detail: format!("not a TOML layer: {body:?}"),
+        }),
+    );
+    let report = Suite::new()
+        .fixture(Fixture::new("toml-config", Verb::Sink).arg("content", "still not toml"))
+        .run_blocking(&kernel(space));
+    assert_caught(
+        &report,
+        Check::Outputs,
+        "did not resolve with the minimal inputs",
+    );
+    assert!(
+        !report.to_string().contains("generic sample"),
+        "a fixture's value is not the suite's sample:\n{report}"
+    );
+}
+
+#[test]
+fn a_fixed_content_sample_clears_the_finding() {
+    let space = EndpointSpace::new().bind(
+        Exact::new("urn:example:config"),
+        grammar_sink("toml-config", |body| Error::InvalidArgument {
+            name: "content".into(),
+            detail: format!("not a TOML layer: {body:?}"),
+        }),
+    );
+    let report = Suite::new()
+        .fixture(Fixture::new("toml-config", Verb::Sink).arg("content", "level = \"info\""))
+        .run_blocking(&kernel(space));
+    assert!(report.of(Check::Outputs).next().is_none(), "{report}");
+}
+
 // ----- NAMES ------------------------------------------------------------------
 
 #[test]

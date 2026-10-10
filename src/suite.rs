@@ -1914,7 +1914,7 @@ struct Action<'a> {
     failure_reported: bool,
 }
 
-impl Action<'_> {
+impl<'a> Action<'a> {
     fn request(&self, args: &BTreeMap<String, String>) -> Request {
         build_request(self.spec.verb, self.target, args)
     }
@@ -1955,21 +1955,82 @@ impl Action<'_> {
         result
     }
 
-    /// Report a minimal-resolution failure under `check`, once per action.
-    fn report_failure(&mut self, check: Check, err: &Error, report: &mut Report) {
+    /// Report a minimal-resolution failure under `check`, once per action. `args` are
+    /// the by-value arguments of the request that failed, so the finding can say when
+    /// the `content` in it was the suite's generic sample rather than a fixture's.
+    fn report_failure(
+        &mut self,
+        check: Check,
+        err: &Error,
+        args: &BTreeMap<String, String>,
+        report: &mut Report,
+    ) {
         if self.failure_reported {
             return;
         }
         self.failure_reported = true;
-        report.findings.push(self.finding(
-            check,
-            format!(
-                "did not resolve with the minimal inputs its ArgSpecs allow ({err}); supply a \
-                 `Fixture::new(\"{}\", Verb::{:?})` with inputs that work, or opt out with a \
-                 reason",
-                self.id, self.spec.verb
+        let (id, verb) = (self.id, self.spec.verb);
+        let detail = match self.sampled_content(args) {
+            // The endpoint named `content` as what it refused: the sample was the cause.
+            Some(sample) if matches!(err, Error::InvalidArgument { name, .. } if name == "content") =>
+            {
+                format!(
+                    "did not resolve with the minimal inputs its ArgSpecs allow ({err}): it \
+                     refused `content`, and the `content` it was sent is the suite's generic \
+                     sample `{sample}`, not a value from a Fixture. Supply one it accepts with \
+                     `Fixture::new(\"{id}\", Verb::{verb:?}).arg(\"content\", …)`, or opt out \
+                     with a reason"
+                )
+            }
+            // Refused some other way, which may or may not be the sample: say so, since
+            // a parser's error rarely names the argument it was reading.
+            Some(sample) => format!(
+                "did not resolve with the minimal inputs its ArgSpecs allow ({err}); the \
+                 `content` it was sent is the suite's generic sample `{sample}`, not a value \
+                 from a Fixture; if it parses `content`, that sample is the likely cause: \
+                 supply `Fixture::new(\"{id}\", Verb::{verb:?}).arg(\"content\", …)` with a \
+                 value it accepts, or opt out with a reason"
             ),
-        ));
+            None => format!(
+                "did not resolve with the minimal inputs its ArgSpecs allow ({err}); supply a \
+                 `Fixture::new(\"{id}\", Verb::{verb:?})` with inputs that work, or opt out \
+                 with a reason"
+            ),
+        };
+        report.findings.push(self.finding(check, detail));
+    }
+
+    /// The `content` value in `args` when it is the suite's generic sample: the action
+    /// declares `content` by value with no default and no `one_of` (either of which
+    /// would make the value the endpoint's own choice), and no fixture supplied it.
+    fn sampled_content<'b>(&self, args: &'b BTreeMap<String, String>) -> Option<&'b str> {
+        let sent = args.get("content")?;
+        let spec = self.content_spec()?;
+        if spec.default.is_some() || !spec.one_of.is_empty() {
+            return None;
+        }
+        let fixture_sets_it = self
+            .suite
+            .fixture_for(self.id, self.spec.verb)
+            .is_some_and(|f| f.args.contains_key("content"));
+        (!fixture_sets_it).then_some(sent.as_str())
+    }
+
+    /// The `content` input the action declares by value, where a pipe's value lands.
+    fn content_spec(&self) -> Option<&'a ArgSpec> {
+        self.spec
+            .inputs
+            .iter()
+            .find(|i| i.name == "content" && i.source == InputSource::Argument)
+    }
+
+    /// The arguments the pipeline probe fires with: the minimal ones, plus `content`
+    /// (the fixture's if it gave one, else a sample) where the action declares it.
+    fn pipeline_args(&self, content: &ArgSpec) -> BTreeMap<String, String> {
+        let mut args = self.suite.args_for(self.id, self.spec);
+        args.entry("content".to_string())
+            .or_insert_with(|| sample_value(content));
+        args
     }
 
     // ----- ENFORCED -----------------------------------------------------------
@@ -2096,9 +2157,9 @@ impl Action<'_> {
             .map(|o| rdf::bare_media_type(o))
             .collect();
         for face in faces {
+            let mut args = self.suite.args_for(self.id, self.spec);
             let result = if self.spec.outputs.len() > 1 {
                 // Several faces: `as=` picks this one, the universal conneg selector.
-                let mut args = self.suite.args_for(self.id, self.spec);
                 args.entry("as".to_string()).or_insert_with(|| face.clone());
                 self.kernel
                     .issue(self.request(&args), &Capability::root())
@@ -2109,7 +2170,7 @@ impl Action<'_> {
             let repr = match result {
                 Ok(repr) => repr,
                 Err(err) => {
-                    self.report_failure(face_check, &err, report);
+                    self.report_failure(face_check, &err, &args, report);
                     continue;
                 }
             };
@@ -2264,7 +2325,8 @@ impl Action<'_> {
                 // cacheable once its inputs are right. DECLARATIONS must not add an
                 // "inert declaration" line on top of a resolution failure.
                 coverage.cacheable_unresolved.insert(self.id.to_string());
-                self.report_failure(Check::Cacheable, &err, report);
+                let args = self.suite.args_for(self.id, self.spec);
+                self.report_failure(Check::Cacheable, &err, &args, report);
                 return;
             }
         };
@@ -2403,17 +2465,10 @@ impl Action<'_> {
         if !self.runs(Check::Pipeline) {
             return;
         }
-        let Some(content) = self
-            .spec
-            .inputs
-            .iter()
-            .find(|i| i.name == "content" && i.source == InputSource::Argument)
-        else {
+        let Some(content) = self.content_spec() else {
             return;
         };
-        let mut args = self.suite.args_for(self.id, self.spec);
-        args.entry("content".to_string())
-            .or_insert_with(|| sample_value(content));
+        let args = self.pipeline_args(content);
         let result = self
             .kernel
             .issue(self.request(&args), &Capability::root())
@@ -2445,10 +2500,18 @@ impl Action<'_> {
         if !self.runs(Check::Outputs) {
             return;
         }
+        // The arguments of whichever resolution is read, so a failure can say what
+        // it was sent: the pipeline probe's when it fired, the minimal ones otherwise.
+        let mut args = self.suite.args_for(self.id, self.spec);
         let probed = if self.spec.verb.is_mutating() {
-            self.fired
-                .clone()
-                .or_else(|| self.minimal.clone().map(|r| r.map(|(repr, _)| repr)))
+            match (&self.fired, self.content_spec()) {
+                (Some(fired), Some(content)) => {
+                    args = self.pipeline_args(content);
+                    Some(fired.clone())
+                }
+                (Some(fired), None) => Some(fired.clone()),
+                (None, _) => self.minimal.clone().map(|r| r.map(|(repr, _)| repr)),
+            }
         } else {
             Some(self.resolve_minimal(false).await.map(|(repr, _)| repr))
         };
@@ -2464,7 +2527,7 @@ impl Action<'_> {
                 return;
             }
             Some(Err(err)) => {
-                self.report_failure(Check::Outputs, &err, report);
+                self.report_failure(Check::Outputs, &err, &args, report);
                 self.unprobed(
                     report,
                     Check::Outputs,

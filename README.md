@@ -202,7 +202,11 @@ admit (`one_of[0]`, a value shaped by the XSD `class`, `urn:example:conformance`
 for an entity, `x` otherwise). They run **against the kernel you pass**, so build
 it as a test fixture. When the spec cannot say what a valid call is, or an action
 has real side effects, say so — and what you said is printed in the report, the
-fixtures included (`fixture: file source path="README.md"`):
+fixtures included (`fixture: file source path="README.md"`). The `x` is what
+PIPELINE pipes into a `content` with no fixture, so a Sink whose `content` has
+a grammar (TOML, JSON, a log segment) refuses it; when a failed resolution was
+sent that generic sample, the finding says so and names the fix,
+`Fixture::new(id, verb).arg("content", …)`:
 
 ```rust
 use ikigai_conformance::{Check, Fixture, Suite};
