@@ -774,6 +774,174 @@ fn cacheable_reads_a_thread_named_for_the_endpoint_as_none() {
     );
 }
 
+/// A cacheable endpoint that names no thread at all: the kernel hangs it on its own
+/// name and nothing else.
+fn own_name_only(id: &str, verb: Verb) -> FnEndpoint {
+    FnEndpoint::new(id, |_inv: &Invocation<'_>| Ok(text("x").cacheable()))
+        .with_description(Description::new(id).verb(verb).output("text/plain"))
+}
+
+fn cacheable_only(space: Arc<dyn Space>) -> Report {
+    Suite::new()
+        .checks(Checks::CACHEABLE)
+        .run_blocking(&Kernel::new(space))
+}
+
+fn own_name_finding(report: &Report, id: &str) -> bool {
+    report.against(id).any(|f| {
+        f.check == Check::Cacheable && f.detail.contains("no golden thread but its own name")
+    })
+}
+
+/// Ledger #596 claimed the purity rule could never fire since core 0.1.73, because
+/// the kernel hangs every cacheable answer on its own target's thread. That was true
+/// of the rule spelled `threads().is_empty()` and stopped being true in 0.5.0
+/// (ledger #549). Pinned here across the shapes a module binds: a Source, an Exists,
+/// a template-bound name, a required by-value argument, a `Mount`. Each answer's
+/// only thread is its own name, and each is caught; one real foreign thread is not.
+#[test]
+fn cacheable_fires_on_every_shape_with_no_thread_but_its_own_name() {
+    let shapes: Vec<(&str, Arc<dyn Space>)> = vec![
+        (
+            "src",
+            Arc::new(EndpointSpace::new().bind(
+                Exact::new("urn:example:src"),
+                own_name_only("src", Verb::Source),
+            )),
+        ),
+        (
+            "ask",
+            Arc::new(EndpointSpace::new().bind(
+                Exact::new("urn:example:ask"),
+                own_name_only("ask", Verb::Exists),
+            )),
+        ),
+        (
+            "note",
+            Arc::new(
+                EndpointSpace::new().bind(
+                    UriTemplate::parse("urn:example:note:{n}").unwrap(),
+                    FnEndpoint::new("note", |_inv: &Invocation<'_>| Ok(text("x").cacheable()))
+                        .with_description(
+                            Description::new("note")
+                                .verb(Verb::Source)
+                                .input(ArgSpec::new("n").class(XSD_INTEGER).binding())
+                                .output("text/plain"),
+                        ),
+                ),
+            ),
+        ),
+        (
+            "echo",
+            Arc::new(
+                EndpointSpace::new().bind(
+                    Exact::new("urn:example:echo"),
+                    FnEndpoint::new("echo", |inv: &Invocation<'_>| {
+                        Ok(text(inv.inline_str("in")?.to_string()).cacheable())
+                    })
+                    .with_description(
+                        Description::new("echo")
+                            .verb(Verb::Source)
+                            .input(ArgSpec::new("in").class(XSD_STRING))
+                            .output("text/plain"),
+                    ),
+                ),
+            ),
+        ),
+        (
+            "mounted",
+            Arc::new(ikigai_core::Mount::new(
+                "urn:example:m:",
+                Arc::new(EndpointSpace::new().bind(
+                    Exact::new("urn:example:m:mounted"),
+                    own_name_only("mounted", Verb::Source),
+                )),
+            )),
+        ),
+    ];
+    for (id, space) in shapes {
+        let report = cacheable_only(space);
+        assert!(own_name_finding(&report, id), "{id}:\n{report}");
+    }
+
+    let foreign = FnEndpoint::new("store-view", |_inv: &Invocation<'_>| {
+        Ok(text("x").cacheable().depends_on("urn:example:store"))
+    })
+    .with_description(
+        Description::new("store-view")
+            .verb(Verb::Source)
+            .output("text/plain"),
+    );
+    let report = cacheable_only(Arc::new(
+        EndpointSpace::new().bind(Exact::new("urn:example:store-view"), foreign),
+    ));
+    assert!(report.of(Check::Cacheable).next().is_none(), "{report}");
+}
+
+/// A space that LISTS a logical name and resolves it onto a backing one, reporting
+/// the rewrite (`Resolved::canonical`). The kernel adopts the backing name as the
+/// request's identity, so that is the thread it hangs the read on.
+struct Renamed {
+    logical: &'static str,
+    backing: &'static str,
+    inner: EndpointSpace,
+}
+
+impl Space for Renamed {
+    fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        if request.target.as_str() != self.logical {
+            return Resolution::Miss;
+        }
+        let backing = Iri::parse(self.backing).unwrap();
+        let mut rewritten = request.clone();
+        rewritten.target = backing.clone();
+        match self.inner.resolve(&rewritten, scope) {
+            Resolution::Hit(hit) => Resolution::Hit(hit.with_canonical(backing)),
+            other => other,
+        }
+    }
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        let id = self.inner.entries()?.into_iter().next()?.endpoint;
+        Some(vec![SpaceEntry::new(self.logical, id)])
+    }
+}
+
+/// "Its own name" is the CANONICAL target. Compared against the listed name alone,
+/// the backing-name thread read as foreign and the rule was dead for every endpoint
+/// behind a renaming space (the variant of ledger #596 that still held).
+#[test]
+fn cacheable_reads_a_reported_canonical_as_its_own_name() {
+    let renamed = |endpoint: FnEndpoint| Renamed {
+        logical: "urn:example:logical",
+        backing: "urn:example:backing",
+        inner: EndpointSpace::new().bind(Exact::new("urn:example:backing"), endpoint),
+    };
+
+    // The premise: the thread is the backing name, not the one that was asked for.
+    let kernel = Kernel::new(Arc::new(renamed(own_name_only("renamed", Verb::Source))));
+    let read = Request::new(Verb::Source, Iri::parse("urn:example:logical").unwrap());
+    let answer = futures::executor::block_on(kernel.issue(read, &Capability::root())).unwrap();
+    assert_eq!(
+        answer.threads().iter().collect::<Vec<_>>(),
+        [&Thread::new("urn:example:backing")]
+    );
+
+    let report = cacheable_only(Arc::new(renamed(own_name_only("renamed", Verb::Source))));
+    assert!(own_name_finding(&report, "renamed"), "{report}");
+
+    // And a real foreign thread behind the same rename is still not a finding.
+    let foreign = FnEndpoint::new("renamed", |_inv: &Invocation<'_>| {
+        Ok(text("x").cacheable().depends_on("urn:example:store"))
+    })
+    .with_description(
+        Description::new("renamed")
+            .verb(Verb::Source)
+            .output("text/plain"),
+    );
+    let report = cacheable_only(Arc::new(renamed(foreign)));
+    assert!(report.of(Check::Cacheable).next().is_none(), "{report}");
+}
+
 /// 2026-09-27T12:34:56Z, and the next minute boundary after it.
 const NOW: u64 = 1_790_512_496_000;
 const NEXT_MINUTE: u64 = 1_790_512_500_000;

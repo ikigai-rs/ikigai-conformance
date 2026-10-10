@@ -550,6 +550,22 @@ existed and never ran. `ALL` is now generated from the enum declaration by one
 macro, so it cannot omit a variant. No consumer-visible change: `ALL` is still
 `[Check; 12]` in the same order.
 
+**Also in 0.6.1: "its own name" is the canonical target (ledger #596).** The purity
+rule compared an answer's threads against the name the walk LISTED. A space that lists
+a logical name and resolves it onto a backing one, reporting the rewrite through
+`Resolved::canonical`, has the kernel hang the read on the BACKING name, so that
+thread read as foreign and the rule could not fire for any endpoint behind such a
+space: the one shape of "`CACHEABLE` is dead since core 0.1.73" (ledger #596) that
+0.5.0 left standing, and documented there as a limit. The rule now also counts the
+canonical target the kernel reports on the resolution's root trace event as its own
+name. Core's `Alias` lists backing names, so the walk already probed those; this
+reaches a hand-written renaming space. **Will it turn a green suite red?** Only behind
+such a space, on an endpoint that caches state it never named: the finding the rule
+exists for. The rest of ledger #596's claim does not hold on 0.5.0 or later, and
+`tests/violations.rs` pins it: the rule fires on a Source, an Exists, a template-bound
+name, a required argument and a `Mount` whose only thread is their own name, and
+stays quiet on a real foreign thread.
+
 ### 0.5.x → 0.6.0: `SPACE-NAME` (ledger #987)
 
 **What is new.** A twelfth check, `SPACE-NAME`, and the two declarations it reads,
@@ -603,6 +619,7 @@ own name, so below 0.1.73 it would pass a read a write never invalidates.
 - Own name means the name the walk probed. An endpoint reached through an `Alias`
   hangs from its BACKING name, which reads here as a thread besides its own, so the
   rule cannot see it (`Kernel::canonicalize` is private; see "What stays prose").
+  Closed in 0.6.1, which reads the canonical target from the trace (ledger #596).
 
 ### 0.3.0 → 0.4.0: the walk fires once per REQUEST, and it may turn your green suite red
 
