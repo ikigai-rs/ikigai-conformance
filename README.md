@@ -519,7 +519,7 @@ anyone memoizes by id.
 
 ## Status
 
-0.6.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.6.1. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
 
 ### 0.6.0 → 0.6.1: an `Expiry::At` deadline is a bound (ledger #1000)
