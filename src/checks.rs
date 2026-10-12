@@ -105,15 +105,18 @@ pub enum Check {
     /// the description: an id, an input name, an input `class` or a `requires` holding a
     /// character an RDF `IRIREF` cannot carry (one of ``<>"{}|^`\``, a space, a
     /// control character), or a NAME holding a code point no IRI carries (DEL, a C1 control,
-    /// private use, a noncharacter; ikigai-core 0.1.99). Such a name is spelled into the
-    /// endpoint's node, its contract IRIs and its `Meta` Turtle, and breaks them.
+    /// private use, a noncharacter; ikigai-core 0.1.99). Since ikigai-core 0.1.100 the
+    /// emitters encode such a name and degrade such an authored IRI to a literal, so the
+    /// endpoint's node, its contract IRIs and its `Meta` Turtle still parse, but no longer
+    /// say what was written. This is the strict check on top of that encoding: it refuses
+    /// the authoring mistake rather than keeping a document whole.
     ///
     /// It lives here, not in `bind`: binding stays infallible and does not validate, so a
     /// bad name is caught where it is AUTHORED, by the suite every module's CI already
     /// runs. It is not [`Names`](Check::Names), which is a convention a module may waive;
-    /// this one is not a matter of style. It reports the refusal, never its error
-    /// variant, and `validate` stops at the first refusal, so a description with two bad
-    /// names shows the second once the first is fixed.
+    /// this one is a mistake core refuses, not a matter of style. It reports the refusal,
+    /// never its error variant, and `validate` stops at the first refusal, so a
+    /// description with two bad names shows the second once the first is fixed.
     Validate,
     /// **A name is a claim: same name, same doors.** A module states what kind of
     /// space its constructor builds, and the check holds it to that
@@ -134,7 +137,7 @@ pub enum Check {
     /// kernel the walk is given. A module that declares no space is held to nothing,
     /// and the report says so on a `space:` line.
     SpaceName,
-    /// **Every declaration reached the check that would honour it.** A
+    /// **Every declaration reached the check that would honor it.** A
     /// [`Suite`](crate::Suite) declaration — `live`, `cacheable`, `pure`,
     /// `namespace`, a [`Fixture`](crate::Fixture), an
     /// [`opt_out`](crate::Suite::opt_out), an

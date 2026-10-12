@@ -41,7 +41,7 @@ walk that resolved nothing says so rather than printing no section at all.
 
 The last finding is the same idea turned on the module's own declarations: a
 `live` on a `Delete` reached no check, changed nothing, and was printed in a clean
-report exactly like one that had been honoured. See
+report exactly like one that had been honored. See
 [What the walk did NOT do](#what-the-walk-did-not-do).
 
 The module recipe in the ikigai field guide is a page of prose every author must
@@ -62,9 +62,9 @@ pointing at the check.
 | `CACHEABLE` | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and — if it never expires (`Expiry::Never`; an `Expiry::At` deadline is a bound) — carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; a result declared live (`Suite::live`) is `Expiry::Always` |
 | `PIPELINE` | pipeline citizenship | a mutating action with by-value inputs declares `content` (where a pipe's value and a `sink`'s body arrive); an action declaring `content` reads it |
 | `NAMES` | naming convention | the description id is a kebab-case noun (`tag-suggest`, `kernel-catalog`) — the MCP projection derives an agent's tool name from it |
-| `VALIDATE` | a name is spelled into IRIs | `Description::validate()` accepts the description: no id, input name, input `class` or `requires` holds a character an RDF `IRIREF` cannot carry (``<>"{}\|^`\``, a space, a control character), and no id or input name holds a code point no IRI carries (DEL, a C1 control, private use, a noncharacter; core 0.1.99). Such a value is spelled into the endpoint's Meta Turtle and contract IRIs, and breaks them. See [Why `VALIDATE` is here and not in `bind`](#why-validate-is-here-and-not-in-bind) |
+| `VALIDATE` | a name is spelled into IRIs | `Description::validate()` accepts the description: no id, input name, input `class` or `requires` holds a character an RDF `IRIREF` cannot carry (``<>"{}\|^`\``, a space, a control character), and no id or input name holds a code point no IRI carries (DEL, a C1 control, private use, a noncharacter; core 0.1.99). Since core 0.1.100 the emitters encode a name and degrade an authored IRI that is not one to a literal, so the endpoint's Meta Turtle and contract IRIs still parse, but not as written: this is the strict check on an authoring mistake, on top of that encoding. See [Why `VALIDATE` is here and not in `bind`](#why-validate-is-here-and-not-in-bind) |
 | `SPACE-NAME` | a name is a claim: same name, same doors | a space the module declares **self-named** claims `space_iri("<module>")` (`urn:iki:space:<module>`), on its topology root too, and two calls of its constructor claim the same name over the same doors; a space it declares **host-named** claims nothing. See [A space's name](#a-spaces-name-space-name) |
-| `DECLARATIONS` | — | every declaration the module made (`live`, `cacheable`, `pure`, `namespace`, a `Fixture`, an `opt_out`, an `opt_out_check`, a declared space) reached the check that would honour it. A `live` on a `Sink` reached nothing and the report printed `declared live:` anyway |
+| `DECLARATIONS` | — | every declaration the module made (`live`, `cacheable`, `pure`, `namespace`, a `Fixture`, an `opt_out`, an `opt_out_check`, a declared space) reached the check that would honor it. A `live` on a `Sink` reached nothing and the report printed `declared live:` anyway |
 
 ### Why `VALIDATE` is here and not in `bind`
 
@@ -72,14 +72,20 @@ pointing at the check.
 (ledger #1361): a host composing spaces should not have to handle an error for
 every door it binds, and a description is fixed when it is written, not when it is
 bound. So a bad name is caught where it is AUTHORED, by the suite every module's CI
-already runs, and the module never ships it. Core's emitters encode what an IRI may
-legally hold but a Turtle `IRIREF` may not spell raw (`[` and `]`, so an id like
-`http://[::1]/x` stays a legal document; the core release after 0.1.99), and
-`VALIDATE` is the strict layer on top, for what no encoding should save.
+already runs, and the module never ships it.
+
+`VALIDATE` is not what keeps a document whole. Since core 0.1.100 the emitters
+ENCODE a name (`encode_name`: `%`, what a Turtle `IRIREF` cannot spell raw, `[` and
+`]`, and every code point no IRI carries), so an id like `http://[::1]/x` is a legal
+document, and they degrade an authored IRI (a `class`, a `requires` scope) that is
+not an IRI to a literal. Whatever a description holds, its Meta Turtle and contract
+IRIs parse. `VALIDATE` is the strict layer on top: a value it refuses is an
+authoring mistake that the encoding hides rather than one it breaks on, and the
+module should not ship it.
 
 It is not `NAMES`. `NAMES` is a convention a module may waive (a proper-noun id, a
-pre-convention builtin); a value `validate` refuses breaks a document, so waiving
-`VALIDATE` is waiving a broken Meta face. The finding quotes core's refusal, which
+pre-convention builtin); a value `validate` refuses is a mistake core itself rejects,
+so waiving `VALIDATE` is publishing a Meta face that does not say what was written. The finding quotes core's refusal, which
 names the field and the value; it never depends on which error variant core used.
 `validate` stops at the first refusal, so a description with two bad names shows the
 second once the first is fixed.
@@ -444,7 +450,7 @@ unprobed: notes-delete delete OUTPUTS: never fired under root
 - **`DECLARATIONS`** — the same rule turned on the module's own declarations.
 
 **A declaration that could not apply is a finding.** A declaration is a promise
-about a check that will honour it, and one whose target the walk never reaches is
+about a check that will honor it, and one whose target the walk never reaches is
 inert: it changes nothing, fails nothing, and prints in the report exactly like
 one that was consulted. `Suite::live` on a `Sink` is the founding instance —
 `CACHEABLE` returns early on a non-cacheable verb, so the declaration did nothing
@@ -578,10 +584,10 @@ cacheable pure functions nobody declared pure — and nothing else.
 `VALIDATE` is falsified with an id holding a space, one holding `>`, an input
 name holding U+0085 (shown escaped in the report, never raw) and an input name on
 an `ActionSpec`; a clean endpoint passes, and a waiver silences it per endpoint. An
-id with an IPv6 host (`http://[::1]/x`) is pinned for the core release after 0.1.99:
-the check passes it AND its Meta Turtle parses. That test is `#[ignore]`d until the
-release ships, because on 0.1.99 the Turtle does not parse (`Invalid IRI code point
-'['`); it does not assert the broken behavior.
+id with an IPv6 host (`http://[::1]/x`) is pinned: the check passes it AND its Meta
+Turtle parses. That holds from core 0.1.100, whose emitters encode `[` and `]` in a
+name; on 0.1.99 the Turtle did not parse (`Invalid IRI code point '['`), which is why
+the floor is 0.1.100.
 
 `SPACE-NAME` is falsified one failure at a time in `tests/violations.rs`: a
 self-named space claiming nothing, a name outside the prefix, a name other than the

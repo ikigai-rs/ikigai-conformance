@@ -311,7 +311,7 @@ struct Fired {
 /// What the walk actually covered, recorded as it goes — the evidence
 /// [`Check::Declarations`] reads to say which declarations were never consulted.
 ///
-/// A declaration is a promise about a check that will honour it. When the target of
+/// A declaration is a promise about a check that will honor it. When the target of
 /// that promise is never reached — a `live` on a Sink, a fixture whose id is a typo,
 /// a waiver for a check that was not selected — the declaration is inert, and the
 /// report prints it as if it had run. This is the ledger that makes the difference
@@ -2003,9 +2003,14 @@ fn names(description: &Description, report: &mut Report) {
 // ----- VALIDATE ---------------------------------------------------------------
 
 /// Core's own refusal, reported. Matched on the refusal and never on its variant:
-/// core 0.1.99 refuses an `IRIREF` character as `Error::Endpoint` and a code point no
-/// IRI carries as `Error::InvalidArgument`, and a later core makes them one variant
-/// (ledger #1361), so a match on either would go quiet across that release.
+/// core 0.1.99 refused an `IRIREF` character as `Error::Endpoint` and a code point no
+/// IRI carries as `Error::InvalidArgument`, and core 0.1.100 makes them one variant
+/// (ledger #1361), so a match on either would go quiet across a release.
+///
+/// Since core 0.1.100 the emitters ENCODE a name and degrade an authored IRI that is
+/// not one to a literal, so a refused value no longer breaks a document: the finding
+/// says what it is, the strict check on an authoring mistake, not the thing that keeps
+/// the Turtle parsing (ledger #1385).
 fn validate(description: &Description, report: &mut Report) {
     if let Err(refusal) = description.validate() {
         report.findings.push(Finding::new(
@@ -2013,9 +2018,11 @@ fn validate(description: &Description, report: &mut Report) {
             None,
             Check::Validate,
             format!(
-                "`Description::validate` refuses it: {}. The refused value is spelled \
-                 into the endpoint's Meta Turtle and contract IRIs and breaks them; `bind` \
-                 does not validate, so this is where the refusal is seen",
+                "`Description::validate` refuses it: {}. Core's emitters encode a name \
+                 and degrade an authored IRI that is not one to a literal, so the endpoint's \
+                 Meta Turtle and contract IRIs still parse, but not as written: the value is \
+                 an authoring mistake, and `bind` does not validate, so this is where the \
+                 refusal is seen",
                 visible(&refusal.to_string())
             ),
         ));
