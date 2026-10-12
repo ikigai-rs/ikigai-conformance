@@ -604,7 +604,7 @@ anyone memoizes by id.
 
 ## Status
 
-0.6.2. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.7.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
 
 ### 0.6.x → 0.7.0: `VALIDATE` (ledger #1361)
