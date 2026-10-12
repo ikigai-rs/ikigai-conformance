@@ -1653,6 +1653,9 @@ impl Suite {
         if self.runs(&description.id, Check::Names) {
             names(description, report);
         }
+        if self.runs(&description.id, Check::Validate) {
+            validate(description, report);
+        }
         if self.runs(&description.id, Check::Pipeline) {
             pipeline_static(description, report);
         }
@@ -1995,6 +1998,42 @@ fn names(description: &Description, report: &mut Report) {
             ),
         ));
     }
+}
+
+// ----- VALIDATE ---------------------------------------------------------------
+
+/// Core's own refusal, reported. Matched on the refusal and never on its variant:
+/// core 0.1.99 refuses an `IRIREF` character as `Error::Endpoint` and a code point no
+/// IRI carries as `Error::InvalidArgument`, and a later core makes them one variant
+/// (ledger #1361), so a match on either would go quiet across that release.
+fn validate(description: &Description, report: &mut Report) {
+    if let Err(refusal) = description.validate() {
+        report.findings.push(Finding::new(
+            &description.id,
+            None,
+            Check::Validate,
+            format!(
+                "`Description::validate` refuses it: {}. The refused value is spelled \
+                 into the endpoint's Meta Turtle and contract IRIs and breaks them; `bind` \
+                 does not validate, so this is where the refusal is seen",
+                visible(&refusal.to_string())
+            ),
+        ));
+    }
+}
+
+/// `s` with every control character escaped, so a refused name cannot break the
+/// report line it is printed on. Ordinary Unicode is left as it is.
+fn visible(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_unicode().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 // ----- PIPELINE (static half) -------------------------------------------------

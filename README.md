@@ -23,7 +23,7 @@ cms-graph  VOCABULARY  source: the `text/turtle` face uses `https://ikigai-rs.de
 sparql-construct  OUTPUTS  source: served `text/turtle` with its minimal inputs but declares only `application/sparql-results+json`: a face the manifold does not announce and the RDF checks never saw — declare it (`.output("text/turtle")`) or serve what is declared
 link-remove  DECLARATIONS  declared live (`Suite::live`) but nothing held it to it: it declares no cacheable verb (it declares delete), and CACHEABLE returns early on a mutating one. The report prints `declared live: link-remove`, which reads as a check that ran
 7 finding(s) across 4 endpoint(s), 4 action(s)
-checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE NAMES DECLARATIONS
+checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE NAMES VALIDATE DECLARATIONS
 probed 3 face(s) across 3 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
 probed: ik-context source `application/ld+json`: 0 triple(s) — nothing was checked
@@ -62,8 +62,27 @@ pointing at the check.
 | `CACHEABLE` | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and — if it never expires (`Expiry::Never`; an `Expiry::At` deadline is a bound) — carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; a result declared live (`Suite::live`) is `Expiry::Always` |
 | `PIPELINE` | pipeline citizenship | a mutating action with by-value inputs declares `content` (where a pipe's value and a `sink`'s body arrive); an action declaring `content` reads it |
 | `NAMES` | naming convention | the description id is a kebab-case noun (`tag-suggest`, `kernel-catalog`) — the MCP projection derives an agent's tool name from it |
+| `VALIDATE` | a name is spelled into IRIs | `Description::validate()` accepts the description: no id, input name, input `class` or `requires` holds a character an RDF `IRIREF` cannot carry (``<>"{}\|^`\``, a space, a control character), and no id or input name holds a code point no IRI carries (DEL, a C1 control, private use, a noncharacter; core 0.1.99). Such a value is spelled into the endpoint's Meta Turtle and contract IRIs, and breaks them. See [Why `VALIDATE` is here and not in `bind`](#why-validate-is-here-and-not-in-bind) |
 | `SPACE-NAME` | a name is a claim: same name, same doors | a space the module declares **self-named** claims `space_iri("<module>")` (`urn:iki:space:<module>`), on its topology root too, and two calls of its constructor claim the same name over the same doors; a space it declares **host-named** claims nothing. See [A space's name](#a-spaces-name-space-name) |
 | `DECLARATIONS` | — | every declaration the module made (`live`, `cacheable`, `pure`, `namespace`, a `Fixture`, an `opt_out`, an `opt_out_check`, a declared space) reached the check that would honour it. A `live` on a `Sink` reached nothing and the report printed `declared live:` anyway |
+
+### Why `VALIDATE` is here and not in `bind`
+
+`ikigai-core`'s `Space::bind` is infallible and does not validate, by decision
+(ledger #1361): a host composing spaces should not have to handle an error for
+every door it binds, and a description is fixed when it is written, not when it is
+bound. So a bad name is caught where it is AUTHORED, by the suite every module's CI
+already runs, and the module never ships it. Core's emitters encode what an IRI may
+legally hold but a Turtle `IRIREF` may not spell raw (`[` and `]`, so an id like
+`http://[::1]/x` stays a legal document; the core release after 0.1.99), and
+`VALIDATE` is the strict layer on top, for what no encoding should save.
+
+It is not `NAMES`. `NAMES` is a convention a module may waive (a proper-noun id, a
+pre-convention builtin); a value `validate` refuses breaks a document, so waiving
+`VALIDATE` is waiving a broken Meta face. The finding quotes core's refusal, which
+names the field and the value; it never depends on which error variant core used.
+`validate` stops at the first refusal, so a description with two bad names shows the
+second once the first is fixed.
 
 Every check is independently selectable, so a module adopts incrementally, and
 every skipped check is printed as skipped:
@@ -396,7 +415,7 @@ not reach as loudly as what it found.
 
 ```
 0 finding(s) across 6 endpoint(s), 9 action(s)
-checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS* SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE NAMES DECLARATIONS
+checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS* SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE NAMES VALIDATE DECLARATIONS
 * OUTPUTS ran on 1 of 6 endpoint(s); waived on the rest (see `opted out:`)
 probed 7 face(s) across 5 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
@@ -556,6 +575,14 @@ the whole point. `tests/builtins.rs` runs the suite against
 and pins the exact findings: three untyped inputs, two pre-convention ids, three
 cacheable pure functions nobody declared pure — and nothing else.
 
+`VALIDATE` is falsified with an id holding a space, one holding `>`, an input
+name holding U+0085 (shown escaped in the report, never raw) and an input name on
+an `ActionSpec`; a clean endpoint passes, and a waiver silences it per endpoint. An
+id with an IPv6 host (`http://[::1]/x`) is pinned for the core release after 0.1.99:
+the check passes it AND its Meta Turtle parses. That test is `#[ignore]`d until the
+release ships, because on 0.1.99 the Turtle does not parse (`Invalid IRI code point
+'['`); it does not assert the broken behavior.
+
 `SPACE-NAME` is falsified one failure at a time in `tests/violations.rs`: a
 self-named space claiming nothing, a name outside the prefix, a name other than the
 one declared, two calls claiming different names, two calls over different doors
@@ -579,6 +606,30 @@ anyone memoizes by id.
 
 0.6.2. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.6.x → 0.7.0: `VALIDATE` (ledger #1361)
+
+**What is new.** A thirteenth check, `VALIDATE`: every description the walk reaches
+is run through `Description::validate()`, and a refusal is a finding naming the
+endpoint, the field and the value. See
+[Why `VALIDATE` is here and not in `bind`](#why-validate-is-here-and-not-in-bind).
+
+**Will it turn a green suite red?** Only for a module with a name core refuses, and a
+survey before this release found none. Every endpoint of the published module crates
+whose `space()` a scratch crate could build (cms, compress, diagram, encrypt, fn,
+jsonld, lisp, markdown, name, repo, runbook, sexpr, shacl, text, sign, xslt, sniff,
+rdf, sparql, tz, fs, org, browse with and without its annotation family) passed, and
+so do `ikigai-core`'s builtins (`tests/builtins.rs`). Not surveyed, because their
+spaces need a host-injected transport, backend or configuration: http, llm, secret,
+nl, meeting, time. What can go red on the upgrade is the floor: `ikigai-core` is now
+`0.1.99` (the release whose `validate` refuses a code point no IRI carries), so a
+module pinned below it resolves up. A module pinned at `"0.6.x"` is ceilinged below
+0.7.0 and stays green until it moves.
+
+**Source changes for a consumer:** `Check::ALL` is `[Check; 13]`, and `Check::Validate`
+sits after `Check::Names` in report order, so the discriminants of `SpaceName` and
+`Declarations` move up by one (`Check` is `#[non_exhaustive]`; nothing here exposes the
+discriminant).
 
 ### 0.6.1 → 0.6.2: an endpoint about its caller names one (ledger #1317)
 
