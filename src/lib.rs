@@ -199,7 +199,9 @@
 //! `opt_out_check(id, Check::Declarations, "…")`, which puts the reason in the
 //! record where the next reader will find it.
 //!
-//! What a walk fires, under root: a `Source` or `Exists` is resolved once (twice
+//! What a walk fires, under root (or as the caller a [`Fixture::capability`] names
+//! for that action: an endpoint about its caller refuses root, which names no
+//! principal): a `Source` or `Exists` is resolved once (twice
 //! when cacheable — the second is the cache probe); each declared RDF face beyond
 //! the first is resolved once more with `as=`; a `Sink` or `Delete` declaring
 //! `content` is fired **once**, by the pipeline probe, and [`Outputs`](Check::Outputs)
