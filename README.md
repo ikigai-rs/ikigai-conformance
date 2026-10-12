@@ -577,8 +577,31 @@ anyone memoizes by id.
 
 ## Status
 
-0.6.1. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.6.2. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.6.1 → 0.6.2: an endpoint about its caller names one (ledger #1317)
+
+**What was wrong.** Every probe that judges an answer resolved under root, and root
+holds every principal and names none. An endpoint that answers about whoever asks
+and refuses a caller naming nobody (`ikigai-layers`'s `urn:layers:me`) refused every
+probe, so `OUTPUTS`, `SKOLEM-RDF`, `VOCABULARY` and `CACHEABLE` could only report
+the refusal or be waived one by one. A `live` declaration on it was printed as
+`declared live:` while nothing had been checked.
+
+**What changed.** `Fixture::new(id, verb).capability(cap)` names the caller for that
+action, and the walk resolves it as that caller. See
+[An endpoint about its caller names one](#an-endpoint-about-its-caller-names-one-fixturecapability).
+`ENFORCED` and `AUTHORITY` still probe under no grants. A `Denied` under root now
+names this fix, and `DECLARATIONS` reports a caller that no probe resolved as.
+
+**Will it turn a green suite red?** No. Root stays the default: an action no fixture
+names a caller for is probed exactly as before, and the `DECLARATIONS` rule only
+reads fixtures that name one. The one text change any adopter can see is the
+`Denied`-under-root finding, which gained a sentence naming the fix. An adopter that
+waived the answer-judging checks for an endpoint about its caller can replace those
+waivers with one fixture. The `ikigai-vocab` pin moves to the head, 0.1.96, per the
+standing rule.
 
 ### 0.6.0 → 0.6.1: an `Expiry::At` deadline is a bound (ledger #1000)
 
