@@ -610,8 +610,21 @@ anyone memoizes by id.
 
 ## Status
 
-0.7.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.7.1. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.7.0 → 0.7.1: `VALIDATE` on core 0.1.100 (ledger #1385)
+
+**What changed.** The `ikigai-core` and `ikigai-vocab` floors are `0.1.100`, the release
+whose emitters encode a name (`[` and `]` included) and degrade an authored IRI that is
+not one to a literal. An id like `http://[::1]/x` passes `VALIDATE` and its Meta Turtle
+parses, and a test pins both. The `VALIDATE` finding no longer says a refused value
+breaks the Meta Turtle and contract IRIs: they parse, but not as written, so the check is
+the strict layer on an authoring mistake. Core 0.1.100 also quotes the refused value
+escaped (`two\nlines`) in the finding.
+
+**Will it turn a green suite red?** No finding changed what it accepts or refuses. A
+module pinned below `ikigai-core` 0.1.100 resolves up.
 
 ### 0.6.x → 0.7.0: `VALIDATE` (ledger #1361)
 
