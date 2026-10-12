@@ -101,6 +101,20 @@ pub enum Check {
     /// **Naming convention.** A description id is a short noun in `kebab-case`
     /// (the convention `ikigai-core`'s crate docs state).
     Names,
+    /// **A description core itself would refuse.** `Description::validate()` refuses
+    /// the description: an id, an input name, an input `class` or a `requires` holding a
+    /// character an RDF `IRIREF` cannot carry (one of ``<>"{}|^`\``, a space, a
+    /// control character), or a NAME holding a code point no IRI carries (DEL, a C1 control,
+    /// private use, a noncharacter; ikigai-core 0.1.99). Such a name is spelled into the
+    /// endpoint's node, its contract IRIs and its `Meta` Turtle, and breaks them.
+    ///
+    /// It lives here, not in `bind`: binding stays infallible and does not validate, so a
+    /// bad name is caught where it is AUTHORED, by the suite every module's CI already
+    /// runs. It is not [`Names`](Check::Names), which is a convention a module may waive;
+    /// this one is not a matter of style. It reports the refusal, never its error
+    /// variant, and `validate` stops at the first refusal, so a description with two bad
+    /// names shows the second once the first is fixed.
+    Validate,
     /// **A name is a claim: same name, same doors.** A module states what kind of
     /// space its constructor builds, and the check holds it to that
     /// ([`Suite::self_named_space`](crate::Suite::self_named_space),
@@ -156,6 +170,7 @@ impl Check {
             Check::Cacheable => "CACHEABLE",
             Check::Pipeline => "PIPELINE",
             Check::Names => "NAMES",
+            Check::Validate => "VALIDATE",
             Check::SpaceName => "SPACE-NAME",
             Check::Declarations => "DECLARATIONS",
         }
@@ -229,6 +244,8 @@ impl Checks {
     pub const PIPELINE: Checks = Checks(1 << (Check::Pipeline as u16));
     /// [`Check::Names`].
     pub const NAMES: Checks = Checks(1 << (Check::Names as u16));
+    /// [`Check::Validate`].
+    pub const VALIDATE: Checks = Checks(1 << (Check::Validate as u16));
     /// [`Check::SpaceName`].
     pub const SPACE_NAME: Checks = Checks(1 << (Check::SpaceName as u16));
     /// [`Check::Declarations`].
@@ -359,7 +376,7 @@ mod tests {
 
     #[test]
     fn every_check_has_its_own_bit() {
-        // Twelve checks no longer fit a u8; a shared bit would make one check
+        // Thirteen checks no longer fit a u8; a shared bit would make one check
         // select another silently.
         let mut bits: Vec<u16> = Check::ALL.iter().map(|c| c.bit()).collect();
         bits.sort_unstable();

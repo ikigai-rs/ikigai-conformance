@@ -1842,6 +1842,160 @@ fn names_catches_camel_case_and_full_iri_ids() {
     );
 }
 
+// ----- VALIDATE ---------------------------------------------------------------
+
+/// An endpoint whose description is `description`, answering plain text.
+fn described(description: Description) -> FnEndpoint {
+    FnEndpoint::new(description.id.clone(), |_inv: &Invocation<'_>| {
+        Ok(text("x"))
+    })
+    .with_description(description)
+}
+
+fn validate_report(space: EndpointSpace) -> Report {
+    Suite::new()
+        .checks(Checks::VALIDATE)
+        .run_blocking(&kernel(space))
+}
+
+#[test]
+fn validate_passes_a_clean_endpoint() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
+    let report = validate_report(space);
+    assert!(report.is_clean(), "{report}");
+    assert_eq!(report.endpoints, 1);
+}
+
+#[test]
+fn validate_catches_an_id_holding_a_space_or_an_angle_bracket() {
+    let space = EndpointSpace::new()
+        .bind(
+            Exact::new("urn:example:spaced"),
+            described(
+                Description::new("two words")
+                    .verb(Verb::Source)
+                    .output("text/plain"),
+            ),
+        )
+        .bind(
+            Exact::new("urn:example:angled"),
+            described(
+                Description::new("a>b")
+                    .verb(Verb::Source)
+                    .output("text/plain"),
+            ),
+        );
+    let report = validate_report(space);
+    assert_eq!(only(&report, Check::Validate).len(), 2, "{report}");
+    // The endpoint, the field and the value, whichever error variant core used.
+    let spaced: Vec<_> = report.against("two words").collect();
+    assert_eq!(spaced.len(), 1, "{report}");
+    assert!(spaced[0].detail.contains("id `two words`"), "{report}");
+    let angled: Vec<_> = report.against("a>b").collect();
+    assert_eq!(angled.len(), 1, "{report}");
+    assert!(angled[0].detail.contains("id `a>b`"), "{report}");
+    assert!(!report.is_clean());
+}
+
+#[test]
+fn validate_catches_an_input_name_holding_a_c1_control() {
+    let space = EndpointSpace::new().bind(
+        Exact::new("urn:example:nel"),
+        described(
+            Description::new("nel")
+                .verb(Verb::Source)
+                .input(ArgSpec::new("in\u{85}put").class(XSD_STRING))
+                .output("text/plain"),
+        ),
+    );
+    let report = validate_report(space);
+    let found = only(&report, Check::Validate);
+    assert_eq!(found.len(), 1, "{report}");
+    assert!(found[0].contains("input name"), "{report}");
+    assert!(found[0].contains("U+0085"), "{report}");
+    // The refused code point is shown escaped, never raw on the report line.
+    assert!(!report.to_string().contains('\u{85}'), "{report}");
+}
+
+#[test]
+fn validate_never_prints_a_refused_control_character_raw() {
+    // A newline is refused as an IRIREF character, and core's refusal quotes the value
+    // as it is: the report escapes it, so the finding stays one line.
+    let space = EndpointSpace::new().bind(
+        Exact::new("urn:example:split"),
+        described(
+            Description::new("two\nlines")
+                .verb(Verb::Source)
+                .output("text/plain"),
+        ),
+    );
+    let report = validate_report(space);
+    let found = only(&report, Check::Validate);
+    assert_eq!(found.len(), 1, "{report}");
+    assert!(!found[0].contains('\n'), "{report}");
+    assert!(found[0].contains("two\\u{a}lines"), "{report}");
+}
+
+#[test]
+fn validate_catches_a_name_declared_on_an_action_spec() {
+    let space = EndpointSpace::new().bind(
+        Exact::new("urn:example:notes"),
+        described(
+            Description::new("notes").action(
+                ActionSpec::new(Verb::Sink)
+                    .input(ArgSpec::new("con tent").class(XSD_STRING))
+                    .output("text/plain"),
+            ),
+        ),
+    );
+    let report = validate_report(space);
+    assert_caught(&report, Check::Validate, "input name `con tent`");
+}
+
+#[test]
+fn validate_is_waivable_per_endpoint_and_selectable_alone() {
+    let space = EndpointSpace::new().bind(
+        Exact::new("urn:example:spaced"),
+        described(
+            Description::new("two words")
+                .verb(Verb::Source)
+                .output("text/plain"),
+        ),
+    );
+    let report = Suite::new()
+        .checks(Checks::VALIDATE)
+        .opt_out_check(
+            "two words",
+            Check::Validate,
+            "a legacy id, renamed next release",
+        )
+        .run_blocking(&kernel(space));
+    assert!(report.of(Check::Validate).next().is_none(), "{report}");
+}
+
+/// An id that is a full IRI with an IPv6 host. `validate` admits `[` and `]` (they are
+/// legal in an IRI), but core 0.1.99's emitters spell them into the description's
+/// Turtle unencoded, so the document does not parse. Brian's decision on ledger #1361
+/// is to ENCODE them in the emitters (the core release after 0.1.99), not to refuse
+/// them, so this pins the behavior after that release: the check passes AND the Turtle
+/// parses. It does not assert today's broken Turtle.
+#[test]
+#[ignore = "ledger #1361: needs the ikigai-core release after 0.1.99, whose emitters encode `[` and `]`"]
+fn validate_passes_an_ipv6_iri_id_and_its_turtle_parses() {
+    let id = "http://[::1]/x";
+    let description = Description::new(id).verb(Verb::Source).output("text/plain");
+    let space = EndpointSpace::new().bind(
+        Exact::new("urn:example:ipv6"),
+        described(description.clone()),
+    );
+    let report = validate_report(space);
+    assert!(report.is_clean(), "{report}");
+    let turtle = ikigai_vocab::to_turtle(&description);
+    if let Err(e) = ikigai_conformance::rdf::parse(TURTLE, turtle.as_bytes()) {
+        panic!("the description's Turtle does not parse: {e}\n{turtle}");
+    }
+}
+
 // ----- selection, opt-outs, fixtures -------------------------------------------
 
 #[test]
