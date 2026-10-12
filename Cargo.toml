@@ -48,7 +48,15 @@ categories = ["development-tools::testing"]
 # check would pass a name whose Turtle and contract IRIs do not parse. The check
 # matches the refusal, never its error variant, so it holds across the core release
 # that makes `validate`'s two variants one.
-ikigai-core = "0.1.99"
+#
+# 0.1.100 since 0.7.1, SEMANTIC (ledger #1385): from 0.1.100 core's emitters encode a NAME
+# (`encode_name`: `[`, `]`, and every code point no IRI carries) and degrade an authored IRI
+# that is not one to a literal, so a description's Meta Turtle parses whatever its names
+# hold. The VALIDATE finding's text says so, and `tests/violations.rs` pins an id that is a
+# full IRI with an IPv6 host (`http://[::1]/x`): `validate` accepts it AND its Turtle parses,
+# which is true only on 0.1.100+. It is also the release where `validate` refuses with one
+# error variant; the check still matches the refusal, never the variant.
+ikigai-core = "0.1.100"
 # The vocabulary is the ORACLE for the terms check: a predicate is "defined" iff it
 # is a subject in `ikigai_vocab::VOCABULARY`. So the floor is the newest published
 # vocabulary, not the oldest API this crate compiles against — an older pin would
@@ -84,7 +92,10 @@ ikigai-core = "0.1.99"
 # 0.7.0: re-checked — 0.1.99 is the head on crates.io; raised to it (the RANGE >=0.1.99,
 # <0.2.0). It now matches the core floor above, which 0.7.0 raised to 0.1.99 for
 # VALIDATE.
-ikigai-vocab = "0.1.99"
+# 0.7.1: re-checked — 0.1.100 is the head on crates.io; raised to it (the RANGE >=0.1.100,
+# <0.2.0). It matches the core floor above again: vocab 0.1.100's `to_turtle` is the
+# emitter that calls `encode_name`, so the IPv6-id test needs both.
+ikigai-vocab = "0.1.100"
 # One parser for every RDF face a module can declare (Turtle, N-Triples, N-Quads,
 # TriG, RDF/XML, JSON-LD). 0.2.5 is the version whose `for_slice` and
 # `RdfFormat::from_media_type` this crate was written against.

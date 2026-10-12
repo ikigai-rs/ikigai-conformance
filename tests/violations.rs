@@ -342,7 +342,7 @@ fn outputs_catches_a_declared_type_the_action_does_not_serve() {
 }
 
 #[test]
-fn outputs_honours_a_callers_as_label_and_says_it_saw_only_that() {
+fn outputs_honors_a_callers_as_label_and_says_it_saw_only_that() {
     let space = EndpointSpace::new().bind(Exact::new("urn:example:relabel"), relabel());
     let report = Suite::new()
         .fixture(Fixture::new("relabel", Verb::Source).arg("as", "image/svg+xml"))
@@ -508,7 +508,7 @@ fn invented_terms() -> FnEndpoint {
 }
 
 #[test]
-fn vocabulary_catches_invented_terms_and_honours_registered_namespaces() {
+fn vocabulary_catches_invented_terms_and_honors_registered_namespaces() {
     let space = EndpointSpace::new().bind(Exact::new("urn:example:invented"), invented_terms());
     let report = report_of(space);
     let details = only(&report, Check::Vocabulary);
@@ -1152,7 +1152,7 @@ fn a_per_check_opt_out_silences_one_rule_and_keeps_every_other() {
 // ----- DECLARATIONS -----------------------------------------------------------
 //
 // Every test here asserts the SILENCE is gone: the declaration used to reach no
-// check at all, and the report printed it as if one had honoured it.
+// check at all, and the report printed it as if one had honored it.
 
 /// A well-behaved Sink: kebab id, typed `content`, reads it, declares what it
 /// serves. Nothing about it can ever be cacheable — `Verb::Sink` is not.
@@ -1919,8 +1919,10 @@ fn validate_catches_an_input_name_holding_a_c1_control() {
 
 #[test]
 fn validate_never_prints_a_refused_control_character_raw() {
-    // A newline is refused as an IRIREF character, and core's refusal quotes the value
-    // as it is: the report escapes it, so the finding stays one line.
+    // A newline is refused as an IRIREF character. Core 0.1.100's refusal quotes the
+    // value `escape_debug`ged (`two\nlines`); 0.1.99 quoted it raw, and the report's own
+    // escaping (`two\u{a}lines`) is what kept the finding one line then. Either way the
+    // finding is one line and names the value.
     let space = EndpointSpace::new().bind(
         Exact::new("urn:example:split"),
         described(
@@ -1933,7 +1935,7 @@ fn validate_never_prints_a_refused_control_character_raw() {
     let found = only(&report, Check::Validate);
     assert_eq!(found.len(), 1, "{report}");
     assert!(!found[0].contains('\n'), "{report}");
-    assert!(found[0].contains("two\\u{a}lines"), "{report}");
+    assert!(found[0].contains("two\\nlines"), "{report}");
 }
 
 #[test]
@@ -1974,13 +1976,11 @@ fn validate_is_waivable_per_endpoint_and_selectable_alone() {
 }
 
 /// An id that is a full IRI with an IPv6 host. `validate` admits `[` and `]` (they are
-/// legal in an IRI), but core 0.1.99's emitters spell them into the description's
-/// Turtle unencoded, so the document does not parse. Brian's decision on ledger #1361
-/// is to ENCODE them in the emitters (the core release after 0.1.99), not to refuse
-/// them, so this pins the behavior after that release: the check passes AND the Turtle
-/// parses. It does not assert today's broken Turtle.
+/// legal in an IRI), and from core 0.1.100 the emitters ENCODE them in a name
+/// (`encode_name`, ledger #1361, #1385), so the check passes AND the Turtle parses. On
+/// core 0.1.99 the emitters spelled them raw and the document did not parse, which is
+/// why the floor is 0.1.100.
 #[test]
-#[ignore = "ledger #1361: needs the ikigai-core release after 0.1.99, whose emitters encode `[` and `]`"]
 fn validate_passes_an_ipv6_iri_id_and_its_turtle_parses() {
     let id = "http://[::1]/x";
     let description = Description::new(id).verb(Verb::Source).output("text/plain");
