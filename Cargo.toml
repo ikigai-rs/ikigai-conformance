@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-conformance"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "What \"done\" means for an ikigai module, as one test: walks every endpoint a kernel binds and reports every violation of the module recipe at once — ArgSpec completeness, requires implies a verb, declared = enforced, declared outputs = served outputs, skolemized RDF faces, vocabulary terms only, the cacheable-twice probe, pipeline citizenship, a space's name is a claim (same name, same doors) — and says what it did NOT do: what it probed, what it could not, and which of your own declarations reached no check at all."
@@ -70,7 +70,11 @@ ikigai-core = "0.1.89"
 # the RANGE >=0.1.91, <0.2.0. vocab 0.1.91 itself requires `ikigai-core ^0.1.91`, so
 # this pin lifts the core this crate resolves with to 0.1.91 transitively; the
 # `ikigai-core` pin above stays at 0.1.89 because that is still the API this crate uses.
-ikigai-vocab = "0.1.91"
+# 0.6.2: re-checked — 0.1.96 is the head on crates.io; raised to it (the RANGE >=0.1.96,
+# <0.2.0). The core pin stays at 0.1.89 again: `Fixture::capability` takes a
+# `Capability`, which is old, and the principal it displays is read as a
+# `urn:cap:principal:` scope rather than through core 0.1.93's `Capability::principal`.
+ikigai-vocab = "0.1.96"
 # One parser for every RDF face a module can declare (Turtle, N-Triples, N-Quads,
 # TriG, RDF/XML, JSON-LD). 0.2.5 is the version whose `for_slice` and
 # `RdfFormat::from_media_type` this crate was written against.
