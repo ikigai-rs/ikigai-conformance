@@ -275,7 +275,8 @@ missing terms land, which makes the waiver self-destructing. That is strictly
 better than `Suite::namespace` for a module's own namespace: a registration waives
 every term under it forever, including the next one somebody invents.
 
-**What a walk fires, under root** — the footprint a fixture author can count on.
+**What a walk fires, under root** (or as the caller a `Fixture::capability` names
+for that action) — the footprint a fixture author can count on.
 It is stated **per FIRING, and a firing is a request**: the verb, the target IRI,
 and the arguments. Per firing: a `Source` or `Exists` is resolved once (twice when
 cacheable; the second is the cache probe), each declared RDF face beyond the first
@@ -318,6 +319,58 @@ you:
 **Fixture bindings are per entry, not per verb.** Every action of an entry
 resolves the same IRI, so the verb on a binding-only fixture is ignored (the first
 fixture for the id that binds the variable wins); arguments are per `(id, verb)`.
+
+### An endpoint about its caller names one (`Fixture::capability`)
+
+The walk resolves as **root** by default, and root holds every principal and names
+none. So an endpoint that answers about WHOEVER ASKS — the principal a door minted,
+like `ikigai-layers`'s `urn:layers:me` — and refuses a caller that names nobody
+refuses every probe. Before 0.6.2 the checks that judge an answer (`OUTPUTS`,
+`SKOLEM-RDF`, `VOCABULARY`, `CACHEABLE`) could only report the refusal or be
+waived one by one, and a `live` declaration was held to nothing. Name the caller
+instead, minted the way the door mints it — the scopes the caller is granted plus
+its principal:
+
+```rust
+use ikigai_conformance::{Fixture, Suite};
+use ikigai_core::{Capability, Verb};
+
+// Core 0.1.93+: Capability::scoped([...]).with_principal(iri)?. On any core, the
+// principal is one scope, `urn:cap:principal:<iri>`, so it can be spelled out.
+let participant = Capability::scoped([
+    "urn:cap:collab:read:demo",
+    "urn:cap:principal:urn:example:person:alice",
+]);
+
+Suite::new()
+    .live("me")                              // now held to the answer it serves
+    .fixture(Fixture::new("me", Verb::Source).capability(participant))
+    .run_blocking(&my_kernel())
+    .assert_clean();
+```
+
+The report records it (`fixture: me source as-caller=urn:example:person:alice (2
+scopes)`), so a reader sees the action was probed as someone other than root. What
+the caller reaches, and what it does not:
+
+- **Per `(id, verb)`, like `arg`.** It is the caller of every probe that judges an
+  answer: the minimal resolution, the cache probe's second resolution (the kernel
+  keys its cache on the capability, so both are made as the same caller), each
+  extra RDF face, and the pipeline probe's firing of a mutating action that declares
+  `content`. Every action no fixture names is still probed under root, so adopting
+  this changes nothing for any other endpoint.
+- **Not `ENFORCED` or `AUTHORITY`.** Those ask what the action does under a
+  capability holding no grants, which carries no principal either. An endpoint that
+  refuses an anonymous caller declares that gate (`requires`, with
+  `urn:cap:principal:*` as the presence test when identity is the whole gate), or
+  `ENFORCED` reports the undeclared refusal, exactly as it always has.
+- **A caller nothing resolved as is inert.** A capability for a verb the endpoint
+  does not declare, for an action opted out, for a mutating action without `content`
+  (fired only under no grants), or for an action whose answer-judging checks are all
+  waived is a `DECLARATIONS` finding.
+
+A refusal (`Denied`) under root now says so and names this fix, so an adopter
+meeting it for the first time is pointed here rather than at `opt_out`.
 
 **Counts.** `Report.endpoints` counts distinct description ids; `Report.actions`
 counts one per distinct FIRING — `urn:a11y:config` and `urn:a11y:config:{app}`
@@ -385,6 +438,7 @@ ran. The check covers every declaration, not that one:
 | `live` / `cacheable` on an id with no cacheable verb, or one nothing binds, or one whose `CACHEABLE` is unselected, waived or wholly opted out | `declared live … but nothing held it to it: …` |
 | `pure` over a result that never came back cacheable | `nothing consulted it: no action of it came back cacheable` |
 | a `Fixture` whose id names no walked endpoint, or whose arguments are for an action the endpoint does not declare | `fixture … was never used: …` |
+| a `Fixture::capability` for an action that does not exist, was opted out, or that no probe resolved as | `… supplies a caller for …` / `names a caller no probe resolved as: …` |
 | a `Fixture::binding` naming no template variable of any pattern that id is bound at | `binds \`number\`, which is not a template variable …` |
 | an `opt_out` that excluded nothing | `opted out … but excluded nothing: …` |
 | an `opt_out_check` for a check that could not have run for that id anyway | `waived SKOLEM-RDF … but that check could not have run for it anyway: it declares no RDF face` |

@@ -55,12 +55,16 @@ const SUITE: &str = "(suite)";
 /// assert_eq!(f.id(), "jsonld-expand");
 /// assert_eq!(g.id(), "file");
 /// ```
+///
+/// A fixture can also name the CALLER ([`capability`](Fixture::capability)), for an
+/// endpoint that answers about whoever asks and refuses root.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fixture {
     id: String,
     verb: Verb,
     args: BTreeMap<String, String>,
     bindings: BTreeMap<String, String>,
+    capability: Option<Capability>,
 }
 
 impl Fixture {
@@ -72,6 +76,7 @@ impl Fixture {
             verb,
             args: BTreeMap::new(),
             bindings: BTreeMap::new(),
+            capability: None,
         }
     }
 
@@ -100,6 +105,58 @@ impl Fixture {
         self
     }
 
+    /// Probe this action AS a caller holding `capability`, in place of root.
+    ///
+    /// For an endpoint about its caller: one that answers for the principal a door
+    /// minted (`urn:layers:me`) and refuses a request naming none, root included,
+    /// since root holds every principal and names none. Under root such an endpoint
+    /// refuses every probe, so `OUTPUTS`, `SKOLEM-RDF`, `VOCABULARY` and `CACHEABLE`
+    /// could only report the refusal or be waived, and a [`Suite::live`] held it to
+    /// nothing. Named here, the walk resolves the action as that caller and every one
+    /// of those checks judges what it served.
+    ///
+    /// Mint it the way the door does: the scopes the caller is granted plus its
+    /// principal (`Capability::scoped([...]).with_principal(iri)` on core 0.1.93+, or
+    /// the `urn:cap:principal:<iri>` scope spelled out). Root stays the default: a
+    /// fixture without a capability, and every action no fixture names, probes under
+    /// root exactly as before.
+    ///
+    /// Per `(id, verb)`, like [`arg`](Fixture::arg). It is the caller of every probe
+    /// that resolves the action to judge an answer: the minimal resolution (and the
+    /// cache probe's second one, which the kernel keys on this same capability), each
+    /// extra RDF face, and the pipeline probe's firing of a mutating action that
+    /// declares `content`. It is NOT the caller of `ENFORCED` and `AUTHORITY`, which
+    /// ask what the action does under a capability holding no grants and so carry no
+    /// principal either: an endpoint that refuses an anonymous caller declares that
+    /// gate (`urn:cap:principal:*` is the presence test) or `ENFORCED` reports the
+    /// undeclared refusal, as it always has. A capability no probe resolved under (a
+    /// mutating action without `content`, which is fired only under no grants) is
+    /// reported by [`Check::Declarations`](crate::Check::Declarations).
+    ///
+    /// ```
+    /// use ikigai_conformance::Fixture;
+    /// use ikigai_core::{Capability, Verb};
+    ///
+    /// // A participant holding the read scope, named as a door would name it.
+    /// let caller = Capability::scoped([
+    ///     "urn:cap:collab:read:demo",
+    ///     "urn:cap:principal:urn:example:person:alice",
+    /// ]);
+    /// let me = Fixture::new("me", Verb::Source).capability(caller.clone());
+    /// assert_eq!(me.caller(), Some(&caller));
+    /// assert_eq!(Fixture::new("me", Verb::Source).caller(), None); // root
+    /// ```
+    pub fn capability(mut self, capability: Capability) -> Self {
+        self.capability = Some(capability);
+        self
+    }
+
+    /// The capability this fixture probes its action under, or `None` for root (the
+    /// default). See [`capability`](Fixture::capability).
+    pub fn caller(&self) -> Option<&Capability> {
+        self.capability.as_ref()
+    }
+
     /// The endpoint id this fixture is for.
     pub fn id(&self) -> &str {
         &self.id
@@ -113,16 +170,25 @@ impl Fixture {
 
 /// The report line for a fixture: `<id> <verb> <var>=<value>… <name>=<value>…`,
 /// bindings first, values in their escaped string form so a line stays a line, cut
-/// after 48 characters with the true length stated.
+/// after 48 characters with the true length stated. A named caller comes last, as
+/// `as-caller=` and its principal (or its scope count when it names none), so the
+/// record says the action was probed as someone other than root.
 ///
 /// ```
 /// use ikigai_conformance::Fixture;
-/// use ikigai_core::Verb;
+/// use ikigai_core::{Capability, Verb};
 ///
 /// let f = Fixture::new("file", Verb::Sink).binding("path", "scratch.txt").arg("content", "a\nb");
 /// assert_eq!(f.to_string(), r#"file sink path="scratch.txt" content="a\nb""#);
 /// let long = Fixture::new("doc", Verb::Source).arg("content", "x".repeat(200));
 /// assert!(long.to_string().ends_with("… (202 chars)"), "{long}");
+/// let me = Fixture::new("me", Verb::Source).capability(Capability::scoped([
+///     "urn:cap:collab:read:demo",
+///     "urn:cap:principal:urn:example:person:alice",
+/// ]));
+/// assert_eq!(me.to_string(), "me source as-caller=urn:example:person:alice (2 scopes)");
+/// let anonymous = Fixture::new("me", Verb::Source).capability(Capability::scoped(["urn:cap:a"]));
+/// assert_eq!(anonymous.to_string(), "me source as-caller=no principal (1 scope)");
 /// ```
 impl fmt::Display for Fixture {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -133,8 +199,46 @@ impl fmt::Display for Fixture {
         for (name, value) in &self.args {
             write!(f, " {name}={}", shown(value))?;
         }
+        if let Some(cap) = &self.capability {
+            match cap.scopes() {
+                None => write!(f, " as-caller=root")?,
+                Some(scopes) => {
+                    let who = principal_named(scopes).unwrap_or("no principal");
+                    let n = scopes.len();
+                    write!(
+                        f,
+                        " as-caller={} ({n} scope{})",
+                        shown_bare(who),
+                        if n == 1 { "" } else { "s" }
+                    )?;
+                }
+            }
+        }
         Ok(())
     }
+}
+
+/// The principal a scope set names: its one `urn:cap:principal:<iri>` scope that is
+/// not a wildcard, as `Capability::principal` reads it on core 0.1.93+ (several name
+/// none). Spelled out here so the floor stays the API this crate otherwise uses.
+fn principal_named(scopes: &BTreeSet<String>) -> Option<&str> {
+    let mut named = scopes
+        .iter()
+        .filter_map(|s| s.strip_prefix("urn:cap:principal:"))
+        .filter(|p| !p.contains('*'));
+    let one = named.next()?;
+    named.next().is_none().then_some(one)
+}
+
+/// An IRI as one printable token, unquoted: escaped, and cut like [`shown`].
+fn shown_bare(value: &str) -> String {
+    let escaped = value.escape_debug().to_string();
+    let len = escaped.chars().count();
+    if len <= SHOWN {
+        return escaped;
+    }
+    let cut: String = escaped.chars().take(SHOWN).collect();
+    format!("{cut}… ({len} chars)")
 }
 
 /// A fixture value as one printable token: escaped, and cut when long.
@@ -250,6 +354,9 @@ struct Coverage {
     /// Whether any RDF face was probed at all (an unused namespace means something
     /// different when nothing was parsed).
     faces_probed: bool,
+    /// The actions some probe resolved as their caller (root or a fixture's
+    /// capability): a fixture capability for an action not in here reached nothing.
+    caller_used: Vec<(String, Verb)>,
 }
 
 impl Coverage {
@@ -269,6 +376,13 @@ impl Coverage {
     fn record_invoked(&mut self, id: &str, verb: Verb) {
         if !self.invoked.iter().any(|(i, v)| i == id && *v == verb) {
             self.invoked.push((id.to_string(), verb));
+        }
+    }
+
+    /// Record that a probe resolved an action as its caller, once.
+    fn record_caller_used(&mut self, id: &str, verb: Verb) {
+        if !self.caller_used.iter().any(|(i, v)| i == id && *v == verb) {
+            self.caller_used.push((id.to_string(), verb));
         }
     }
 
@@ -949,6 +1063,12 @@ impl Suite {
                     fired: None,
                     no_grants: None,
                     failure_reported: false,
+                    caller: self
+                        .fixture_for(&description.id, spec.verb)
+                        .and_then(Fixture::caller)
+                        .cloned()
+                        .unwrap_or_else(Capability::root),
+                    caller_used: false,
                 };
                 action.enforced(&mut report).await;
                 action.authority(&mut report).await;
@@ -963,6 +1083,9 @@ impl Suite {
                 // this action actually served, whatever its media type. Fires
                 // nothing of its own — it reads what the checks above resolved.
                 action.record_probe(&mut report);
+                if action.caller_used {
+                    coverage.record_caller_used(&description.id, spec.verb);
+                }
             }
         }
         report.walked = walk_order.into_boxed_slice();
@@ -1365,19 +1488,23 @@ impl Suite {
                     );
                 }
             }
-            if fixture.args.is_empty() {
+            // What the fixture supplies PER ACTION: arguments, a caller, or both.
+            let (what, they) = match (fixture.args.is_empty(), fixture.capability.is_none()) {
                 // A binding-only fixture is per ENTRY: its verb is ignored by
                 // design, so a verb that names no action says nothing about it.
-                continue;
-            }
+                (true, true) => continue,
+                (false, true) => ("arguments", "they were"),
+                (true, false) => ("a caller", "it was"),
+                (false, false) => ("arguments and a caller", "they were"),
+            };
             let verb = fixture.verb;
             if !coverage.declares(id, verb) {
                 self.inert(
                     report,
                     id,
                     format!(
-                        "fixture `{fixture}` supplies arguments for a {} action `{id}` does not \
-                     declare ({}): they were never used",
+                        "fixture `{fixture}` supplies {what} for a {} action `{id}` does not \
+                     declare ({}): {they} never used",
                         crate::report::verb_name(verb),
                         verb_list(&coverage.verbs_of(id))
                     ),
@@ -1387,8 +1514,31 @@ impl Suite {
                     report,
                     id,
                     format!(
-                        "fixture `{fixture}` supplies arguments for an action excluded by \
-                     `Suite::opt_out`: they were never used"
+                        "fixture `{fixture}` supplies {what} for an action excluded by \
+                     `Suite::opt_out`: {they} never used"
+                    ),
+                );
+            } else if fixture.capability.is_some()
+                && !coverage
+                    .caller_used
+                    .iter()
+                    .any(|(i, v)| i == id && *v == verb)
+            {
+                self.inert(
+                    report,
+                    id,
+                    format!(
+                        "fixture `{fixture}` names a caller no probe resolved as: {}",
+                        if verb.is_mutating() {
+                            "a mutating action is fired as a caller only by the pipeline \
+                             probe, on an action declaring `content` (ENFORCED and AUTHORITY \
+                             fire it under no grants, never as the fixture's caller), or every \
+                             check that would fire it is waived or unselected"
+                        } else {
+                            "every check that resolves it as a caller (OUTPUTS, SKOLEM-RDF, \
+                             VOCABULARY, CACHEABLE) is waived or unselected, or no binding of \
+                             it was invoked"
+                        }
                     ),
                 );
             }
@@ -1912,6 +2062,12 @@ struct Action<'a> {
     /// AUTHORITY read the same one resolution: two probes would fire a Sink twice.
     no_grants: Option<Result<Representation, Error>>,
     failure_reported: bool,
+    /// Who every answer-judging probe resolves as: root, or the capability a
+    /// [`Fixture::capability`] named for this action. Never the no-grants probe's.
+    caller: Capability,
+    /// Whether any probe actually resolved under `caller` — what DECLARATIONS reads to
+    /// say a fixture's capability reached nothing.
+    caller_used: bool,
 }
 
 impl<'a> Action<'a> {
@@ -1928,9 +2084,9 @@ impl<'a> Action<'a> {
         self.suite.runs(self.id, check)
     }
 
-    /// Resolve with minimal inputs under root, traced. Memoized: the RDF and the
-    /// cache checks both need it, and a second resolution is what the cache check
-    /// measures.
+    /// Resolve with minimal inputs as the caller (root, or the fixture's capability),
+    /// traced. Memoized: the RDF and the cache checks both need it, and a second
+    /// resolution is what the cache check measures.
     async fn resolve_minimal(
         &mut self,
         again: bool,
@@ -1943,9 +2099,10 @@ impl<'a> Action<'a> {
         let args = self.suite.args_for(self.id, self.spec);
         let collector = Arc::new(Collector::default());
         let tracer: Arc<dyn Tracer> = collector.clone();
+        self.caller_used = true;
         let result = self
             .kernel
-            .issue_traced(self.request(&args), &Capability::root(), tracer)
+            .issue_traced(self.request(&args), &self.caller, tracer)
             .await
             .map(|repr| {
                 let events = std::mem::take(&mut *collector.0.lock().expect("collector lock"));
@@ -1990,6 +2147,15 @@ impl<'a> Action<'a> {
                  from a Fixture; if it parses `content`, that sample is the likely cause: \
                  supply `Fixture::new(\"{id}\", Verb::{verb:?}).arg(\"content\", …)` with a \
                  value it accepts, or opt out with a reason"
+            ),
+            // Refused under root, which holds every principal and names none: an
+            // endpoint about its caller refuses exactly this, so name the caller.
+            None if matches!(err, Error::Denied(_)) && self.caller.is_root() => format!(
+                "did not resolve with the minimal inputs its ArgSpecs allow ({err}); it was \
+                 probed under root, which names no principal. If it answers about its \
+                 caller, name one with `Fixture::new(\"{id}\", Verb::{verb:?}).capability(…)` \
+                 (the scopes the caller holds plus `urn:cap:principal:<iri>`); otherwise \
+                 supply inputs that work, or opt out with a reason"
             ),
             None => format!(
                 "did not resolve with the minimal inputs its ArgSpecs allow ({err}); supply a \
@@ -2161,9 +2327,8 @@ impl<'a> Action<'a> {
             let result = if self.spec.outputs.len() > 1 {
                 // Several faces: `as=` picks this one, the universal conneg selector.
                 args.entry("as".to_string()).or_insert_with(|| face.clone());
-                self.kernel
-                    .issue(self.request(&args), &Capability::root())
-                    .await
+                self.caller_used = true;
+                self.kernel.issue(self.request(&args), &self.caller).await
             } else {
                 self.resolve_minimal(false).await.map(|(repr, _)| repr)
             };
@@ -2398,9 +2563,7 @@ impl<'a> Action<'a> {
             .filter(|e| e.parent.is_none())
             .any(|e| e.cache_hit);
         let args = self.suite.args_for(self.id, self.spec);
-        let probed = self
-            .kernel
-            .is_cached(&self.request(&args), &Capability::root());
+        let probed = self.kernel.is_cached(&self.request(&args), &self.caller);
         if !traced_hit && !probed {
             report.findings.push(self.finding(
                 Check::Cacheable,
@@ -2469,10 +2632,8 @@ impl<'a> Action<'a> {
             return;
         };
         let args = self.pipeline_args(content);
-        let result = self
-            .kernel
-            .issue(self.request(&args), &Capability::root())
-            .await;
+        self.caller_used = true;
+        let result = self.kernel.issue(self.request(&args), &self.caller).await;
         self.fired = Some(result.clone());
         if let Err(Error::MissingArgument(name)) = &result {
             // With `content` and every required input supplied, a missing argument
