@@ -610,8 +610,21 @@ anyone memoizes by id.
 
 ## Status
 
-0.7.1. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.7.2. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.7.1 → 0.7.2: the report escapes the endpoint id (ledger #1392)
+
+**What changed.** The report printed a finding's detail with its control characters
+escaped and the endpoint-id column raw, so an id holding a newline split one finding
+across two lines. Every place the report prints an endpoint id (a finding, `probed:`,
+`opted out:`, `declared pure/cacheable/live:`, `fixture:`, `collapsed:`, `unprobed:`)
+now escapes its control characters (`two\u{a}lines`); an ordinary id prints exactly as
+declared. `Finding::endpoint` and the other fields keep the id as declared, so
+`Report::against` still matches it.
+
+**Will it turn a green suite red?** No. Only the printed text changes, and only for an id
+holding a control character.
 
 ### 0.7.0 → 0.7.1: `VALIDATE` on core 0.1.100 (ledger #1385)
 
