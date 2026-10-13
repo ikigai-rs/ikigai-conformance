@@ -192,7 +192,12 @@ impl Fixture {
 /// ```
 impl fmt::Display for Fixture {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}", self.id, crate::report::verb_name(self.verb))?;
+        write!(
+            f,
+            "{} {}",
+            crate::report::visible(&self.id),
+            crate::report::verb_name(self.verb)
+        )?;
         for (var, value) in &self.bindings {
             write!(f, " {var}={}", shown(value))?;
         }
@@ -2023,24 +2028,10 @@ fn validate(description: &Description, report: &mut Report) {
                  Meta Turtle and contract IRIs still parse, but not as written: the value is \
                  an authoring mistake, and `bind` does not validate, so this is where the \
                  refusal is seen",
-                visible(&refusal.to_string())
+                crate::report::visible(&refusal.to_string())
             ),
         ));
     }
-}
-
-/// `s` with every control character escaped, so a refused name cannot break the
-/// report line it is printed on. Ordinary Unicode is left as it is.
-fn visible(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_control() {
-                c.escape_unicode().to_string()
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
 }
 
 // ----- PIPELINE (static half) -------------------------------------------------

@@ -40,10 +40,12 @@ impl Finding {
     }
 }
 
-/// One report line: `<endpoint>  <CHECK>  [<verb>:] <detail>`.
+/// One report line: `<endpoint>  <CHECK>  [<verb>:] <detail>`. The id is printed
+/// with its control characters escaped: it is the endpoint's own string, and a
+/// newline in it would otherwise split the line (ledger #1392).
 impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}  {}  ", self.endpoint, self.check.label())?;
+        write!(f, "{}  {}  ", visible(&self.endpoint), self.check.label())?;
         if let Some(verb) = self.verb {
             write!(f, "{}: ", verb_name(verb))?;
         }
@@ -469,7 +471,7 @@ impl fmt::Display for Report {
                 write!(
                     f,
                     "probed: {} {} `{}`: ",
-                    p.endpoint,
+                    visible(&p.endpoint),
                     verb_name(p.verb),
                     p.face
                 )?;
@@ -491,11 +493,11 @@ impl fmt::Display for Report {
                 Some(verb) => writeln!(
                     f,
                     "opted out: {} {}: {}",
-                    out.endpoint,
+                    visible(&out.endpoint),
                     verb_name(verb),
                     out.reason
                 )?,
-                None => writeln!(f, "opted out: {}: {}", out.endpoint, out.reason)?,
+                None => writeln!(f, "opted out: {}: {}", visible(&out.endpoint), out.reason)?,
             }
         }
         for out in &declared.opted_out_at {
@@ -526,21 +528,16 @@ impl fmt::Display for Report {
             }
         }
         for ((check, reason), ids) in groups {
-            writeln!(
-                f,
-                "opted out: {} {}: {reason}",
-                ids.join(" "),
-                check.label()
-            )?;
+            writeln!(f, "opted out: {} {}: {reason}", joined(&ids), check.label())?;
         }
         if !declared.pure.is_empty() {
-            writeln!(f, "declared pure: {}", declared.pure.join(" "))?;
+            writeln!(f, "declared pure: {}", joined(&declared.pure))?;
         }
         if !declared.cacheable.is_empty() {
-            writeln!(f, "declared cacheable: {}", declared.cacheable.join(" "))?;
+            writeln!(f, "declared cacheable: {}", joined(&declared.cacheable))?;
         }
         if !declared.live.is_empty() {
-            writeln!(f, "declared live: {}", declared.live.join(" "))?;
+            writeln!(f, "declared live: {}", joined(&declared.live))?;
         }
         if !declared.namespaces.is_empty() {
             writeln!(f, "module namespaces: {}", declared.namespaces.join(" "))?;
@@ -590,7 +587,7 @@ impl fmt::Display for Report {
             writeln!(
                 f,
                 "collapsed: {} {} <{}>: {} binding(s) issue the identical request ({}) — fired once",
-                c.endpoint,
+                visible(&c.endpoint),
                 verb_name(c.verb),
                 c.target,
                 c.patterns.len(),
@@ -605,7 +602,7 @@ impl fmt::Display for Report {
             writeln!(
                 f,
                 "unprobed: {} {} {}: {}",
-                u.endpoint,
+                visible(&u.endpoint),
                 verb_name(u.verb),
                 u.check.label(),
                 u.reason
@@ -613,6 +610,29 @@ impl fmt::Display for Report {
         }
         Ok(())
     }
+}
+
+/// `s` with every control character escaped, so a name cannot break the report line
+/// it is printed on. Ordinary Unicode is left as it is, so an ordinary id prints
+/// exactly as declared.
+pub(crate) fn visible(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_unicode().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+/// Ids joined by a space, each [`visible`].
+fn joined<S: AsRef<str>>(ids: &[S]) -> String {
+    ids.iter()
+        .map(|id| visible(id.as_ref()))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(crate) fn verb_name(verb: Verb) -> &'static str {
@@ -640,6 +660,93 @@ mod tests {
         assert_eq!(f.to_string(), "cal  PIPELINE  sink: no `content` input");
         let f = Finding::new("cal", None, Check::Names, "not kebab-case");
         assert_eq!(f.to_string(), "cal  NAMES  not kebab-case");
+    }
+
+    #[test]
+    fn every_id_the_report_prints_is_escaped() {
+        // An id is the endpoint's own string; a control character in it must never
+        // split a report line (ledger #1392). One id with a newline, at every place
+        // the report prints an id, and no line may begin with its second half.
+        let id = "two\nlines";
+        let report = Report {
+            findings: vec![Finding::new(id, None, Check::Names, "not kebab-case")],
+            endpoints: 1,
+            actions: 1,
+            walked: vec![id.to_string()].into_boxed_slice(),
+            collapsed: vec![Collapsed {
+                endpoint: id.into(),
+                verb: Verb::Source,
+                target: "urn:example:split".into(),
+                patterns: vec!["urn:example:split".into(), "urn:example:split".into()],
+            }]
+            .into_boxed_slice(),
+            checks: Checks::all(),
+            declared: Box::new(Declarations {
+                opted_out: vec![
+                    OptedOut {
+                        endpoint: id.into(),
+                        verb: Some(Verb::Sink),
+                        reason: "a verb".into(),
+                    },
+                    OptedOut {
+                        endpoint: id.into(),
+                        verb: None,
+                        reason: "the whole endpoint".into(),
+                    },
+                ],
+                opted_out_at: vec![],
+                opted_out_checks: vec![OptedOutCheck {
+                    endpoint: id.into(),
+                    check: Check::Vocabulary,
+                    reason: "one check".into(),
+                }],
+                pure: vec![id.into()],
+                cacheable: vec![id.into()],
+                live: vec![id.into()],
+                namespaces: vec![],
+                fixtures: vec![Fixture::new(id, Verb::Source)],
+                spaces: vec![],
+            }),
+            unprobed: Box::new(vec![Unprobed {
+                endpoint: id.into(),
+                verb: Verb::Delete,
+                check: Check::Outputs,
+                reason: "never fired".into(),
+            }]),
+            probed: vec![Probed {
+                endpoint: id.into(),
+                verb: Verb::Source,
+                face: "text/plain".into(),
+                triples: 0,
+                bytes: 3,
+            }],
+        };
+        let text = report.to_string();
+        assert!(
+            !text.contains(id),
+            "the raw id never reaches the text:\n{text}"
+        );
+        for line in text.lines() {
+            assert!(!line.starts_with("lines"), "a split line:\n{text}");
+        }
+        let shown = "two\\u{a}lines";
+        for expected in [
+            format!("{shown}  NAMES  not kebab-case\n"),
+            format!("probed: {shown} source `text/plain`: 3 byte(s)\n"),
+            format!("opted out: {shown} sink: a verb\n"),
+            format!("opted out: {shown}: the whole endpoint\n"),
+            format!("opted out: {shown} VOCABULARY: one check\n"),
+            format!("declared pure: {shown}\n"),
+            format!("declared cacheable: {shown}\n"),
+            format!("declared live: {shown}\n"),
+            format!("fixture: {shown} source\n"),
+            format!("collapsed: {shown} source <urn:example:split>: 2 binding(s)"),
+            format!("unprobed: {shown} delete OUTPUTS: never fired\n"),
+        ] {
+            assert!(text.contains(&expected), "missing {expected:?}:\n{text}");
+        }
+        // The struct keeps the id as declared: escaping is the printer's job only.
+        assert_eq!(report.against(id).count(), 1);
     }
 
     #[test]
