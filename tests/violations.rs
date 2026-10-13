@@ -1939,6 +1939,35 @@ fn validate_never_prints_a_refused_control_character_raw() {
 }
 
 #[test]
+fn a_control_character_in_an_endpoint_id_never_splits_a_report_line() {
+    // The finding DETAIL was escaped and the ID column was not, so an id holding a
+    // newline printed `two` on one line and `lines  VALIDATE …` on the next (ledger
+    // #1392). One finding is one line, whatever the id holds.
+    let space = EndpointSpace::new().bind(
+        Exact::new("urn:example:split"),
+        described(
+            Description::new("two\nlines")
+                .verb(Verb::Source)
+                .output("text/plain"),
+        ),
+    );
+    let report = validate_report(space);
+    assert_eq!(report.findings.len(), 1, "{report}");
+    // The struct keeps the id as the endpoint declared it, so `against` still finds it.
+    assert_eq!(report.against("two\nlines").count(), 1, "{report}");
+    let text = report.to_string();
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines[0].starts_with("two\\u{a}lines  VALIDATE  "),
+        "the id column is escaped:\n{text}"
+    );
+    assert!(
+        lines[1].starts_with("1 finding(s) across"),
+        "one finding, one line:\n{text}"
+    );
+}
+
+#[test]
 fn validate_catches_a_name_declared_on_an_action_spec() {
     let space = EndpointSpace::new().bind(
         Exact::new("urn:example:notes"),
