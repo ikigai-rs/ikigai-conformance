@@ -176,6 +176,24 @@
 //! - **Reading through the kernel, not `std::fs`** — a lint, not a test.
 //! - **Where a fix belongs** (core or module) and **when in doubt, don't cache**.
 //!
+//! # Before the first run: a walk runs what your endpoints run
+//!
+//! The invoking checks resolve actions for real: under root with derived inputs, and
+//! every action again under a capability holding no grants. Whatever an endpoint
+//! does, the walk does. That includes spawning a process, reaching the network,
+//! calling a model or writing a calendar. A host that binds such a seam walks
+//! [`Checks::STATIC`] first, which resolves nothing and lists every endpoint in
+//! [`Report::walked`]. It then writes fixtures and opt-outs for those seams, or
+//! scopes dependencies out with [`Suite::own`], before selecting an invoking check. A
+//! fixture never reaches a live service: point an LLM endpoint's base URL at a stub
+//! the test bound, never at a default like `http://localhost:11434/v1`. The README's
+//! "Before the first run" section has the measured incidents.
+//!
+//! [`Suite::own`] also scopes the walk for a composing host. Endpoints that match no
+//! declared id or `*`-prefix are inherited ([`Declarations::inherited`]), and they are not
+//! walked. A pattern that matches nothing is a finding no selection or waiver
+//! removes.
+//!
 //! # Fixtures, opt-outs, namespaces
 //!
 //! The invoking checks resolve each action with the smallest inputs its ArgSpecs

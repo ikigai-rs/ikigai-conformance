@@ -197,8 +197,9 @@ impl Check {
     }
 
     /// Whether this check resolves endpoints (and so respects opt-outs), as
-    /// opposed to reading descriptions only.
-    pub fn invokes(self) -> bool {
+    /// opposed to reading descriptions only. [`Checks::STATIC`] is every check for
+    /// which this is `false`.
+    pub const fn invokes(self) -> bool {
         matches!(
             self,
             Check::Enforced
@@ -276,6 +277,39 @@ impl Checks {
     /// Both RDF-face checks: [`Check::SkolemRdf`] and [`Check::Vocabulary`] — the
     /// pair a module without a graph face subtracts.
     pub const RDF: Checks = Checks(Checks::SKOLEM_RDF.0 | Checks::VOCABULARY.0);
+    /// Every check that reads descriptions and declarations only, and resolves
+    /// nothing: the safe FIRST run over a kernel whose endpoints spawn processes,
+    /// reach the network or call a model (ledger #348). A walk under these resolves
+    /// no endpoint, under root or under no grants; the report says so on its
+    /// `probed: nothing` line. Derived from [`Check::invokes`], so a new check lands
+    /// on the right side without anyone remembering to put it there.
+    ///
+    /// ```
+    /// use ikigai_conformance::{Check, Checks};
+    ///
+    /// assert!(Checks::STATIC.contains(Check::ArgSpecs));
+    /// assert!(Checks::STATIC.contains(Check::Declarations));
+    /// assert!(!Checks::STATIC.contains(Check::Enforced));
+    /// assert!(!Checks::STATIC.contains(Check::Pipeline)); // its probe fires a Sink
+    /// assert_eq!(Checks::STATIC | Checks::INVOKING, Checks::all());
+    /// ```
+    pub const STATIC: Checks = Checks::selecting(false);
+    /// Every check that resolves endpoints: the complement of [`STATIC`](Self::STATIC).
+    pub const INVOKING: Checks = Checks::selecting(true);
+
+    /// The checks whose [`Check::invokes`] is `invoking`.
+    const fn selecting(invoking: bool) -> Checks {
+        let mut bits = 0u16;
+        let mut i = 0;
+        while i < Check::ALL.len() {
+            let check = Check::ALL[i];
+            if check.invokes() == invoking {
+                bits |= 1 << (check as u16);
+            }
+            i += 1;
+        }
+        Checks(bits)
+    }
 
     /// Every check.
     pub fn all() -> Checks {

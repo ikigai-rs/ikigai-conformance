@@ -382,6 +382,8 @@ struct Coverage {
     /// Whether any walked mutating action declares a required by-value input, the
     /// only thing [`Suite::required_on_mutating`] reaches.
     required_mutating_candidates: bool,
+    /// Ids [`Suite::own`] scoped out: bound, and deliberately not walked.
+    inherited: BTreeSet<String>,
 }
 
 /// The input names one action declares: by value (what a fixture argument may
@@ -556,6 +558,7 @@ pub struct Suite {
     spaces: Vec<SpaceDecl>,
     kernel_ops: bool,
     required_on_mutating: bool,
+    own: Vec<String>,
 }
 
 impl Default for Suite {
@@ -580,6 +583,7 @@ impl Suite {
             spaces: Vec::new(),
             kernel_ops: false,
             required_on_mutating: false,
+            own: Vec::new(),
         }
     }
 
@@ -904,6 +908,62 @@ impl Suite {
         self
     }
 
+    /// Scope the walk to the module's OWN endpoints: a description id, or an id
+    /// prefix ending in `*` (`"ledger-*"`). Call it once per id or prefix. Once any is
+    /// declared, an endpoint whose id matches none is INHERITED: bound beside the
+    /// module (a dependency the host composes, a fixture endpoint, a mounted peer),
+    /// listed on the report's `inherited:` line and in
+    /// [`Declarations::inherited`](crate::Declarations::inherited),
+    /// and NOT walked: no check reads it and no probe fires it.
+    ///
+    /// Three composing hosts wrote the same 40-60 line partition by hand to get a
+    /// report about the module rather than about everything the host composes
+    /// (ledger #328), and the hand partition bought one thing a prefix alone would
+    /// lose: it went red when a module quietly gained an endpoint, instead of letting
+    /// the endpoint join the inherited pile. Keep that by pinning the inherited list
+    /// exactly, the way [`Report::walked`](crate::Report::walked) is pinned:
+    ///
+    /// ```
+    /// use ikigai_conformance::{Checks, Suite};
+    /// use ikigai_core::{builtins, EndpointSpace, Exact, Kernel};
+    /// use std::sync::Arc;
+    ///
+    /// // The module's endpoint (`echo`) beside a dependency the host composes.
+    /// let space = EndpointSpace::new()
+    ///     .bind(Exact::new("urn:example:echo"), builtins::echo())
+    ///     .bind(Exact::new("urn:example:toUpper"), builtins::to_upper());
+    /// let report = Suite::new()
+    ///     .checks(Checks::NAMES)
+    ///     .own("echo")
+    ///     .run_blocking(&Kernel::new(Arc::new(space)));
+    /// report.assert_clean(); // `toUpper` is not kebab-case, and not this module's
+    /// assert_eq!(&*report.walked, ["echo"]);
+    /// assert_eq!(report.declared.inherited, ["toUpper"]);
+    /// ```
+    ///
+    /// Not walking is also the safer default for a composing host: an inherited
+    /// endpoint that spawns a process or calls a model is not fired at all.
+    ///
+    /// A pattern that matched no endpoint is a [`Check::Declarations`] finding that
+    /// no check selection and no waiver removes: a scope that matches nothing turns
+    /// the suite into a no-op that passes.
+    pub fn own(mut self, id: impl Into<String>) -> Self {
+        self.own.push(id.into());
+        self
+    }
+
+    /// The `own` pattern matching `id`, or `None`. Every id is owned when nothing
+    /// is declared.
+    fn owner(&self, id: &str) -> Option<&str> {
+        self.own
+            .iter()
+            .find(|p| match p.strip_suffix('*') {
+                Some(prefix) => id.starts_with(prefix),
+                None => p.as_str() == id,
+            })
+            .map(String::as_str)
+    }
+
     /// Hold `Sink` and `Delete` actions to [`Check::Required`] too.
     ///
     /// Off by default because every required input dropped is one more FIRING of a
@@ -964,6 +1024,8 @@ impl Suite {
                     })
                     .collect(),
                 required_on_mutating: self.required_on_mutating,
+                own: self.own.clone(),
+                inherited: Vec::new(),
                 pure: self.pure.clone(),
                 cacheable: self.cacheable.clone(),
                 live: self.live.clone(),
@@ -1008,11 +1070,37 @@ impl Suite {
         // issues, with the index of its record so a repeat can name both bindings.
         let mut firings: BTreeMap<Firing, usize> = BTreeMap::new();
         let mut fired: Vec<Fired> = Vec::new();
+        // What `Suite::own` scoped out, in walk order, and which patterns matched.
+        let mut inherited: Vec<String> = Vec::new();
+        let mut own_matched: BTreeSet<&str> = BTreeSet::new();
+        // Every id the kernel listed, owned or not: what an empty match prints.
+        let mut listed: Vec<String> = Vec::new();
         for entry in entries {
             if entry.pattern.starts_with(KERNEL_NS) && !self.kernel_ops {
                 continue;
             }
-            let Some(description) = kernel.describe_pattern(&entry.pattern) else {
+            let description = kernel.describe_pattern(&entry.pattern);
+            let id = description
+                .as_ref()
+                .map_or(entry.endpoint.as_str(), |d| d.id.as_str());
+            if !listed.iter().any(|l| l == id) {
+                listed.push(id.to_string());
+            }
+            if !self.own.is_empty() {
+                match self.owner(id) {
+                    Some(pattern) => {
+                        own_matched.insert(pattern);
+                    }
+                    None => {
+                        if !inherited.iter().any(|i| i == id) {
+                            inherited.push(id.to_string());
+                        }
+                        coverage.inherited.insert(id.to_string());
+                        continue;
+                    }
+                }
+            }
+            let Some(description) = description else {
                 if self.runs(&entry.endpoint, Check::ArgSpecs) {
                     report.findings.push(Finding::new(
                         &entry.endpoint,
@@ -1170,6 +1258,34 @@ impl Suite {
             }
         }
         report.walked = walk_order.into_boxed_slice();
+        report.declared.inherited = inherited;
+        // A scope that matches nothing makes the suite a no-op that passes, so this
+        // finding is not subject to selection or waiver (ledger #328).
+        for pattern in &self.own {
+            if own_matched.contains(pattern.as_str()) {
+                continue;
+            }
+            report.findings.push(Finding::new(
+                SUITE,
+                None,
+                Check::Declarations,
+                format!(
+                    "`Suite::own(\"{pattern}\")` matched no endpoint the kernel binds, so it \
+                     scoped the walk to nothing (an id is the `Description::id`, and a prefix \
+                     ends in `*`). The kernel binds: {}. This finding cannot be waived: a \
+                     scope that matches nothing turns the suite into a no-op that passes",
+                    if listed.is_empty() {
+                        "nothing".to_string()
+                    } else {
+                        listed
+                            .iter()
+                            .map(|l| format!("`{}`", crate::report::visible(l)))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                ),
+            ));
+        }
         report.collapsed = fired
             .into_iter()
             .filter(|f| f.patterns.len() > 1)
@@ -1445,11 +1561,7 @@ impl Suite {
             return None;
         }
         if !coverage.walked.contains(id) {
-            return Some(
-                "the walk reached no endpoint with that id (the id is the `Description::id`, \
-                 not the bound IRI)"
-                    .to_string(),
-            );
+            return Some(unwalked(id, coverage));
         }
         if !self.checks.contains(check) {
             return Some(format!(
@@ -1564,9 +1676,9 @@ impl Suite {
                     report,
                     id,
                     format!(
-                    "fixture `{fixture}` was never used: the walk reached no endpoint with that \
-                     id (the first field is the `Description::id`, not the bound IRI)"
-                ),
+                        "fixture `{fixture}` was never used: {}",
+                        unwalked(id, coverage)
+                    ),
                 );
                 continue;
             }
@@ -1708,7 +1820,7 @@ impl Suite {
                 continue;
             }
             let why = if !coverage.walked.contains(id) {
-                "the walk reached no endpoint with that id".to_string()
+                unwalked(id, coverage)
             } else {
                 match out.verb {
                     Some(verb) => format!(
@@ -1946,6 +2058,18 @@ fn binding_input<'a>(description: &'a Description, var: &str) -> Option<&'a ArgS
         .iter()
         .chain(description.actions.iter().flat_map(|a| a.inputs.iter()))
         .find(|i| i.name == var && i.source == InputSource::Binding)
+}
+
+/// Why the walk never reached `id`: scoped out by [`Suite::own`], or bound nowhere.
+fn unwalked(id: &str, coverage: &Coverage) -> String {
+    if coverage.inherited.contains(id) {
+        "it is inherited (no `Suite::own` matches it), and an inherited endpoint is not walked"
+            .to_string()
+    } else {
+        "the walk reached no endpoint with that id (the id is the `Description::id`, not the \
+         bound IRI)"
+            .to_string()
+    }
 }
 
 /// The inputs [`Check::Required`] drops one at a time: declared required, by value,
