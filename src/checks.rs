@@ -148,7 +148,7 @@ pub enum Check {
     /// The hole it closes: `Suite::live("notes-write")` on a `Sink` did nothing at
     /// all (`CACHEABLE` returns early on a non-cacheable verb), and the report said
     /// `declared live: notes-write` anyway. Same shape for a fixture whose id is a
-    /// typo, a waiver for an endpoint nothing binds, and a namespace no probed face
+    /// typo, a fixture argument naming no declared input, a waiver for an endpoint nothing binds, and a namespace no probed face
     /// used.
     ///
     /// This check reads declarations against what the walk covered; it invokes

@@ -26,6 +26,10 @@ const KERNEL_NS: &str = "urn:kernel:";
 /// The XSD namespace, for deriving a plausible scalar from a declared `class`.
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 
+/// The universal conneg selector: an argument every endpoint may be sent and none
+/// declares, so a fixture naming it is never an undeclared input.
+const CONNEG: &str = "as";
+
 /// The value substituted for an untyped input or template variable.
 const PLACEHOLDER: &str = "x";
 
@@ -81,6 +85,13 @@ impl Fixture {
     }
 
     /// Supply (or override) one by-value argument.
+    ///
+    /// `name` must be an input the action declares by value, or `as` (the conneg
+    /// selector, which no endpoint declares). Any other name is still sent, and
+    /// [`Check::Declarations`](crate::Check::Declarations) reports it: either the
+    /// endpoint reads an input its contract does not declare, or it ignored the
+    /// value and the walk tested something other than what the fixture says. A
+    /// template variable is a [`binding`](Fixture::binding), never an argument.
     pub fn arg(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.args.insert(name.into(), value.into());
         self
@@ -362,6 +373,17 @@ struct Coverage {
     /// The actions some probe resolved as their caller (root or a fixture's
     /// capability): a fixture capability for an action not in here reached nothing.
     caller_used: Vec<(String, Verb)>,
+    /// The input names each walked action declares, by-value and binding apart,
+    /// keyed by `(id, verb name)`: what a fixture's argument names are read against.
+    inputs: BTreeMap<(String, &'static str), DeclaredInputs>,
+}
+
+/// The input names one action declares: by value (what a fixture argument may
+/// name) and by binding (a template variable, which an argument cannot fill).
+#[derive(Debug, Default)]
+struct DeclaredInputs {
+    by_value: BTreeSet<String>,
+    binding: BTreeSet<String>,
 }
 
 impl Coverage {
@@ -415,6 +437,21 @@ impl Coverage {
             .filter(|(i, _)| i == id)
             .map(|(_, v)| *v)
             .collect()
+    }
+
+    /// Record the input names one action declares.
+    fn record_inputs(&mut self, id: &str, spec: &ActionSpec) {
+        let declared = self
+            .inputs
+            .entry((id.to_string(), crate::report::verb_name(spec.verb)))
+            .or_default();
+        for input in &spec.inputs {
+            let names = match input.source {
+                InputSource::Binding => &mut declared.binding,
+                _ => &mut declared.by_value,
+            };
+            names.insert(input.name.clone());
+        }
     }
 
     /// Whether every action of `id` was excluded by [`Suite::opt_out`].
@@ -986,6 +1023,7 @@ impl Suite {
             }
             for spec in description.action_specs() {
                 coverage.record_action(&description.id, spec.verb, false);
+                coverage.record_inputs(&description.id, &spec);
                 if spec.outputs.iter().any(|o| rdf::is_rdf_face(o)) {
                     coverage.rdf_faces.insert(description.id.clone());
                 }
@@ -1503,6 +1541,9 @@ impl Suite {
                 (false, false) => ("arguments and a caller", "they were"),
             };
             let verb = fixture.verb;
+            if coverage.declares(id, verb) && !coverage.is_opted_out(id, Some(verb)) {
+                self.fixture_argument_names(fixture, coverage, report);
+            }
             if !coverage.declares(id, verb) {
                 self.inert(
                     report,
@@ -1547,6 +1588,54 @@ impl Suite {
                     ),
                 );
             }
+        }
+    }
+
+    /// Every argument a fixture sends must name an input its action declares by
+    /// value (ledger #340). The walk puts every one on the wire, so an undeclared
+    /// name is one of two bad things and the suite cannot tell which: the endpoint
+    /// reads an input its contract does not declare (the lie this suite exists to
+    /// catch), or it ignored the value and the walk tested something other than
+    /// what the fixture says. `as`, the universal conneg selector, is the one
+    /// undeclared name any endpoint may be sent.
+    fn fixture_argument_names(&self, fixture: &Fixture, coverage: &Coverage, report: &mut Report) {
+        let id = &fixture.id;
+        let verb = crate::report::verb_name(fixture.verb);
+        let empty = DeclaredInputs::default();
+        let declared = coverage.inputs.get(&(id.clone(), verb)).unwrap_or(&empty);
+        for name in fixture.args.keys() {
+            if name == CONNEG || declared.by_value.contains(name) {
+                continue;
+            }
+            let detail = if declared.binding.contains(name) {
+                format!(
+                    "fixture `{fixture}` sends `{name}` as an argument, but `{name}` is a binding \
+                     input (a template variable): an argument never reaches the IRI, which was \
+                     formed without it. Bind it with `Fixture::binding` (`.binding(\"{name}\", …)`)"
+                )
+            } else {
+                format!(
+                    "fixture `{fixture}` sends `{name}`, which no input of its {verb} action \
+                     declares ({}): the walk sent it anyway, so either the endpoint reads an input \
+                     its contract does not declare, or it ignored the value and the walk tested \
+                     something other than what the fixture says. `{CONNEG}`, the conneg selector, \
+                     is the one undeclared name a fixture may send",
+                    if declared.by_value.is_empty() {
+                        "it declares no by-value input".to_string()
+                    } else {
+                        format!(
+                            "it declares {}",
+                            declared
+                                .by_value
+                                .iter()
+                                .map(|n| format!("`{n}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    }
+                )
+            };
+            self.inert(report, id, detail);
         }
     }
 

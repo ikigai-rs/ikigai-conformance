@@ -91,6 +91,7 @@
 //!   `CACHEABLE` returns early on a non-cacheable verb, so the declaration did
 //!   nothing at all while the report said `declared live: notes-write`. The check
 //!   covers every declaration, not that one: a fixture whose id is a typo, a
+//!   fixture argument naming no input its action declares, a
 //!   binding naming no template variable, a waiver for a check that could not have
 //!   run, an `opt_out` that excluded nothing, a namespace that accounted for no
 //!   term, a [`pure`](Suite::pure) over a result that is never cacheable.

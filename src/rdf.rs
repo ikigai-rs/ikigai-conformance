@@ -45,15 +45,22 @@ pub const RDF_FACES: &[&str] = &[
 ];
 
 /// The namespaces a graph face may use freely beside `ikigai-vocab`'s own — the
-/// shared vocabularies the module recipe names, plus the RDF/OWL/XSD core. Anything
-/// else is "an invented term with no definition" unless the module registers the
-/// namespace as its own ([`Suite::namespace`](crate::Suite::namespace)).
+/// shared vocabularies the module recipe names, plus the RDF/OWL/XSD core, plus two
+/// published standards modules speak as their data's own vocabulary: the W3C Web
+/// Annotation Data Model (`oa:`, the annotation overlay's) and Dublin Core Elements
+/// 1.1 (`dc:`, a Zotero export's; distinct from `dcterms:`). Anything else is "an
+/// invented term with no definition" unless the module registers the namespace as
+/// its own ([`Suite::namespace`](crate::Suite::namespace)), which means a vocabulary
+/// the module SERVES, not a standard it speaks.
 ///
 /// ```
 /// use ikigai_conformance::rdf::{is_well_known, WELL_KNOWN_NAMESPACES};
 ///
 /// assert!(WELL_KNOWN_NAMESPACES.contains(&"http://www.w3.org/ns/prov#"));
 /// assert!(is_well_known("http://purl.org/dc/terms/created"));
+/// assert!(is_well_known("http://purl.org/dc/elements/1.1/subject"));
+/// assert!(is_well_known("http://www.w3.org/ns/oa#Annotation"));
+/// assert!(is_well_known("http://www.w3.org/ns/oa#motivatedBy"));
 /// assert!(is_well_known("https://schema.org/Person"));
 /// assert!(is_well_known("http://schema.org/Person"));
 /// assert!(!is_well_known("urn:example:ns#invented"));
@@ -64,6 +71,7 @@ pub const WELL_KNOWN_NAMESPACES: &[&str] = &[
     "http://www.w3.org/2001/XMLSchema#",
     "http://www.w3.org/2002/07/owl#",
     "http://purl.org/dc/terms/",
+    "http://purl.org/dc/elements/1.1/",
     "http://xmlns.com/foaf/0.1/",
     "https://schema.org/",
     "http://schema.org/",
@@ -71,6 +79,7 @@ pub const WELL_KNOWN_NAMESPACES: &[&str] = &[
     "http://www.w3.org/2002/12/cal/ical#",
     "http://www.w3.org/2004/02/skos/core#",
     "http://www.w3.org/ns/shacl#",
+    "http://www.w3.org/ns/oa#",
 ];
 
 /// Whether `iri` lies under one of [`WELL_KNOWN_NAMESPACES`].

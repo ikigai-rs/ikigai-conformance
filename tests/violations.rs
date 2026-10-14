@@ -548,6 +548,40 @@ fn vocabulary_catches_invented_terms_and_honors_registered_namespaces() {
         .contains("module namespaces: urn:example:ns#"));
 }
 
+/// Ledger #343: the W3C Web Annotation vocabulary (`oa:`, what ikigai-browse's
+/// annotation overlay speaks) and Dublin Core Elements 1.1 (`dc:`, what a Zotero
+/// export speaks) are published standards, not invented terms. One seeded annotation
+/// used to produce a VOCABULARY finding per term.
+#[test]
+fn vocabulary_knows_web_annotation_and_dublin_core_elements() {
+    let annotations = FnEndpoint::new("annotations", |_inv: &Invocation<'_>| {
+        Ok(turtle(
+            "@prefix oa: <http://www.w3.org/ns/oa#> .\n\
+             @prefix dc: <http://purl.org/dc/elements/1.1/> .\n\
+             <urn:example:anno:1> a oa:Annotation ; oa:motivatedBy oa:commenting ;\n\
+               oa:bodyValue \"a note\" ; oa:hasTarget <urn:example:anno:1:target> .\n\
+             <urn:example:anno:1:target> oa:hasSelector <urn:example:anno:1:sel> .\n\
+             <urn:example:anno:1:sel> a oa:TextQuoteSelector ; oa:exact \"x\" .\n\
+             <urn:example:doc> dc:subject \"rdf\" ; dc:creator \"someone\" .",
+        )
+        .cacheable()
+        .depends_on("urn:example:store"))
+    })
+    .with_description(
+        Description::new("annotations")
+            .verb(Verb::Source)
+            .output(TURTLE),
+    );
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:annotations"), annotations);
+    let report = report_of(space);
+    assert_eq!(
+        only(&report, Check::Vocabulary),
+        Vec::<String>::new(),
+        "{report}"
+    );
+    assert!(report.is_clean(), "{report}");
+}
+
 // ----- CACHEABLE --------------------------------------------------------------
 
 /// Marks its result cacheable but reads an uncacheable dependency, so the kernel
@@ -1360,6 +1394,60 @@ fn a_fixture_for_an_action_the_endpoint_does_not_declare_is_reported() {
         Check::Declarations,
         "an action excluded by `Suite::opt_out`",
     );
+}
+
+/// Ledger #340: a fixture argument naming no declared input was still SENT, and
+/// nothing said so. `upper` declares `in`; the fixture's `inn` is a typo, the walk
+/// derived `in` itself, and the endpoint ignored the typo, so the walk tested
+/// something other than what the fixture says, under a clean report.
+#[test]
+fn a_fixture_argument_naming_no_declared_input_is_reported() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
+    let report = Suite::new()
+        .pure("upper")
+        .fixture(Fixture::new("upper", Verb::Source).arg("inn", "hello"))
+        .run_blocking(&kernel(space));
+    assert_caught(&report, Check::Declarations, "sends `inn`");
+    let inert = only(&report, Check::Declarations);
+    assert_eq!(inert.len(), 1, "{report}");
+    assert!(
+        inert[0].contains("(it declares `in`)"),
+        "the finding names the inputs there ARE:\n{report}"
+    );
+
+    // The declared name is not a finding, and neither is `as`, the universal conneg
+    // selector, which no endpoint declares and every endpoint may be sent.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
+    let report = Suite::new()
+        .pure("upper")
+        .fixture(
+            Fixture::new("upper", Verb::Source)
+                .arg("in", "hello")
+                .arg("as", "text/plain"),
+        )
+        .run_blocking(&kernel(space));
+    assert!(report.is_clean(), "{report}");
+
+    // A template variable passed as an ARGUMENT is sent by value and never reaches
+    // the IRI: the finding says to bind it instead.
+    let by_n = FnEndpoint::new("pr", |inv: &Invocation<'_>| {
+        let n = inv.bindings.get("n").unwrap_or_default();
+        Ok(text(format!("pr {n}"))
+            .cacheable()
+            .depends_on("urn:repo:pr"))
+    })
+    .with_description(
+        Description::new("pr")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("n").class(XSD_INTEGER).binding())
+            .output("text/plain"),
+    );
+    let space = EndpointSpace::new().bind(UriTemplate::parse("urn:repo:pr:{n}").unwrap(), by_n);
+    let report = Suite::new()
+        .fixture(Fixture::new("pr", Verb::Source).arg("n", "42"))
+        .run_blocking(&kernel(space));
+    assert_caught(&report, Check::Declarations, "`n` is a binding input");
+    assert_caught(&report, Check::Declarations, ".binding(\"n\", …)");
 }
 
 #[test]
