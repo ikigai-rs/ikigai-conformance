@@ -77,7 +77,16 @@
 //!   `… N byte(s)` for one no check parses. A walk that resolved nothing at all
 //!   says so on one line, rather than printing no section — a module with no graph
 //!   face used to be indistinguishable from a walk that reached nothing.
+//! - **`required:`** — every input [`Required`](Check::Required) dropped and the
+//!   refusal kind it got (``required: greet source without `name`: refused
+//!   missing-argument``), or ONE line saying it dropped nothing and why (no required
+//!   by-value input on `Source`/`Exists`, mutating verbs off, every candidate opted
+//!   out or unprobed). A clean `REQUIRED` used to read the same over twelve drops
+//!   and over none ([`Report::required_probes`], [`Report::required_nothing`]).
 //! - **`unprobed:`** — the actions a check could not observe, with the reason.
+//! - **`note:`** — a [`Suite::opt_out_check`] that suppressed nothing: the waived
+//!   check ran with its findings set aside and found none ([`Report::idle_waivers`]).
+//!   Information, never a finding.
 //! - **[`Report::walked`]** — the description ids the walk reached, by name and in
 //!   walk order. An endpoint that stops being bound otherwise makes a report
 //!   *cleaner*; this is the list a test can pin.
@@ -99,9 +108,10 @@
 //!
 //!   The rule is structural — *could this declaration have applied?* — never "did
 //!   it silence a finding today": a standing waiver that happens to be green is
-//!   doing its job. What it cannot see is a waiver whose CONDITION has passed (the
-//!   core change it waits for landed); a waiver's reason is prose, and prose is
-//!   what the field guide keeps.
+//!   doing its job. A waiver whose CONDITION has passed (the core change it waits
+//!   for landed) is the `note:` line instead (0.8.1): the waived check runs with
+//!   its findings set aside, and a waiver that set nothing aside is named, beside
+//!   its reason, without turning the suite red.
 //!
 //! # The vocabulary pin
 //!
@@ -198,7 +208,8 @@
 //!
 //! The invoking checks resolve each action with the smallest inputs its ArgSpecs
 //! admit ([`Suite::fixture`] when the spec cannot say — a path that must exist, a
-//! document that must parse). They run **against the kernel you pass**, so build it
+//! document that must parse, a gzip stream, which is bytes:
+//! [`Fixture::arg_bytes`]). They run **against the kernel you pass**, so build it
 //! as a test fixture; an action with real side effects opts out by id with a
 //! reason ([`Suite::opt_out`]), and the opt-out list, the fixtures, and every other
 //! declaration are part of the report. A module that serves its own vocabulary
@@ -236,6 +247,10 @@
 //! selected) and is listed as unprobed. Under [`Suite::required_on_mutating`] a
 //! `Sink` or `Delete` is also fired once per required by-value input, and once more
 //! as the baseline when the pipeline probe did not fire it. Fixture bindings are per entry, not per verb (see [`Fixture::binding`]).
+//! A check WAIVED for an endpoint ([`Suite::opt_out_check`]) is still run on its
+//! reads, after the walk proper, with the findings set aside: the same `Source` and
+//! `Exists` resolutions the check fires unwaived, and never a `Sink` or `Delete` the
+//! walk would not otherwise fire.
 //!
 //! **That footprint is per FIRING, and a firing is a request** — the verb, the target
 //! IRI and the arguments. The invoking checks are memoized on it, so an endpoint
@@ -263,8 +278,8 @@ mod suite;
 
 pub use checks::{Check, Checks};
 pub use report::{
-    Collapsed, Declarations, DeclaredSpace, Finding, OptedOut, OptedOutAt, OptedOutCheck, Probed,
-    Report, SpaceNaming, Unprobed,
+    Collapsed, Declarations, DeclaredSpace, Evidence, Finding, OptedOut, OptedOutAt, OptedOutCheck,
+    Probed, Report, RequiredProbe, SpaceNaming, Unprobed,
 };
 pub use suite::{Fixture, Suite};
 
