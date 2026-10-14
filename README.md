@@ -221,6 +221,56 @@ than reading as a name that was checked:
 while `SPACE-NAME` is not selected is a `DECLARATIONS` finding, and
 `opt_out_check("<label>", Check::SpaceName, "why")` waives one declared space.
 
+## Before the first run: a walk runs what your endpoints run
+
+The invoking checks resolve your actions **for real**. A `Source` or `Exists` is
+resolved under root with the smallest inputs its ArgSpecs admit (`x`,
+`urn:example:conformance`, `1`). Every action is resolved again under a capability
+holding no grants (`ENFORCED` and `AUTHORITY`). A `Sink` or `Delete` declaring
+`content` is fired under root by the pipeline probe. `REQUIRED` resolves once more
+per required input. The contract is stated in verbs, but the hazard is in the
+endpoints: **whatever your actions do, the walk does.** On a composing host that
+means a subprocess seam runs a command, an outbound HTTP verb reaches the network, an
+inference endpoint calls a model, and a calendar `Sink` writes a real calendar. It
+has happened. A bare first run over one server really ran `git` through
+`urn:system:exec` (the finding was the command's own non-zero exit), shelled out to
+`gh` through ten PR facades, and POSTed to a live inference server through
+`urn:llm:ollama:ask`. "An action declaring nothing is not refused" also means that
+action is **resolved, under no grants, for real**.
+
+So a host that binds a process, network or model seam (a module that binds one
+too) takes two steps:
+
+1. **A static walk first.** `Checks::STATIC` is every check that reads descriptions
+   and declarations only, and it resolves nothing, under root or under no grants.
+   The report says `probed: nothing`, and `Report::walked` lists every endpoint the
+   kernel binds, so the fix list is in hand before anything can fire. On the
+   largest composing host so far, this pass gave 223 of 338 findings. On
+   ikigai-browse it gave 40 of 40.
+
+   ```rust
+   use ikigai_conformance::{Checks, Suite};
+
+   let report = Suite::new().checks(Checks::STATIC).run_blocking(&my_kernel());
+   println!("{report}"); // every id is in report.walked; nothing ran
+   ```
+
+2. **Fixtures and opt-outs before any invoking check.** Write them from that list,
+   not from the first invoking report. Every endpoint that spawns a process, reaches
+   the network or calls a model gets one of three things. A `Fixture` can point it
+   at something the test owns. An `opt_out` or `opt_out_at` can exclude it, with the
+   reason. Or `Suite::own` can scope it out of the walk entirely, if it belongs to a
+   dependency (see below). **A fixture must never reach a live service.** Build
+   an LLM endpoint with its `base_url` at a stub the test bound itself (port 0, the
+   port read back from the listener), never at `OpenAiConfig::ollama`'s default
+   `http://localhost:11434/v1`, which is somebody's real inference server. Treat an
+   HTTP origin, an SMTP relay or a keychain the same way. Then select the invoking
+   checks.
+
+`Checks::STATIC` includes `DECLARATIONS`. So once a suite carries declarations for
+the invoking checks (`live`, `pure`, a fixture's caller), a static rerun reports them
+as reaching nothing. Use `Checks::STATIC - Checks::DECLARATIONS` for that rerun.
+
 ## Fixtures, opt-outs, declarations
 
 The invoking checks resolve each action with the smallest inputs its ArgSpecs
@@ -349,6 +399,44 @@ you:
 resolves the same IRI, so the verb on a binding-only fixture is ignored (the first
 fixture for the id that binds the variable wins); arguments are per `(id, verb)`.
 
+### A composing host scopes the walk to its own endpoints (`Suite::own`)
+
+`Suite::run` walks every entry the kernel lists. So anything bound beside the module
+is held to every check exactly as the module is: a dependency the host composes, a
+fixture endpoint, a mounted peer. `opt_out` drops the invoking checks and keeps the
+static ones. Three composing hosts wrote the same 40-60 line partition by hand to
+get a report about the module rather than about everything it composes (ledger #328).
+
+`Suite::own(id)` names what the module owns: a description id, or an id prefix ending
+in `*`. Call it once per id or prefix. Once one is declared, every endpoint whose id
+matches none is **inherited**. It is listed on an `inherited:` line and in
+`report.declared.inherited`, and it is **not walked**: no check reads it and no probe fires
+it. A dependency's subprocess seam is not run on the module's behalf.
+
+```rust
+let report = Suite::new()
+    .own("ledger-*")                 // the module's endpoints
+    .own("ledger")
+    .run_blocking(&host_kernel());
+report.assert_clean();
+// Pin the rest EXACTLY: a module crate that gains an endpoint outside its scope
+// turns this red instead of silently joining the pile.
+assert_eq!(report.declared.inherited, ["file", "sparql-select", "store-graph-update"]);
+```
+
+```text
+own: ledger-* ledger (7 endpoint(s) walked)
+inherited: file sparql-select store-graph-update — bound beside the module, not its own (`Suite::own`), not walked
+```
+
+That last assertion keeps what the hand partitions bought. They asserted the union
+covered the catalog, so a new endpoint turned a test red rather than joining the
+inherited pile unseen. **A pattern that matches no endpoint is a `DECLARATIONS`
+finding that no selection or waiver removes**, and it lists the ids the kernel does
+bind. A scope that matches nothing turns the suite into a no-op that passes, which is
+this crate's founding defect. A host that wants its dependencies' record too runs a
+second suite without `own`.
+
 ### An endpoint about its caller names one (`Fixture::capability`)
 
 The walk resolves as **root** by default, and root holds every principal and names
@@ -471,6 +559,7 @@ ran. The check covers every declaration, not that one:
 | a `Fixture::capability` for an action that does not exist, was opted out, or that no probe resolved as | `… supplies a caller for …` / `names a caller no probe resolved as: …` |
 | a `Fixture::binding` naming no template variable of any pattern that id is bound at | `binds \`number\`, which is not a template variable …` |
 | an `opt_out` that excluded nothing | `opted out … but excluded nothing: …` |
+| an `own` pattern that matched no endpoint (endpoint `(suite)`; **not** removed by any selection or waiver) | `` `Suite::own("uper")` matched no endpoint the kernel binds …`` |
 | `required_on_mutating` when `REQUIRED` is unselected or no `Sink`/`Delete` declares a required by-value input (endpoint `(suite)`) | `` `Suite::required_on_mutating` reached nothing: …`` |
 | an `opt_out_check` for a check that could not have run for that id anyway | `waived SKOLEM-RDF … but that check could not have run for it anyway: it declares no RDF face` |
 | a `namespace` that accounted for no term in any probed face (endpoint `(suite)`) | `registered namespace … accounted for no term: …` |
@@ -598,6 +687,15 @@ finding already), on an optional alternative intake left unsent, and on a call t
 did not resolve (an `unprobed:` line instead). A counting `Sink` proves the opt-in:
 fired once by default, three times under `required_on_mutating` (the pipeline
 probe, then one drop per required input), with the defaulted `title` caught.
+
+The walk's hazard is proved by COUNTING what ran. An `exec`-shaped `Source` and a
+`notify`-shaped `Sink` that declare nothing run twice and once under a default walk
+(root, then no grants; the `Sink` under no grants). Under `Checks::STATIC` they run
+zero times, and every description is still read. `Suite::own` is proved the same
+way: the inherited `exec` runs zero times, `walked` and `inherited` are pinned
+exactly, a prefix scopes, a pattern matching nothing is a finding even with
+`DECLARATIONS` unselected and waived, and a fixture for an inherited id says it is
+inherited.
 
 `VALIDATE` is falsified with an id holding a space, one holding `>`, an input
 name holding U+0085 (shown escaped in the report, never raw) and an input name on

@@ -293,6 +293,21 @@ pub struct Declarations {
     /// Whether the module held `Sink` and `Delete` actions to [`Check::Required`]
     /// too ([`Suite::required_on_mutating`](crate::Suite::required_on_mutating)).
     pub required_on_mutating: bool,
+    /// The ids and `*`-ended id prefixes the module declared its own
+    /// ([`Suite::own`](crate::Suite::own)); empty when the walk is not scoped.
+    pub own: Vec<String>,
+    /// What that scope left out, filled in by the walk (as [`spaces`](Self::spaces)
+    /// carries what SPACE-NAME compared): the description ids no `own` pattern
+    /// matched, in walk order. They are bound beside the module and deliberately NOT
+    /// walked, so no check read them and no probe fired them. Empty when no `own` is
+    /// declared. Pin it exactly in a composing host's test, so a module that gains an
+    /// endpoint outside its own scope turns the test red instead of joining this list
+    /// silently.
+    ///
+    /// It lives here rather than on [`Report`] because `Report` is the `Err` of
+    /// [`check`](crate::check) and travels by value: one more field takes it to
+    /// clippy's 128-byte large-error bar, and `declared` is already boxed.
+    pub inherited: Vec<String>,
     /// The endpoints the module declared pure (exempt from the golden-thread half
     /// of [`Check::Cacheable`]).
     pub pure: Vec<String>,
@@ -533,6 +548,23 @@ impl fmt::Display for Report {
         for ((check, reason), ids) in groups {
             writeln!(f, "opted out: {} {}: {reason}", joined(&ids), check.label())?;
         }
+        if !declared.own.is_empty() {
+            writeln!(
+                f,
+                "own: {} ({} endpoint(s) walked)",
+                joined(&declared.own),
+                self.endpoints
+            )?;
+            if declared.inherited.is_empty() {
+                writeln!(f, "inherited: none")?;
+            } else {
+                writeln!(
+                    f,
+                    "inherited: {} — bound beside the module, not its own (`Suite::own`), not walked",
+                    joined(&declared.inherited)
+                )?;
+            }
+        }
         if declared.required_on_mutating {
             writeln!(
                 f,
@@ -710,6 +742,8 @@ mod tests {
                     reason: "one check".into(),
                 }],
                 required_on_mutating: false,
+                own: vec![id.into()],
+                inherited: vec![id.into()],
                 pure: vec![id.into()],
                 cacheable: vec![id.into()],
                 live: vec![id.into()],
@@ -752,6 +786,8 @@ mod tests {
             format!("fixture: {shown} source\n"),
             format!("collapsed: {shown} source <urn:example:split>: 2 binding(s)"),
             format!("unprobed: {shown} delete OUTPUTS: never fired\n"),
+            format!("own: {shown} (1 endpoint(s) walked)\n"),
+            format!("inherited: {shown} — bound beside the module"),
         ] {
             assert!(text.contains(&expected), "missing {expected:?}:\n{text}");
         }
@@ -785,6 +821,8 @@ mod tests {
                     reason: "four ik: terms land in the next vocabulary release".into(),
                 }],
                 required_on_mutating: false,
+                own: vec![],
+                inherited: vec![],
                 pure: vec!["to-upper".into()],
                 cacheable: vec!["to-upper".into()],
                 live: vec!["clock-now".into()],

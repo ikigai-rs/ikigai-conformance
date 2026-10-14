@@ -3153,3 +3153,191 @@ fn a_required_declaration_that_reached_nothing_is_reported() {
         "no action of it REQUIRED probes declares a required by-value input",
     );
 }
+
+// ----- WHAT A WALK FIRES (ledger #348) ------------------------------------------
+
+/// A `Source` that, in a real host, runs a subprocess: it counts a run once its
+/// input is read, the way `urn:system:exec` spawns once it has a command.
+fn exec_like(runs: Arc<AtomicUsize>) -> FnEndpoint {
+    FnEndpoint::new("exec", move |inv: &Invocation<'_>| {
+        let cmd = inv.inline_str("cmd")?;
+        runs.fetch_add(1, Ordering::SeqCst);
+        Ok(text(format!("ran {cmd}")))
+    })
+    .with_description(
+        Description::new("exec")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("cmd").class(XSD_STRING))
+            .output("text/plain"),
+    )
+}
+
+/// A `Sink` declaring no capability and no input, that in a real host sends a
+/// message: ENFORCED's ungated branch resolves it under no grants, for real.
+fn notify_like(runs: Arc<AtomicUsize>) -> FnEndpoint {
+    FnEndpoint::new("notify", move |_inv: &Invocation<'_>| {
+        runs.fetch_add(1, Ordering::SeqCst);
+        Ok(text("sent"))
+    })
+    .with_description(
+        Description::new("notify")
+            .verb(Verb::Sink)
+            .output("text/plain"),
+    )
+}
+
+#[test]
+fn a_default_walk_runs_what_the_endpoints_run() {
+    let (exec, notify) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let space = EndpointSpace::new()
+        .bind(Exact::new("urn:example:exec"), exec_like(exec.clone()))
+        .bind(
+            Exact::new("urn:example:notify"),
+            notify_like(notify.clone()),
+        );
+    let report = report_of(space);
+    // The hazard, counted. The subprocess ran TWICE: once under root with the
+    // suite's `x` (the minimal resolution), once more under a capability holding no
+    // grants (ENFORCED's probe; it declares nothing, so nothing refused it). The
+    // message went out once, under no grants, and AUTHORITY says so after the fact.
+    assert_eq!(exec.load(Ordering::SeqCst), 2, "{report}");
+    assert_eq!(notify.load(Ordering::SeqCst), 1, "{report}");
+    assert_caught(
+        &report,
+        Check::Authority,
+        "mutated under a capability holding no grants",
+    );
+}
+
+#[test]
+fn a_static_walk_reads_every_description_and_runs_nothing() {
+    let (exec, notify) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let space = EndpointSpace::new()
+        .bind(Exact::new("urn:example:exec"), exec_like(exec.clone()))
+        .bind(
+            Exact::new("urn:example:notify"),
+            notify_like(notify.clone()),
+        )
+        .bind(
+            Exact::new("urn:example:toUpper"),
+            ikigai_core::builtins::to_upper(),
+        );
+    let report = Suite::new()
+        .checks(Checks::STATIC)
+        .run_blocking(&kernel(space));
+    assert_eq!(exec.load(Ordering::SeqCst), 0, "{report}");
+    assert_eq!(notify.load(Ordering::SeqCst), 0, "{report}");
+    // Every description was still read: the fix list is in hand before anything ran.
+    assert_eq!(&*report.walked, ["exec", "notify", "toUpper"]);
+    assert_caught(&report, Check::Names, "id `toUpper`");
+    assert_caught(&report, Check::ArgSpecs, "input `in` has no class");
+    let text = report.to_string();
+    assert!(
+        text.contains("probed: nothing — no action was resolved"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "skipped: ENFORCED AUTHORITY OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED"
+        ),
+        "{text}"
+    );
+}
+
+// ----- Suite::own (ledger #328) -------------------------------------------------
+
+#[test]
+fn without_own_the_only_lever_on_a_dependency_keeps_its_static_findings() {
+    // What three composing hosts worked around by hand: `opt_out` drops the
+    // invoking checks and keeps the static ones, so a dependency's findings stay in
+    // the module's report.
+    let space = EndpointSpace::new()
+        .bind(Exact::new("urn:example:upper"), conforming())
+        .bind(
+            Exact::new("urn:example:toUpper"),
+            ikigai_core::builtins::to_upper(),
+        );
+    let report = Suite::new()
+        .pure("upper")
+        .opt_out("toUpper", None, "a dependency's endpoint, not ours")
+        .run_blocking(&kernel(space));
+    assert!(report.against("toUpper").count() >= 2, "{report}");
+    assert!(report.against("upper").next().is_none(), "{report}");
+}
+
+#[test]
+fn own_scopes_the_walk_and_reports_the_rest_as_inherited() {
+    let exec = Arc::new(AtomicUsize::new(0));
+    let space = EndpointSpace::new()
+        .bind(Exact::new("urn:example:upper"), conforming())
+        .bind(
+            Exact::new("urn:example:toUpper"),
+            ikigai_core::builtins::to_upper(),
+        )
+        .bind(Exact::new("urn:example:exec"), exec_like(exec.clone()));
+    let report = Suite::new()
+        .own("upper")
+        .pure("upper")
+        .run_blocking(&kernel(space));
+    report.assert_clean();
+    assert_eq!(&*report.walked, ["upper"]);
+    assert_eq!(report.declared.inherited, ["toUpper", "exec"]);
+    assert_eq!(report.endpoints, 1);
+    // Inherited means NOT walked: the dependency's subprocess never ran.
+    assert_eq!(exec.load(Ordering::SeqCst), 0, "{report}");
+    let text = report.to_string();
+    assert!(text.contains("own: upper (1 endpoint(s) walked)"), "{text}");
+    assert!(text.contains("inherited: toUpper exec — "), "{text}");
+
+    // A prefix ends in `*`.
+    let space = EndpointSpace::new()
+        .bind(Exact::new("urn:example:upper"), conforming())
+        .bind(
+            Exact::new("urn:example:toUpper"),
+            ikigai_core::builtins::to_upper(),
+        );
+    let report = Suite::new()
+        .own("up*")
+        .pure("upper")
+        .run_blocking(&kernel(space));
+    report.assert_clean();
+    assert_eq!(report.declared.inherited, ["toUpper"]);
+}
+
+#[test]
+fn an_own_that_matches_nothing_is_a_finding_no_selection_removes() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
+    let report = Suite::new()
+        .checks(Checks::NAMES)
+        .opt_out_check("(suite)", Check::Declarations, "trying to waive it")
+        .own("uper")
+        .run_blocking(&kernel(space));
+    assert!(!report.is_clean(), "{report}");
+    assert_eq!(report.endpoints, 0, "{report}");
+    assert_caught(
+        &report,
+        Check::Declarations,
+        "`Suite::own(\"uper\")` matched no endpoint",
+    );
+    assert_caught(&report, Check::Declarations, "The kernel binds: `upper`");
+}
+
+#[test]
+fn a_declaration_for_an_inherited_endpoint_says_it_is_inherited() {
+    let space = EndpointSpace::new()
+        .bind(Exact::new("urn:example:upper"), conforming())
+        .bind(
+            Exact::new("urn:example:toUpper"),
+            ikigai_core::builtins::to_upper(),
+        );
+    let report = Suite::new()
+        .own("upper")
+        .pure("upper")
+        .fixture(Fixture::new("toUpper", Verb::Source).arg("in", "x"))
+        .run_blocking(&kernel(space));
+    assert_caught(
+        &report,
+        Check::Declarations,
+        "it is inherited (no `Suite::own` matches it)",
+    );
+}
