@@ -23,7 +23,7 @@ cms-graph  VOCABULARY  source: the `text/turtle` face uses `https://ikigai-rs.de
 sparql-construct  OUTPUTS  source: served `text/turtle` with its minimal inputs but declares only `application/sparql-results+json`: a face the manifold does not announce and the RDF checks never saw — declare it (`.output("text/turtle")`) or serve what is declared
 link-remove  DECLARATIONS  declared live (`Suite::live`) but nothing held it to it: it declares no cacheable verb (it declares delete), and CACHEABLE returns early on a mutating one. The report prints `declared live: link-remove`, which reads as a check that ran
 7 finding(s) across 4 endpoint(s), 4 action(s)
-checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE NAMES VALIDATE DECLARATIONS
+checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE DECLARATIONS
 probed 3 face(s) across 3 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
 probed: ik-context source `application/ld+json`: 0 triple(s) — nothing was checked
@@ -61,10 +61,11 @@ pointing at the check.
 | `VOCABULARY` | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known namespace (rdf, rdfs, xsd, owl, dcterms, Dublin Core Elements 1.1, foaf, schema, prov, ical, skos, sh, and the W3C Web Annotation `oa:`) or one the module registers. Because it parses, it also reports an unresolvable, mislabeled or malformed face — under its own name when `SKOLEM-RDF` is not selected, so `VOCABULARY` alone proves a hand-written `@prefix` line is well-formed |
 | `CACHEABLE` | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and — if it never expires (`Expiry::Never`; an `Expiry::At` deadline is a bound) — carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; a result declared live (`Suite::live`) is `Expiry::Always` |
 | `PIPELINE` | pipeline citizenship | a mutating action with by-value inputs declares `content` (where a pipe's value and a `sink`'s body arrive); an action declaring `content` reads it |
+| `REQUIRED` | ArgSpecs from day one | each input an action declares **required**, by value and with no default, is dropped from the call the walk resolved, one at a time, and the call must then be refused with a typed `MissingArgument` or `InvalidArgument`. A call that **succeeds** without it is "declared required, actually optional": a false negative in the selection funnel, because `urn:kernel:validate` and an MCP tool schema both refuse a valid call that omits it. Five adopters wrote this check by hand (http, runbook, cms, secret, sexpr shipped the defect). A refusal of another kind is a finding too (an agent cannot tell its own omission from a failure of the endpoint), unless it is transient. `Source` and `Exists` by default; `Sink` and `Delete` only under `Suite::required_on_mutating()`, because each drop is a firing and a wrongly accepted one has mutated. A call that did not resolve in the first place is listed as `unprobed` |
 | `NAMES` | naming convention | the description id is a kebab-case noun (`tag-suggest`, `kernel-catalog`) — the MCP projection derives an agent's tool name from it |
 | `VALIDATE` | a name is spelled into IRIs | `Description::validate()` accepts the description: no id, input name, input `class` or `requires` holds a character an RDF `IRIREF` cannot carry (``<>"{}\|^`\``, a space, a control character), and no id or input name holds a code point no IRI carries (DEL, a C1 control, private use, a noncharacter; core 0.1.99). Since core 0.1.100 the emitters encode a name and degrade an authored IRI that is not one to a literal, so the endpoint's Meta Turtle and contract IRIs still parse, but not as written: this is the strict check on an authoring mistake, on top of that encoding. See [Why `VALIDATE` is here and not in `bind`](#why-validate-is-here-and-not-in-bind) |
 | `SPACE-NAME` | a name is a claim: same name, same doors | a space the module declares **self-named** claims `space_iri("<module>")` (`urn:iki:space:<module>`), on its topology root too, and two calls of its constructor claim the same name over the same doors; a space it declares **host-named** claims nothing. See [A space's name](#a-spaces-name-space-name) |
-| `DECLARATIONS` | — | every declaration the module made (`live`, `cacheable`, `pure`, `namespace`, a `Fixture`, an `opt_out`, an `opt_out_check`, a declared space) reached the check that would honor it. A `live` on a `Sink` reached nothing and the report printed `declared live:` anyway |
+| `DECLARATIONS` | — | every declaration the module made (`live`, `cacheable`, `pure`, `namespace`, `required_on_mutating`, a `Fixture`, an `opt_out`, an `opt_out_check`, a declared space) reached the check that would honor it. A `live` on a `Sink` reached nothing and the report printed `declared live:` anyway |
 
 ### Why `VALIDATE` is here and not in `bind`
 
@@ -304,13 +305,16 @@ every term under it forever, including the next one somebody invents.
 for that action) — the footprint a fixture author can count on.
 It is stated **per FIRING, and a firing is a request**: the verb, the target IRI,
 and the arguments. Per firing: a `Source` or `Exists` is resolved once (twice when
-cacheable; the second is the cache probe), each declared RDF face beyond the first
+cacheable; the second is the cache probe) and once more per required by-value input
+without a default (`REQUIRED`), each declared RDF face beyond the first
 is resolved once more with `as=`, and a `Sink` or `Delete` declaring `content` is
 fired **once**, by the pipeline probe — `OUTPUTS` reads that same firing rather than
 making another. A mutating action without `content` is never fired under root
 (`ENFORCED` runs under no grants and, when the gate is declared, never reaches the
-endpoint); the report lists it as `unprobed`. Sinks land: capture what a fixture
-reads before the walk and assert effects after it.
+endpoint); the report lists it as `unprobed`. Under `Suite::required_on_mutating()`
+a `Sink` or `Delete` is also fired once per required by-value input, and once more as
+the baseline when the pipeline probe did not fire it. Sinks land: capture what a
+fixture reads before the walk and assert effects after it.
 
 **An endpoint bound N times is fired once per DISTINCT request those bindings
 produce, not N times.** The invoking checks are memoized on the request, because
@@ -421,7 +425,7 @@ not reach as loudly as what it found.
 
 ```
 0 finding(s) across 6 endpoint(s), 9 action(s)
-checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS* SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE NAMES VALIDATE DECLARATIONS
+checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS* SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE DECLARATIONS
 * OUTPUTS ran on 1 of 6 endpoint(s); waived on the rest (see `opted out:`)
 probed 7 face(s) across 5 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
@@ -467,6 +471,7 @@ ran. The check covers every declaration, not that one:
 | a `Fixture::capability` for an action that does not exist, was opted out, or that no probe resolved as | `… supplies a caller for …` / `names a caller no probe resolved as: …` |
 | a `Fixture::binding` naming no template variable of any pattern that id is bound at | `binds \`number\`, which is not a template variable …` |
 | an `opt_out` that excluded nothing | `opted out … but excluded nothing: …` |
+| `required_on_mutating` when `REQUIRED` is unselected or no `Sink`/`Delete` declares a required by-value input (endpoint `(suite)`) | `` `Suite::required_on_mutating` reached nothing: …`` |
 | an `opt_out_check` for a check that could not have run for that id anyway | `waived SKOLEM-RDF … but that check could not have run for it anyway: it declares no RDF face` |
 | a `namespace` that accounted for no term in any probed face (endpoint `(suite)`) | `registered namespace … accounted for no term: …` |
 
@@ -527,9 +532,13 @@ Honest residue — what no check here can see:
   the thread set names something besides the endpoint, not that anything cuts it; a module declaring
   `urn:file:` threads over a config home no host watches is clean here. The suite
   cannot see the host.
-- **"Required" that is actually optional.** The minimal call supplies every
-  required input, so an input marked required that the endpoint does without is
-  invisible to `ARGSPECS`.
+- **An optional alternative to a required input.** `REQUIRED` drops a required
+  input from the call the walk made, and that call sends no optional input a fixture
+  did not name. So `content` required beside an optional `in` the endpoint also
+  accepts (a piped-or-named intake, which `ArgSpec` cannot spell as "exactly one of")
+  passes, although a call with only `in` succeeds. Declaring the piped one required
+  is still right: the engine pipes only into a required input, and making both
+  optional removes the endpoint from every pipeline.
 - **A face built over a bundled graph tests that graph too.** A module that folds
   `ikigai-vocab` into every result is probed OVER it; a blank node in a future
   vocabulary release fails that module's walk first.
@@ -581,6 +590,14 @@ the whole point. `tests/builtins.rs` runs the suite against
 `ikigai-core`'s own `toUpper` / `reverseList` / `echo` (which predate the recipe)
 and pins the exact findings: three untyped inputs, two pre-convention ids, three
 cacheable pure functions nobody declared pure — and nothing else.
+
+`REQUIRED` is falsified with the runbook's shape (`name` declared required,
+`unwrap_or("friend")` in the body), which every other check passes, and with an
+untyped refusal; it stays silent on a required input carrying a default (ARGSPECS's
+finding already), on an optional alternative intake left unsent, and on a call that
+did not resolve (an `unprobed:` line instead). A counting `Sink` proves the opt-in:
+fired once by default, three times under `required_on_mutating` (the pipeline
+probe, then one drop per required input), with the defaulted `title` caught.
 
 `VALIDATE` is falsified with an id holding a space, one holding `>`, an input
 name holding U+0085 (shown escaped in the report, never raw) and an input name on

@@ -98,6 +98,22 @@ pub enum Check {
     /// `content` (where a pipe's value arrives), and an action declaring `content`
     /// reads it.
     Pipeline,
+    /// **Required is required.** Each input an action declares required, by value and
+    /// with no default, is dropped from the call the walk resolved, one at a time, and
+    /// the call must then be refused with a typed `MissingArgument` or
+    /// `InvalidArgument`. A call that SUCCEEDS without it means "declared required,
+    /// actually optional", a false negative in the selection funnel:
+    /// `urn:kernel:validate` and an MCP tool schema both refuse a valid call that
+    /// omits it. A refusal of another kind is a finding too (an agent cannot tell its
+    /// own omission from a failure of the endpoint), unless it is transient.
+    ///
+    /// One extra resolution per required input. `Source` and `Exists` by default;
+    /// `Sink` and `Delete` only under
+    /// [`Suite::required_on_mutating`](crate::Suite::required_on_mutating), because
+    /// each drop is one more firing of a mutating action and one that SUCCEEDS has
+    /// mutated. When the call it drops from does not resolve, nothing is observed and
+    /// the action is listed as unprobed.
+    Required,
     /// **Naming convention.** A description id is a short noun in `kebab-case`
     /// (the convention `ikigai-core`'s crate docs state).
     Names,
@@ -172,6 +188,7 @@ impl Check {
             Check::Vocabulary => "VOCABULARY",
             Check::Cacheable => "CACHEABLE",
             Check::Pipeline => "PIPELINE",
+            Check::Required => "REQUIRED",
             Check::Names => "NAMES",
             Check::Validate => "VALIDATE",
             Check::SpaceName => "SPACE-NAME",
@@ -191,6 +208,7 @@ impl Check {
                 | Check::Vocabulary
                 | Check::Cacheable
                 | Check::Pipeline
+                | Check::Required
         )
     }
 
@@ -245,6 +263,8 @@ impl Checks {
     pub const CACHEABLE: Checks = Checks(1 << (Check::Cacheable as u16));
     /// [`Check::Pipeline`].
     pub const PIPELINE: Checks = Checks(1 << (Check::Pipeline as u16));
+    /// [`Check::Required`].
+    pub const REQUIRED: Checks = Checks(1 << (Check::Required as u16));
     /// [`Check::Names`].
     pub const NAMES: Checks = Checks(1 << (Check::Names as u16));
     /// [`Check::Validate`].
@@ -379,7 +399,7 @@ mod tests {
 
     #[test]
     fn every_check_has_its_own_bit() {
-        // Thirteen checks no longer fit a u8; a shared bit would make one check
+        // Fourteen checks do not fit a u8; a shared bit would make one check
         // select another silently.
         let mut bits: Vec<u16> = Check::ALL.iter().map(|c| c.bit()).collect();
         bits.sort_unstable();
