@@ -14,8 +14,8 @@ use ikigai_core::{
 use crate::checks::{Check, Checks};
 use crate::rdf;
 use crate::report::{
-    Collapsed, Declarations, DeclaredSpace, Evidence, Finding, OptedOut, OptedOutAt, OptedOutCheck,
-    Probed, Report, RequiredProbe, SpaceNaming, Unprobed,
+    Collapsed, Declarations, DeclaredSpace, Evidence, Finding, Inherited, OptedOut, OptedOutAt,
+    OptedOutCheck, Probed, Report, RequiredProbe, SpaceNaming, Unprobed,
 };
 
 /// The kernel's own operations are listed by [`Kernel::entries`] ahead of the root
@@ -50,7 +50,7 @@ type Args = BTreeMap<String, Vec<u8>>;
 /// The endpoint field of a finding about the suite itself rather than an endpoint —
 /// a registered namespace has no id. Matches `(kernel)`, used for a root space that
 /// cannot be enumerated.
-const SUITE: &str = "(suite)";
+const SUITE: &str = Finding::SUITE_WIDE;
 
 /// Module-supplied inputs for one action, for when the ArgSpecs cannot say what a
 /// valid call looks like (a `path` that must exist, a JSON-LD document that must
@@ -657,6 +657,7 @@ pub struct Suite {
     kernel_ops: bool,
     required_on_mutating: bool,
     own: Vec<String>,
+    inherit: Vec<Inherited>,
 }
 
 impl Default for Suite {
@@ -682,6 +683,7 @@ impl Suite {
             kernel_ops: false,
             required_on_mutating: false,
             own: Vec::new(),
+            inherit: Vec::new(),
         }
     }
 
@@ -1059,9 +1061,157 @@ impl Suite {
     /// A pattern that matched no endpoint is a [`Check::Declarations`] finding that
     /// no check selection and no waiver removes: a scope that matches nothing turns
     /// the suite into a no-op that passes.
+    ///
+    /// Migrating a host from opt-outs to `own` means DELETING the opt-outs it
+    /// replaces: an opt-out left on an inherited id excluded nothing, which is a
+    /// [`Check::Declarations`] finding. Its reason moves to [`inherit`](Self::inherit).
     pub fn own(mut self, id: impl Into<String>) -> Self {
         self.own.push(id.into());
         self
+    }
+
+    /// [`own`](Self::own) for each of `ids`, in order: for a host with many exact
+    /// ids, instead of a fold. An empty list declares nothing, and the walk stays
+    /// unscoped.
+    ///
+    /// ```
+    /// use ikigai_conformance::{Checks, Suite};
+    /// use ikigai_core::{builtins, EndpointSpace, Exact, Kernel};
+    /// use std::sync::Arc;
+    ///
+    /// const OURS: [&str; 2] = ["echo", "reverseList"];
+    /// let space = EndpointSpace::new()
+    ///     .bind(Exact::new("urn:example:echo"), builtins::echo())
+    ///     .bind(Exact::new("urn:example:toUpper"), builtins::to_upper())
+    ///     .bind(Exact::new("urn:example:reverse"), builtins::reverse_list());
+    /// let report = Suite::new()
+    ///     .checks(Checks::NAMES)
+    ///     .own_all(OURS)
+    ///     .run_blocking(&Kernel::new(Arc::new(space)));
+    /// assert_eq!(report.declared.own, OURS);
+    /// assert_eq!(&*report.walked, ["echo", "reverseList"]);
+    /// assert_eq!(report.declared.inherited, ["toUpper"]);
+    /// ```
+    pub fn own_all<I>(mut self, ids: I) -> Self
+    where
+        I: IntoIterator,
+        I::Item: AsRef<str>,
+    {
+        self.own
+            .extend(ids.into_iter().map(|id| id.as_ref().to_string()));
+        self
+    }
+
+    /// Declare one id INHERITED, with the reason it is not the module's own: the
+    /// record an opt-out's reason carried before [`own`](Self::own) replaced it. The
+    /// reason is printed beside the report (`inherited because: <id>: <reason>`) and
+    /// listed by [`Report::inherited_because`](crate::Report::inherited_because).
+    ///
+    /// Once any is declared, the inherited list is PINNED: it must be exactly the
+    /// declared ids, compared as a set (catalog order does not matter). An inherited
+    /// endpoint with no `inherit` is a [`Check::Declarations`] finding, so a module
+    /// that gains an endpoint outside its scope turns the suite red instead of
+    /// joining the pile; so is an `inherit` for an id that was not inherited (an
+    /// `own` pattern matches it, no `own` is declared at all, or nothing binds it).
+    /// Neither is removed by a check selection or a waiver: the pin is the assertion
+    /// a host would otherwise write by hand.
+    ///
+    /// ```
+    /// use ikigai_conformance::{Checks, Suite};
+    /// use ikigai_core::{builtins, EndpointSpace, Exact, Kernel};
+    /// use std::sync::Arc;
+    ///
+    /// let host = |grown: bool| {
+    ///     let mut space = EndpointSpace::new()
+    ///         .bind(Exact::new("urn:example:echo"), builtins::echo())
+    ///         .bind(Exact::new("urn:example:toUpper"), builtins::to_upper());
+    ///     if grown {
+    ///         space = space.bind(Exact::new("urn:example:reverse"), builtins::reverse_list());
+    ///     }
+    ///     Kernel::new(Arc::new(space))
+    /// };
+    /// let suite = Suite::new()
+    ///     .checks(Checks::NAMES)
+    ///     .own("echo")
+    ///     .inherit("toUpper", "ikigai-core's builtin; its own tests cover it");
+    ///
+    /// let report = suite.run_blocking(&host(false));
+    /// report.assert_clean();
+    /// assert!(report
+    ///     .to_string()
+    ///     .contains("inherited because: toUpper: ikigai-core's builtin; its own tests cover it"));
+    ///
+    /// // A third endpoint joins the pile: red, not silent.
+    /// let report = suite.run_blocking(&host(true));
+    /// let finding = report.against("reverseList").next().unwrap();
+    /// assert!(finding.detail.contains("no `Suite::inherit` gives the reason"), "{report}");
+    /// ```
+    pub fn inherit(mut self, id: impl Into<String>, reason: impl Into<String>) -> Self {
+        self.inherit.push(Inherited {
+            endpoint: id.into(),
+            reason: reason.into(),
+        });
+        self
+    }
+
+    /// Hold the inherited list to the [`inherit`](Self::inherit) declarations,
+    /// exactly, when there are any. Like an `own` pattern that matched nothing, these
+    /// findings are not subject to selection or waiver: the pin is an assertion the
+    /// host asked for.
+    fn inherit_pin(&self, report: &mut Report) {
+        if self.inherit.is_empty() {
+            return;
+        }
+        let mut findings = Vec::new();
+        for declared in &self.inherit {
+            let id = declared.endpoint.as_str();
+            if report.declared.inherited.iter().any(|i| i == id) {
+                continue;
+            }
+            let why = if self.own.is_empty() {
+                "no `Suite::own` is declared, so nothing is inherited: every endpoint the \
+                 kernel binds is walked as the module's own"
+                    .to_string()
+            } else if let Some(pattern) = self.owner(id) {
+                format!(
+                    "`Suite::own(\"{}\")` matches it, so it is the module's own and is walked",
+                    crate::report::visible(pattern)
+                )
+            } else {
+                "the kernel binds no endpoint with that id (the id is the `Description::id`, \
+                 not the bound IRI)"
+                    .to_string()
+            };
+            findings.push(Finding::new(
+                id,
+                None,
+                Check::Declarations,
+                format!(
+                    "`Suite::inherit` gives a reason ({}) for an id that is not inherited: {why}. \
+                     This finding cannot be waived: a reason is only true of the id it names",
+                    declared.reason
+                ),
+            ));
+        }
+        for id in &report.declared.inherited {
+            if self.inherit.iter().any(|d| &d.endpoint == id) {
+                continue;
+            }
+            findings.push(Finding::new(
+                id,
+                None,
+                Check::Declarations,
+                format!(
+                    "inherited, and no `Suite::inherit` gives the reason: once one is declared \
+                     the inherited list is pinned exactly, so an endpoint that joins it is a \
+                     finding rather than a silent addition. Declare \
+                     `Suite::inherit(\"{}\", \"<why it is not the module's own>\")`, or own it \
+                     with `Suite::own`. This finding cannot be waived",
+                    crate::report::visible(id)
+                ),
+            ));
+        }
+        report.findings.extend(findings);
     }
 
     /// The `own` pattern matching `id`, or `None`. Every id is owned when nothing
@@ -1154,7 +1304,10 @@ impl Suite {
                         opaque: 0,
                     })
                     .collect(),
-                evidence: Evidence::default(),
+                evidence: Evidence {
+                    inherited_because: self.inherit.clone(),
+                    ..Evidence::default()
+                },
             }),
             unprobed: Box::default(),
             probed: Vec::new(),
@@ -1422,6 +1575,7 @@ impl Suite {
                 ),
             ));
         }
+        self.inherit_pin(&mut report);
         report.collapsed = fired
             .into_iter()
             .filter(|f| f.patterns.len() > 1)
@@ -2295,7 +2449,8 @@ fn binding_input<'a>(description: &'a Description, var: &str) -> Option<&'a ArgS
 /// Why the walk never reached `id`: scoped out by [`Suite::own`], or bound nowhere.
 fn unwalked(id: &str, coverage: &Coverage) -> String {
     if coverage.inherited.contains(id) {
-        "it is inherited (no `Suite::own` matches it), and an inherited endpoint is not walked"
+        "it is inherited (no `Suite::own` matches it), and an inherited endpoint is not walked: \
+         delete the declaration (an opt-out's reason belongs in `Suite::inherit`)"
             .to_string()
     } else {
         "the walk reached no endpoint with that id (the id is the `Description::id`, not the \
@@ -2752,8 +2907,8 @@ impl<'a> Action<'a> {
                     "did not resolve with the minimal inputs its ArgSpecs allow ({err}): it \
                      refused `content`, and the `content` it was sent is the suite's generic \
                      sample `{sample}`, not a value from a Fixture. Supply one it accepts with \
-                     `Fixture::new(\"{id}\", Verb::{verb:?}).arg(\"content\", …)`, or opt out \
-                     with a reason"
+                     `Fixture::new(\"{id}\", Verb::{verb:?}).arg(\"content\", …)` \
+                     (`.arg_bytes(\"content\", …)` for a byte input), or opt out with a reason"
                 )
             }
             // Refused some other way, which may or may not be the sample: say so, since
@@ -2762,8 +2917,9 @@ impl<'a> Action<'a> {
                 "did not resolve with the minimal inputs its ArgSpecs allow ({err}); the \
                  `content` it was sent is the suite's generic sample `{sample}`, not a value \
                  from a Fixture; if it parses `content`, that sample is the likely cause: \
-                 supply `Fixture::new(\"{id}\", Verb::{verb:?}).arg(\"content\", …)` with a \
-                 value it accepts, or opt out with a reason"
+                 supply `Fixture::new(\"{id}\", Verb::{verb:?}).arg(\"content\", …)` \
+                 (`.arg_bytes(\"content\", …)` for a byte input) with a value it accepts, or \
+                 opt out with a reason"
             ),
             // Refused under root, which holds every principal and names none: an
             // endpoint about its caller refuses exactly this, so name the caller.

@@ -25,6 +25,36 @@ pub struct Finding {
 }
 
 impl Finding {
+    /// The endpoint label of a finding about the suite itself rather than about one
+    /// endpoint: an [`own`](crate::Suite::own) pattern that matched nothing,
+    /// [`required_on_mutating`](crate::Suite::required_on_mutating) or a registered
+    /// namespace that reached nothing. Prefer [`is_suite_wide`](Self::is_suite_wide)
+    /// to comparing against it. (`(kernel)`, a root space that cannot be enumerated,
+    /// is a different label.)
+    pub const SUITE_WIDE: &'static str = "(suite)";
+
+    /// Whether this finding is about the suite's own declarations rather than about
+    /// one endpoint: its [`endpoint`](Self::endpoint) is [`SUITE_WIDE`](Self::SUITE_WIDE).
+    ///
+    /// ```
+    /// use ikigai_conformance::{Check, Checks, Finding, Suite};
+    /// use ikigai_core::{builtins, EndpointSpace, Exact, Kernel};
+    /// use std::sync::Arc;
+    ///
+    /// let space = EndpointSpace::new().bind(Exact::new("urn:example:echo"), builtins::echo());
+    /// let report = Suite::new()
+    ///     .checks(Checks::NAMES)
+    ///     .own("ehco") // a typo: it matches nothing
+    ///     .run_blocking(&Kernel::new(Arc::new(space)));
+    /// let suite_wide: Vec<&Finding> = report.findings.iter().filter(|f| f.is_suite_wide()).collect();
+    /// assert_eq!(suite_wide.len(), 1);
+    /// assert_eq!(suite_wide[0].endpoint, "(suite)");
+    /// assert_eq!(suite_wide[0].check, Check::Declarations);
+    /// ```
+    pub fn is_suite_wide(&self) -> bool {
+        self.endpoint == Self::SUITE_WIDE
+    }
+
     pub(crate) fn new(
         endpoint: impl Into<String>,
         verb: Option<Verb>,
@@ -62,6 +92,17 @@ pub struct OptedOut {
     pub verb: Option<Verb>,
     /// Why — printed in the report, because an opt-out list nobody can read is a
     /// gate that silently covers less than it looks like it does.
+    pub reason: String,
+}
+
+/// An endpoint the module declared inherited, with the reason it gave
+/// ([`Suite::inherit`](crate::Suite::inherit)): why an id bound beside the module is
+/// not its own and is not walked. Printed as `inherited because: <id>: <reason>`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Inherited {
+    /// The endpoint's description id.
+    pub endpoint: String,
+    /// Why it is not the module's own: the record an opt-out's reason used to carry.
     pub reason: String,
 }
 
@@ -285,6 +326,11 @@ pub struct Evidence {
     /// action and description it covers, and found nothing (`note:` lines). A NOTE,
     /// never a finding.
     pub idle_waivers: Vec<OptedOutCheck>,
+    /// The reasons [`Suite::inherit`](crate::Suite::inherit) gave, in declaration
+    /// order (`inherited because:` lines). A declaration rather than an observation,
+    /// kept here so it is a field on this `#[non_exhaustive]` struct and not one more
+    /// on [`Declarations`]; read it through [`Report::inherited_because`].
+    pub inherited_because: Vec<Inherited>,
 }
 
 /// What one run of the suite found.
@@ -344,7 +390,10 @@ pub struct Report {
     /// only the absence of findings.
     pub probed: Vec<Probed>,
     /// The description ids the walk reached, in walk order — what `endpoints`
-    /// counts, by name. A declaration naming an id that is not here reached no
+    /// counts, by name. Walk order is CATALOG order, never sorted: the order
+    /// [`Kernel::entries`](ikigai_core::Kernel::entries) lists the bindings (for an
+    /// `EndpointSpace`, the order they were bound), each id where its first binding
+    /// is. Compare a sorted copy when the test should not depend on bind order. A declaration naming an id that is not here reached no
     /// check at all ([`Check::Declarations`]), and a test can assert the walk
     /// covered exactly the endpoints the module means to bind.
     ///
@@ -384,7 +433,31 @@ pub struct Declarations {
     /// walked, so no check read them and no probe fired them. Empty when no `own` is
     /// declared. Pin it exactly in a composing host's test, so a module that gains an
     /// endpoint outside its own scope turns the test red instead of joining this list
-    /// silently.
+    /// silently: [`Suite::inherit`](crate::Suite::inherit) pins it with a reason per
+    /// id, or compare it yourself.
+    ///
+    /// Walk order is CATALOG order (see [`Report::walked`]), not sorted, so a slice
+    /// literal matches only when it is written in bind order. Sort a copy first when
+    /// it should not depend on that:
+    ///
+    /// ```
+    /// use ikigai_conformance::{Checks, Suite};
+    /// use ikigai_core::{builtins, EndpointSpace, Exact, Kernel};
+    /// use std::sync::Arc;
+    ///
+    /// let space = EndpointSpace::new()
+    ///     .bind(Exact::new("urn:example:upper"), builtins::to_upper())
+    ///     .bind(Exact::new("urn:example:echo"), builtins::echo())
+    ///     .bind(Exact::new("urn:example:reverse"), builtins::reverse_list());
+    /// let report = Suite::new()
+    ///     .checks(Checks::NAMES)
+    ///     .own("echo")
+    ///     .run_blocking(&Kernel::new(Arc::new(space)));
+    /// assert_eq!(report.declared.inherited, ["toUpper", "reverseList"]); // bind order
+    /// let mut inherited = report.declared.inherited.clone();
+    /// inherited.sort();
+    /// assert_eq!(inherited, ["reverseList", "toUpper"]);
+    /// ```
     ///
     /// It lives here rather than on [`Report`] because `Report` is the `Err` of
     /// [`check`](crate::check) and travels by value: one more field takes it to
@@ -503,6 +576,13 @@ impl Report {
     /// a `Delete` it would not otherwise fire is never listed here.
     pub fn idle_waivers(&self) -> &[OptedOutCheck] {
         &self.declared.evidence.idle_waivers
+    }
+
+    /// The reasons each inherited id is not the module's own, as
+    /// [`Suite::inherit`](crate::Suite::inherit) declared them (`inherited because:`
+    /// lines), in declaration order. Empty when nothing was declared with a reason.
+    pub fn inherited_because(&self) -> &[Inherited] {
+        &self.declared.evidence.inherited_because
     }
 
     /// An empty report over `checks`, for a probe whose findings are set aside.
@@ -751,6 +831,14 @@ impl fmt::Display for Report {
                 )?;
             }
         }
+        for inherited in &declared.evidence.inherited_because {
+            writeln!(
+                f,
+                "inherited because: {}: {}",
+                visible(&inherited.endpoint),
+                inherited.reason
+            )?;
+        }
         if declared.required_on_mutating {
             writeln!(
                 f,
@@ -949,6 +1037,10 @@ mod tests {
                         check: Check::Names,
                         reason: "an idle one".into(),
                     }],
+                    inherited_because: vec![Inherited {
+                        endpoint: id.into(),
+                        reason: "a dependency".into(),
+                    }],
                 },
             }),
             unprobed: Box::new(vec![Unprobed {
@@ -988,6 +1080,7 @@ mod tests {
             format!("unprobed: {shown} delete OUTPUTS: never fired\n"),
             format!("own: {shown} (1 endpoint(s) walked)\n"),
             format!("inherited: {shown} — bound beside the module"),
+            format!("inherited because: {shown}: a dependency\n"),
             format!("required: {shown} source without `in`: resolved"),
             format!("note: the waiver of NAMES for {shown} suppressed nothing"),
         ] {
@@ -1066,6 +1159,7 @@ mod tests {
                             refusal: None,
                         },
                     ],
+                    inherited_because: vec![],
                     required_nothing: None,
                     idle_waivers: vec![OptedOutCheck {
                         endpoint: "to-upper".into(),

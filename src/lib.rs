@@ -278,8 +278,8 @@ mod suite;
 
 pub use checks::{Check, Checks};
 pub use report::{
-    Collapsed, Declarations, DeclaredSpace, Evidence, Finding, OptedOut, OptedOutAt, OptedOutCheck,
-    Probed, Report, RequiredProbe, SpaceNaming, Unprobed,
+    Collapsed, Declarations, DeclaredSpace, Evidence, Finding, Inherited, OptedOut, OptedOutAt,
+    OptedOutCheck, Probed, Report, RequiredProbe, SpaceNaming, Unprobed,
 };
 pub use suite::{Fixture, Suite};
 

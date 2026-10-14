@@ -430,21 +430,51 @@ it. A dependency's subprocess seam is not run on the module's behalf.
 let report = Suite::new()
     .own("ledger-*")                 // the module's endpoints
     .own("ledger")
+    .inherit("file", "ikigai-fs's, which the ledger reads its config through")
+    .inherit("sparql-select", "ikigai-linkeddata's; its own suite covers it")
+    .inherit("store-graph-update", "ikigai-store's write door, composed by the host")
     .run_blocking(&host_kernel());
 report.assert_clean();
-// Pin the rest EXACTLY: a module crate that gains an endpoint outside its scope
-// turns this red instead of silently joining the pile.
-assert_eq!(report.declared.inherited, ["file", "sparql-select", "store-graph-update"]);
 ```
 
 ```text
 own: ledger-* ledger (7 endpoint(s) walked)
 inherited: file sparql-select store-graph-update — bound beside the module, not its own (`Suite::own`), not walked
+inherited because: file: ikigai-fs's, which the ledger reads its config through
+inherited because: sparql-select: ikigai-linkeddata's; its own suite covers it
+inherited because: store-graph-update: ikigai-store's write door, composed by the host
 ```
 
-That last assertion keeps what the hand partitions bought. They asserted the union
-covered the catalog, so a new endpoint turned a test red rather than joining the
-inherited pile unseen. **A pattern that matches no endpoint is a `DECLARATIONS`
+**`Suite::inherit(id, reason)` pins the rest exactly, and keeps why** (0.8.2). Once one
+is declared, the inherited list must be exactly the declared ids, compared as a set:
+an inherited endpoint no `inherit` names is a `DECLARATIONS` finding (a module crate
+that gains an endpoint outside its scope turns the suite red instead of silently
+joining the pile), and so is an `inherit` for an id that was not inherited. Each
+reason prints as an `inherited because:` line and is listed by
+`Report::inherited_because()`. That keeps what the hand partitions bought. They
+asserted the union covered the catalog, so a new endpoint turned a test red rather
+than joining the inherited pile unseen. Without any `inherit`, nothing is pinned and
+the report reads as in 0.8.0.
+
+To pin it by hand instead, compare a SORTED copy. `report.declared.inherited` (like
+`report.walked`) is in catalog order, the order the kernel lists its bindings (for an
+`EndpointSpace`, the order they were bound), so a slice literal matches only when it
+is written in bind order:
+
+```rust
+let mut inherited = report.declared.inherited.clone();
+inherited.sort();
+assert_eq!(inherited, ["file", "sparql-select", "store-graph-update"]);
+```
+
+**Migrating a host from opt-outs to `own` means deleting the opt-outs it replaces.**
+An `opt_out` left on an id `own` now scopes out excluded nothing, because an inherited
+endpoint is not walked, and that is a `DECLARATIONS` finding. The reason each opt-out
+carried was the record of why that door sits beside the crate: move it to
+`Suite::inherit` rather than losing it.
+
+A host with many exact ids can pass them at once: `Suite::own_all(&OURS)` is `own`
+for each, in order. **A pattern that matches no endpoint is a `DECLARATIONS`
 finding that no selection or waiver removes**, and it lists the ids the kernel does
 bind. A scope that matches nothing turns the suite into a no-op that passes, which is
 this crate's founding defect. A host that wants its dependencies' record too runs a
@@ -508,7 +538,8 @@ sharing one description are one endpoint and, with one `Source` each, two action
 because they resolve to different IRIs. Two bindings that resolve to the SAME IRI
 with the same arguments are one action, and `Report.collapsed` names them.
 `Report.walked` is that first count BY NAME, in walk
-order, so a test can assert the walk reached exactly the endpoints the module
+order, which is catalog order (the order the kernel lists its bindings; for an
+`EndpointSpace`, bind order), never sorted, so a test can assert the walk reached exactly the endpoints the module
 means to bind (an endpoint that stops being bound is otherwise a report that gets
 *cleaner*).
 
@@ -585,6 +616,8 @@ ran. The check covers every declaration, not that one:
 | a `Fixture::binding` naming no template variable of any pattern that id is bound at | `binds \`number\`, which is not a template variable …` |
 | an `opt_out` that excluded nothing | `opted out … but excluded nothing: …` |
 | an `own` pattern that matched no endpoint (endpoint `(suite)`; **not** removed by any selection or waiver) | `` `Suite::own("uper")` matched no endpoint the kernel binds …`` |
+| an inherited endpoint no `Suite::inherit` names, once any is declared (**not** removed by any selection or waiver) | `` inherited, and no `Suite::inherit` gives the reason: …`` |
+| a `Suite::inherit` for an id an `own` pattern matches, with no `own` declared, or that nothing binds (**not** removed by any selection or waiver) | `` `Suite::inherit` gives a reason (…) for an id that is not inherited: …`` |
 | `required_on_mutating` when `REQUIRED` is unselected or no `Sink`/`Delete` declares a required by-value input (endpoint `(suite)`) | `` `Suite::required_on_mutating` reached nothing: …`` |
 | an `opt_out_check` for a check that could not have run for that id anyway | `waived SKOLEM-RDF … but that check could not have run for it anyway: it declares no RDF face` |
 | a `namespace` that accounted for no term in any probed face (endpoint `(suite)`) | `registered namespace … accounted for no term: …` |
@@ -751,8 +784,44 @@ anyone memoizes by id.
 
 ## Status
 
-0.8.1. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.8.2. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.8.1 → 0.8.2: `Suite::inherit`, `Suite::own_all`, `Finding::is_suite_wide` (ledger #1497)
+
+From the 0.8 adoption wave: `Suite::own` replaced nineteen opt-outs in one host whose
+printed reasons were the record of why each door sits beside the crate, and the host
+wrote its own helper to keep them and pin the inherited list; another folded `own`
+over fifteen ids; another hard-coded the `(suite)` label.
+
+**What is new.**
+
+- **`Suite::inherit(id, reason)`.** The reason prints as `inherited because: <id>:
+  <reason>` and is listed by `Report::inherited_because()` (`Inherited`). Once any is
+  declared, the inherited list is pinned exactly, as a set; see the `own` section.
+- **`Suite::own_all(ids)`.** `own` for each id, for a host with many exact ids.
+- **`Finding::SUITE_WIDE` and `Finding::is_suite_wide()`.** The `(suite)` label of a
+  finding about the suite's own declarations, by name.
+- **The README says to delete the opt-outs `own` replaces**, and the finding for one
+  left behind now says so too: `… it is inherited (…), and an inherited endpoint is
+  not walked: delete the declaration (an opt-out's reason belongs in
+  `Suite::inherit`)`.
+- **A refused generic `content` sample names `arg_bytes` too**: the hint reads
+  `` .arg("content", …) (`.arg_bytes("content", …)` for a byte input) ``.
+- **`Report::walked` and `Declarations::inherited` are documented as catalog order.**
+  They were already; the README's example compared a slice literal that matched only
+  in bind order, and now sorts. They are NOT returned sorted: that would change the
+  order an adopter's existing assertion compares against, at a patch release.
+
+**Will it turn a green suite red?** No. The pin applies only to a suite that declares
+`inherit`, which nothing could before; every other finding is unchanged, and the two
+reworded details only gain text at the end of a phrase.
+
+**Source changes for a consumer:** none required. `Evidence` (`#[non_exhaustive]`)
+gains `inherited_because`, and there is one new public type, `Inherited`.
+`Declarations` is unchanged.
+
+Adopters pinned at `"0.8.0"` get 0.8.2 at their next lock update with no pin move.
 
 ### 0.8.0 → 0.8.1: `REQUIRED` shows its evidence, bytes fixtures, idle waivers (ledger #1493)
 
