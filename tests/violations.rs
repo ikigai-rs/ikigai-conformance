@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use ikigai_conformance::{check, Check, Checks, Fixture, Report, Suite};
+use ikigai_conformance::{check, Check, Checks, Finding, Fixture, Inherited, Report, Suite};
 use ikigai_core::{
     space_iri, ActionSpec, ArgRef, ArgSpec, Capability, Description, Endpoint, EndpointSpace,
     Error, Exact, Expiry, FixedClock, FnEndpoint, Invocation, Iri, Kernel, ReprType,
@@ -1835,6 +1835,12 @@ fn a_refused_generic_content_sample_is_named_as_the_cause() {
         Check::Outputs,
         "`Fixture::new(\"toml-config\", Verb::Sink).arg(\"content\", …)`",
     );
+    // A byte input is fixtured with `arg_bytes` (0.8.1), and the hint says so.
+    assert_caught(
+        &report,
+        Check::Outputs,
+        "(`.arg_bytes(\"content\", …)` for a byte input)",
+    );
 }
 
 #[test]
@@ -1856,6 +1862,12 @@ fn an_untyped_refusal_of_a_generic_content_sample_names_it_as_the_likely_cause()
         &report,
         Check::Outputs,
         "`Fixture::new(\"toml-config\", Verb::Sink).arg(\"content\", …)`",
+    );
+    // A byte input is fixtured with `arg_bytes` (0.8.1), and the hint says so.
+    assert_caught(
+        &report,
+        Check::Outputs,
+        "(`.arg_bytes(\"content\", …)` for a byte input)",
     );
 }
 
@@ -3339,5 +3351,205 @@ fn a_declaration_for_an_inherited_endpoint_says_it_is_inherited() {
         &report,
         Check::Declarations,
         "it is inherited (no `Suite::own` matches it)",
+    );
+}
+
+// ----- Suite::inherit, Suite::own_all, Finding::is_suite_wide (ledger #1497) ---------
+
+/// `upper` is the module's; `toUpper` and `exec` are bound beside it.
+fn composed(exec: Arc<AtomicUsize>) -> EndpointSpace {
+    EndpointSpace::new()
+        .bind(Exact::new("urn:example:upper"), conforming())
+        .bind(
+            Exact::new("urn:example:toUpper"),
+            ikigai_core::builtins::to_upper(),
+        )
+        .bind(Exact::new("urn:example:exec"), exec_like(exec))
+}
+
+#[test]
+fn inherit_pins_the_inherited_list_and_prints_each_reason() {
+    let exec = Arc::new(AtomicUsize::new(0));
+    // Declared in the other order from the catalog: the pin compares as a set.
+    let report = Suite::new()
+        .own("upper")
+        .pure("upper")
+        .inherit("exec", "a subprocess seam the host owns")
+        .inherit("toUpper", "ikigai-core's builtin, covered by its own tests")
+        .run_blocking(&kernel(composed(exec.clone())));
+    report.assert_clean();
+    assert_eq!(report.declared.inherited, ["toUpper", "exec"]);
+    assert_eq!(exec.load(Ordering::SeqCst), 0, "{report}");
+    assert_eq!(
+        report.inherited_because(),
+        [
+            Inherited {
+                endpoint: "exec".into(),
+                reason: "a subprocess seam the host owns".into(),
+            },
+            Inherited {
+                endpoint: "toUpper".into(),
+                reason: "ikigai-core's builtin, covered by its own tests".into(),
+            },
+        ]
+    );
+    let text = report.to_string();
+    for line in [
+        "inherited because: exec: a subprocess seam the host owns\n",
+        "inherited because: toUpper: ikigai-core's builtin, covered by its own tests\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?}:\n{text}");
+    }
+}
+
+#[test]
+fn an_inherited_endpoint_no_inherit_names_is_a_finding_no_selection_removes() {
+    let exec = Arc::new(AtomicUsize::new(0));
+    let report = Suite::new()
+        .checks(Checks::NAMES)
+        .opt_out_check("exec", Check::Declarations, "trying to waive it")
+        .own("upper")
+        .inherit("toUpper", "ikigai-core's builtin")
+        .run_blocking(&kernel(composed(exec)));
+    let pinned: Vec<&Finding> = report
+        .of(Check::Declarations)
+        .filter(|f| f.detail.contains("no `Suite::inherit` gives the reason"))
+        .collect();
+    assert_eq!(pinned.len(), 1, "{report}");
+    assert_eq!(pinned[0].endpoint, "exec");
+    assert!(
+        pinned[0]
+            .detail
+            .contains("`Suite::inherit(\"exec\", \"<why it is not the module's own>\")`"),
+        "{report}"
+    );
+    // Without any `inherit`, the inherited list is not pinned (0.8.0 behavior).
+    let report = Suite::new()
+        .own("upper")
+        .pure("upper")
+        .run_blocking(&kernel(composed(Arc::new(AtomicUsize::new(0)))));
+    report.assert_clean();
+}
+
+#[test]
+fn an_inherit_for_an_id_that_is_not_inherited_is_a_finding() {
+    let exec = Arc::new(AtomicUsize::new(0));
+    let reasons = |report: &Report, id: &str| -> Vec<String> {
+        report
+            .of(Check::Declarations)
+            .filter(|f| f.endpoint == id && f.detail.contains("for an id that is not inherited"))
+            .map(|f| f.detail.clone())
+            .collect()
+    };
+    // Owned by a pattern: walked, so not inherited.
+    let report = Suite::new()
+        .checks(Checks::NAMES)
+        .own("upper")
+        .inherit("toUpper", "a dependency")
+        .inherit("exec", "a seam")
+        .inherit("upper", "a stale reason")
+        .run_blocking(&kernel(composed(exec.clone())));
+    let found = reasons(&report, "upper");
+    assert_eq!(found.len(), 1, "{report}");
+    assert!(
+        found[0].contains("`Suite::own(\"upper\")` matches it, so it is the module's own"),
+        "{report}"
+    );
+    // No `own` at all: nothing is inherited.
+    let report = Suite::new()
+        .checks(Checks::NAMES)
+        .inherit("toUpper", "a dependency")
+        .run_blocking(&kernel(composed(exec.clone())));
+    let found = reasons(&report, "toUpper");
+    assert_eq!(found.len(), 1, "{report}");
+    assert!(found[0].contains("no `Suite::own` is declared"), "{report}");
+    // An id nothing binds.
+    let report = Suite::new()
+        .checks(Checks::NAMES)
+        .own("upper")
+        .inherit("toUpper", "a dependency")
+        .inherit("exec", "a seam")
+        .inherit("to-upper", "a typo")
+        .run_blocking(&kernel(composed(exec)));
+    let found = reasons(&report, "to-upper");
+    assert_eq!(found.len(), 1, "{report}");
+    assert!(
+        found[0].contains("the kernel binds no endpoint with that id"),
+        "{report}"
+    );
+}
+
+#[test]
+fn an_opt_out_left_beside_own_is_a_finding_that_points_at_inherit() {
+    // Migrating to `own` means deleting the opt-outs it replaces (ledger #1497).
+    let space = EndpointSpace::new()
+        .bind(Exact::new("urn:example:upper"), conforming())
+        .bind(
+            Exact::new("urn:example:toUpper"),
+            ikigai_core::builtins::to_upper(),
+        );
+    let report = Suite::new()
+        .own("upper")
+        .pure("upper")
+        .opt_out("toUpper", None, "a dependency's endpoint, not ours")
+        .run_blocking(&kernel(space));
+    assert_caught(
+        &report,
+        Check::Declarations,
+        "opted out of the invoking checks (a dependency's endpoint, not ours) but excluded \
+         nothing: it is inherited",
+    );
+    assert_caught(
+        &report,
+        Check::Declarations,
+        "delete the declaration (an opt-out's reason belongs in `Suite::inherit`)",
+    );
+}
+
+#[test]
+fn own_all_is_own_for_each_id() {
+    const OURS: [&str; 2] = ["upper", "exec"];
+    let exec = Arc::new(AtomicUsize::new(0));
+    let folded = OURS
+        .iter()
+        .fold(Suite::new().checks(Checks::NAMES), |suite, id| {
+            suite.own(*id)
+        })
+        .run_blocking(&kernel(composed(exec.clone())));
+    let all = Suite::new()
+        .checks(Checks::NAMES)
+        .own_all(OURS)
+        .run_blocking(&kernel(composed(exec.clone())));
+    assert_eq!(all.declared.own, OURS);
+    assert_eq!(all.declared.own, folded.declared.own);
+    assert_eq!(&*all.walked, ["upper", "exec"]);
+    assert_eq!(all.declared.inherited, ["toUpper"]);
+    // Owned Strings and a slice reference work too.
+    let owned: Vec<String> = OURS.iter().map(|s| s.to_string()).collect();
+    let report = Suite::new()
+        .checks(Checks::NAMES)
+        .own_all(&owned)
+        .run_blocking(&kernel(composed(exec)));
+    assert_eq!(report.declared.own, OURS);
+}
+
+#[test]
+fn a_suite_wide_finding_says_so() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
+    let report = Suite::new()
+        .checks(Checks::NAMES)
+        .own("uper")
+        .run_blocking(&kernel(space));
+    let suite_wide: Vec<&Finding> = report
+        .findings
+        .iter()
+        .filter(|f| f.is_suite_wide())
+        .collect();
+    assert_eq!(suite_wide.len(), 1, "{report}");
+    assert_eq!(suite_wide[0].endpoint, Finding::SUITE_WIDE);
+    assert_eq!(Finding::SUITE_WIDE, "(suite)");
+    assert!(
+        report.findings.iter().all(|f| f.is_suite_wide()),
+        "{report}"
     );
 }
