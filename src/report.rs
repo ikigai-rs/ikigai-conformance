@@ -290,6 +290,9 @@ pub struct Declarations {
     /// The single checks the module waived per endpoint, with reasons
     /// ([`Suite::opt_out_check`](crate::Suite::opt_out_check)).
     pub opted_out_checks: Vec<OptedOutCheck>,
+    /// Whether the module held `Sink` and `Delete` actions to [`Check::Required`]
+    /// too ([`Suite::required_on_mutating`](crate::Suite::required_on_mutating)).
+    pub required_on_mutating: bool,
     /// The endpoints the module declared pure (exempt from the golden-thread half
     /// of [`Check::Cacheable`]).
     pub pure: Vec<String>,
@@ -530,6 +533,12 @@ impl fmt::Display for Report {
         for ((check, reason), ids) in groups {
             writeln!(f, "opted out: {} {}: {reason}", joined(&ids), check.label())?;
         }
+        if declared.required_on_mutating {
+            writeln!(
+                f,
+                "declared: REQUIRED fires `Sink` and `Delete` actions too (`Suite::required_on_mutating`)"
+            )?;
+        }
         if !declared.pure.is_empty() {
             writeln!(f, "declared pure: {}", joined(&declared.pure))?;
         }
@@ -700,6 +709,7 @@ mod tests {
                     check: Check::Vocabulary,
                     reason: "one check".into(),
                 }],
+                required_on_mutating: false,
                 pure: vec![id.into()],
                 cacheable: vec![id.into()],
                 live: vec![id.into()],
@@ -774,6 +784,7 @@ mod tests {
                     check: Check::Vocabulary,
                     reason: "four ik: terms land in the next vocabulary release".into(),
                 }],
+                required_on_mutating: false,
                 pure: vec!["to-upper".into()],
                 cacheable: vec!["to-upper".into()],
                 live: vec!["clock-now".into()],

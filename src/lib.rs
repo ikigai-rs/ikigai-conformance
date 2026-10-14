@@ -53,10 +53,11 @@
 //! | [`Vocabulary`](Check::Vocabulary) | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known ([`rdf::WELL_KNOWN_NAMESPACES`]) or module-registered namespace |
 //! | [`Cacheable`](Check::Cacheable) | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and — if it never expires (`Expiry::Never`; an `Expiry::At` deadline is a bound) — carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; a result declared live ([`Suite::live`]) is `Expiry::Always` |
 //! | [`Pipeline`](Check::Pipeline) | pipeline citizenship | a mutating action with by-value inputs declares `content` (where the pipe's value arrives); an action declaring `content` reads it |
+//! | [`Required`](Check::Required) | ArgSpecs from day one | each input declared required, by value and with no default, dropped from the call the walk resolved, is refused with a typed `MissingArgument` or `InvalidArgument`; a call that succeeds without it is "declared required, actually optional". `Source` and `Exists` by default, `Sink` and `Delete` only under [`Suite::required_on_mutating`] |
 //! | [`Names`](Check::Names) | naming convention | the id is a kebab-case noun (the convention `ikigai-core`'s crate docs state) |
 //! | [`Validate`](Check::Validate) | a name is spelled into IRIs | `Description::validate()` accepts the description: no id, input name, `class` or `requires` holds a character an `IRIREF` cannot carry, and no name holds a code point no IRI carries (core 0.1.99). Core's emitters encode a name and degrade a bad authored IRI to a literal (core 0.1.100), so the documents parse; this is the strict check on top. `bind` does not validate, so this is where a bad name is caught |
 //! | [`SpaceName`](Check::SpaceName) | a name is a claim: same name, same doors | a space declared self-named ([`Suite::self_named_space`]) claims [`space_iri`](ikigai_core::space_iri)`(module)` under [`SPACE_PREFIX`](ikigai_core::SPACE_PREFIX), on its topology root too, and two calls hold the same doors; a space declared host-named ([`Suite::host_named_space`]) claims nothing |
-//! | [`Declarations`](Check::Declarations) | — | every declaration the module made ([`Suite::live`], [`Suite::cacheable`], [`Suite::pure`], [`Suite::namespace`], a [`Fixture`], an [`opt_out`](Suite::opt_out), an [`opt_out_at`](Suite::opt_out_at), an [`opt_out_check`](Suite::opt_out_check), a declared space) reached the check that would honor it |
+//! | [`Declarations`](Check::Declarations) | — | every declaration the module made ([`Suite::live`], [`Suite::cacheable`], [`Suite::pure`], [`Suite::namespace`], [`Suite::required_on_mutating`], a [`Fixture`], an [`opt_out`](Suite::opt_out), an [`opt_out_at`](Suite::opt_out_at), an [`opt_out_check`](Suite::opt_out_check), a declared space) reached the check that would honor it |
 //!
 //! Both RDF checks resolve and **parse** the face, so an unresolvable, mislabeled
 //! or malformed graph is reported whichever of the two is selected — under
@@ -157,9 +158,12 @@
 //!   anything ever cuts a thread in it; a module declaring `urn:file:` threads over
 //!   a config home no host watches is clean here and stale in production. The
 //!   suite cannot see the host.
-//! - **"Required" that is actually optional.** [`ArgSpecs`](Check::ArgSpecs) reads
-//!   the declaration; the minimal call supplies every required input, so an input
-//!   marked required that the endpoint would happily do without is invisible.
+//! - **An optional alternative to a required input.** [`Required`](Check::Required)
+//!   drops a required input from the call the walk made, which sends no optional
+//!   input a fixture did not name. So `content` required beside an optional `in` the
+//!   endpoint also accepts (a piped-or-named intake, which `ArgSpec` cannot spell as
+//!   "exactly one of") passes, although a call with only `in` succeeds. Declaring the
+//!   piped one required is still right: the engine pipes only into a required input.
 //! - **A face built over a bundled graph tests that graph too.** A module that
 //!   folds `ikigai-vocab` (or its own vocabulary) into every result is probed OVER
 //!   it: a blank node arriving in a future vocabulary release fails that module's
@@ -204,13 +208,16 @@
 //! What a walk fires, under root (or as the caller a [`Fixture::capability`] names
 //! for that action: an endpoint about its caller refuses root, which names no
 //! principal): a `Source` or `Exists` is resolved once (twice
-//! when cacheable — the second is the cache probe); each declared RDF face beyond
-//! the first is resolved once more with `as=`; a `Sink` or `Delete` declaring
+//! when cacheable — the second is the cache probe), and once more per required
+//! by-value input without a default ([`Required`](Check::Required)); each declared
+//! RDF face beyond the first is resolved once more with `as=`; a `Sink` or `Delete` declaring
 //! `content` is fired **once**, by the pipeline probe, and [`Outputs`](Check::Outputs)
 //! reads that same firing; a mutating action without `content` is never fired
 //! under root ([`Enforced`](Check::Enforced) and [`Authority`](Check::Authority) run
 //! under no grants, off **one** shared resolution however many of the two are
-//! selected) and is listed as unprobed. Fixture bindings are per entry, not per verb (see [`Fixture::binding`]).
+//! selected) and is listed as unprobed. Under [`Suite::required_on_mutating`] a
+//! `Sink` or `Delete` is also fired once per required by-value input, and once more
+//! as the baseline when the pipeline probe did not fire it. Fixture bindings are per entry, not per verb (see [`Fixture::binding`]).
 //!
 //! **That footprint is per FIRING, and a firing is a request** — the verb, the target
 //! IRI and the arguments. The invoking checks are memoized on it, so an endpoint

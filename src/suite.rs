@@ -376,6 +376,12 @@ struct Coverage {
     /// The input names each walked action declares, by-value and binding apart,
     /// keyed by `(id, verb name)`: what a fixture's argument names are read against.
     inputs: BTreeMap<(String, &'static str), DeclaredInputs>,
+    /// Ids with at least one action REQUIRED would examine: a required by-value
+    /// input without a default, on a verb it probes.
+    required_eligible: BTreeSet<String>,
+    /// Whether any walked mutating action declares a required by-value input, the
+    /// only thing [`Suite::required_on_mutating`] reaches.
+    required_mutating_candidates: bool,
 }
 
 /// The input names one action declares: by value (what a fixture argument may
@@ -549,6 +555,7 @@ pub struct Suite {
     live: Vec<String>,
     spaces: Vec<SpaceDecl>,
     kernel_ops: bool,
+    required_on_mutating: bool,
 }
 
 impl Default for Suite {
@@ -572,6 +579,7 @@ impl Suite {
             live: Vec::new(),
             spaces: Vec::new(),
             kernel_ops: false,
+            required_on_mutating: false,
         }
     }
 
@@ -896,6 +904,24 @@ impl Suite {
         self
     }
 
+    /// Hold `Sink` and `Delete` actions to [`Check::Required`] too.
+    ///
+    /// Off by default because every required input dropped is one more FIRING of a
+    /// mutating action, and a drop the endpoint wrongly accepts has mutated: the
+    /// defect the check exists to find is, on these verbs, a write. Turn it on over a
+    /// kernel built as a test fixture, after the walk's other firings are accounted
+    /// for. A `Sink` whose baseline call the pipeline probe already fired (it declares
+    /// `content`) is measured against that firing; one that does not is fired once
+    /// more, with its minimal inputs, as the baseline.
+    ///
+    /// A declaration that reached nothing (REQUIRED unselected, or no mutating action
+    /// declares a required by-value input) is reported by
+    /// [`Check::Declarations`].
+    pub fn required_on_mutating(mut self) -> Self {
+        self.required_on_mutating = true;
+        self
+    }
+
     /// Run on the futures executor — the one-line form for a `#[test]`. Prefer
     /// [`run`](Self::run) inside an async host.
     pub fn run_blocking(&self, kernel: &Kernel) -> Report {
@@ -937,6 +963,7 @@ impl Suite {
                         reason: o.reason.clone(),
                     })
                     .collect(),
+                required_on_mutating: self.required_on_mutating,
                 pure: self.pure.clone(),
                 cacheable: self.cacheable.clone(),
                 live: self.live.clone(),
@@ -1024,6 +1051,14 @@ impl Suite {
             for spec in description.action_specs() {
                 coverage.record_action(&description.id, spec.verb, false);
                 coverage.record_inputs(&description.id, &spec);
+                if !droppable(&spec).is_empty() {
+                    if spec.verb.is_mutating() {
+                        coverage.required_mutating_candidates = true;
+                    }
+                    if !spec.verb.is_mutating() || self.required_on_mutating {
+                        coverage.required_eligible.insert(description.id.clone());
+                    }
+                }
                 if spec.outputs.iter().any(|o| rdf::is_rdf_face(o)) {
                     coverage.rdf_faces.insert(description.id.clone());
                 }
@@ -1118,6 +1153,9 @@ impl Suite {
                 action.rdf_faces(&mut report, &mut coverage).await;
                 action.cacheable(&mut report, &mut coverage).await;
                 action.pipeline(&mut report).await;
+                // After PIPELINE, so a mutating action's baseline is the one firing
+                // the pipeline probe already made.
+                action.required(&mut report).await;
                 // Last: it reads what the checks above already resolved and fires
                 // nothing new for a mutating verb, so the walk's footprint stays
                 // "Source once or twice, Sink once, Delete never".
@@ -1346,6 +1384,25 @@ impl Suite {
             ),
             );
         }
+        if self.required_on_mutating {
+            let why = if !self.checks.contains(Check::Required) {
+                Some("REQUIRED is not selected (`Suite::checks`)")
+            } else if !coverage.required_mutating_candidates {
+                Some("no walked `Sink` or `Delete` declares a required by-value input without a default")
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                self.inert(
+                    report,
+                    SUITE,
+                    format!(
+                        "`Suite::required_on_mutating` reached nothing: {why}. The report prints \
+                         that mutating actions were held to REQUIRED, which reads as a check that ran"
+                    ),
+                );
+            }
+        }
         self.namespace_declarations(coverage, report);
         self.space_declarations(report);
         self.fixture_declarations(coverage, report);
@@ -1436,6 +1493,11 @@ impl Suite {
                     verb_list(&coverage.verbs_of(id))
                 ))
             }
+            Check::Required if !coverage.required_eligible.contains(id) => Some(format!(
+                "no action of it REQUIRED probes declares a required by-value input without a \
+                 default ({}; `Sink` and `Delete` only under `Suite::required_on_mutating`)",
+                verb_list(&coverage.verbs_of(id))
+            )),
             Check::SkolemRdf | Check::Vocabulary if !coverage.rdf_faces.contains(id) => Some(
                 "it declares no RDF face, and the graph checks probe declared RDF outputs only"
                     .to_string(),
@@ -1884,6 +1946,16 @@ fn binding_input<'a>(description: &'a Description, var: &str) -> Option<&'a ArgS
         .iter()
         .chain(description.actions.iter().flat_map(|a| a.inputs.iter()))
         .find(|i| i.name == var && i.source == InputSource::Binding)
+}
+
+/// The inputs [`Check::Required`] drops one at a time: declared required, by value,
+/// with no default. A default beside `required` is already an ARGSPECS finding, and a
+/// call missing it succeeds on the default by design, so it is not reported twice.
+fn droppable(spec: &ActionSpec) -> Vec<&ArgSpec> {
+    spec.inputs
+        .iter()
+        .filter(|i| i.required && i.source == InputSource::Argument && i.default.is_none())
+        .collect()
 }
 
 /// The variables of a template pattern, or `None` for an exact IRI / a malformed
@@ -2773,6 +2845,95 @@ impl<'a> Action<'a> {
                      does not declare, so the piped value never reaches it"
                 ),
             ));
+        }
+    }
+
+    // ----- REQUIRED -----------------------------------------------------------
+
+    /// Drop each required by-value input from the call the walk resolved, one at a
+    /// time, and expect a typed refusal (ledger #329). Five adopters wrote this by
+    /// hand; ARGSPECS reads `required` and the minimal call supplies every required
+    /// input, so nothing else could see a `required` the endpoint does without.
+    async fn required(&mut self, report: &mut Report) {
+        if !self.runs(Check::Required) {
+            return;
+        }
+        let mutating = self.spec.verb.is_mutating();
+        if mutating && !self.suite.required_on_mutating {
+            return;
+        }
+        let inputs = droppable(self.spec);
+        if inputs.is_empty() {
+            return;
+        }
+        // The call each drop is measured against: the minimal resolution for a read;
+        // for a write, the pipeline probe's firing when it made one, else one firing
+        // with the minimal inputs (the declaration opted into firings).
+        let (args, baseline) = if mutating {
+            match (&self.fired, self.content_spec()) {
+                (Some(fired), Some(content)) => {
+                    (self.pipeline_args(content), fired.clone().map(|_| ()))
+                }
+                _ => {
+                    let args = self.suite.args_for(self.id, self.spec);
+                    self.caller_used = true;
+                    let fired = self.kernel.issue(self.request(&args), &self.caller).await;
+                    (args, fired.map(|_| ()))
+                }
+            }
+        } else {
+            let args = self.suite.args_for(self.id, self.spec);
+            let resolved = self.resolve_minimal(false).await.map(|_| ());
+            (args, resolved)
+        };
+        if let Err(err) = baseline {
+            self.unprobed(
+                report,
+                Check::Required,
+                format!(
+                    "the call each required input is dropped from did not resolve ({err}), so \
+                     what a missing input does was not observed"
+                ),
+            );
+            return;
+        }
+        for input in inputs {
+            let name = &input.name;
+            let mut dropped = args.clone();
+            if dropped.remove(name).is_none() {
+                continue;
+            }
+            self.caller_used = true;
+            match self.kernel.issue(self.request(&dropped), &self.caller).await {
+                Ok(_) => report.findings.push(self.finding(
+                    Check::Required,
+                    format!(
+                        "declares `{name}` required, but resolved without it: declared required, \
+                         actually optional. `urn:kernel:validate` and an MCP tool schema both \
+                         refuse a valid call that omits it. Mark it `.optional()` (with \
+                         `.default_value(…)` if it has one), or refuse its absence \
+                         (`inv.inline_str(\"{name}\")?` is a typed `MissingArgument`)"
+                    ),
+                )),
+                Err(Error::MissingArgument(_) | Error::InvalidArgument { .. }) => {}
+                Err(err) if err.is_transient() => self.unprobed(
+                    report,
+                    Check::Required,
+                    format!(
+                        "without `{name}` it failed transiently ({err}), so whether it refuses a \
+                         missing `{name}` was not observed"
+                    ),
+                ),
+                Err(err) => report.findings.push(self.finding(
+                    Check::Required,
+                    format!(
+                        "refused a call without the required `{name}`, but as `{err}`, not as a \
+                         typed `MissingArgument` or `InvalidArgument`: an agent cannot tell its own \
+                         omission from a failure of the endpoint (`inv.inline_str(\"{name}\")?` \
+                         refuses with `MissingArgument`)"
+                    ),
+                )),
+            }
         }
     }
 

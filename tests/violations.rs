@@ -2202,7 +2202,9 @@ fn a_fixture_supplies_inputs_the_spec_cannot_derive() {
 
     let space = EndpointSpace::new().bind(
         Exact::new("urn:example:json-keys"),
-        FnEndpoint::new("json-keys", |_inv: &Invocation<'_>| {
+        FnEndpoint::new("json-keys", |inv: &Invocation<'_>| {
+            // Reads what it declares required, so REQUIRED is satisfied too.
+            inv.inline_str("content")?;
             Ok(turtle("<urn:example:doc> <http://purl.org/dc/terms/title> \"t\" .").cacheable())
         })
         .with_description(
@@ -2913,4 +2915,241 @@ fn a_crate_name_in_place_of_a_module_name_is_refused_where_it_is_written() {
         one_door("echo")
     }
     let _ = Suite::new().self_named_space("ikigai-example", space);
+}
+
+// ----- REQUIRED ---------------------------------------------------------------
+
+/// Declares `name` REQUIRED and does without it: `unwrap_or("friend")`, the
+/// runbook's `urn:action:greet` for eleven releases (ledger #329).
+fn greet_defaulting() -> FnEndpoint {
+    FnEndpoint::new("greet", |inv: &Invocation<'_>| {
+        let name = inv.inline_str("name").unwrap_or("friend");
+        Ok(text(format!("hello, {name}")))
+    })
+    .with_description(
+        Description::new("greet")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("name").class(XSD_STRING))
+            .output("text/plain"),
+    )
+}
+
+#[test]
+fn required_catches_an_input_declared_required_that_the_endpoint_does_without() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:greet"), greet_defaulting());
+    let report = report_of(space);
+    let found = only(&report, Check::Required);
+    assert_eq!(found.len(), 1, "{report}");
+    assert!(
+        found[0].contains("declares `name` required, but resolved without it"),
+        "{report}"
+    );
+    // Nothing else sees it: every other check is satisfied by the minimal call,
+    // which supplies every required input.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:greet"), greet_defaulting());
+    let report = Suite::new()
+        .checks(Checks::all() - Checks::REQUIRED)
+        .run_blocking(&kernel(space));
+    assert!(report.is_clean(), "{report}");
+    assert!(report.to_string().contains("skipped: REQUIRED"), "{report}");
+
+    // Refusing the absence is the fix.
+    let strict = FnEndpoint::new("greet", |inv: &Invocation<'_>| {
+        Ok(text(format!("hello, {}", inv.inline_str("name")?)))
+    })
+    .with_description(
+        Description::new("greet")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("name").class(XSD_STRING))
+            .output("text/plain"),
+    );
+    let report = report_of(EndpointSpace::new().bind(Exact::new("urn:example:greet"), strict));
+    assert!(report.is_clean(), "{report}");
+}
+
+#[test]
+fn required_reports_an_untyped_refusal_of_a_missing_input() {
+    let untyped = FnEndpoint::new("greet", |inv: &Invocation<'_>| {
+        let name = inv
+            .inline_str("name")
+            .map_err(|_| Error::Endpoint("greet: no name given".into()))?;
+        Ok(text(format!("hello, {name}")))
+    })
+    .with_description(
+        Description::new("greet")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("name").class(XSD_STRING))
+            .output("text/plain"),
+    );
+    let report = report_of(EndpointSpace::new().bind(Exact::new("urn:example:greet"), untyped));
+    assert_caught(&report, Check::Required, "not as a typed `MissingArgument`");
+    assert_caught(&report, Check::Required, "greet: no name given");
+}
+
+#[test]
+fn required_does_not_report_a_default_twice_or_an_alternative_intake_left_unsent() {
+    // A default beside `required` is ARGSPECS's finding; the call succeeds on the
+    // default by design, so REQUIRED stays out of it. (`default_value` makes an
+    // input optional, so the contradiction has to be written out by hand.)
+    let mut name = ArgSpec::new("name")
+        .class(XSD_STRING)
+        .default_value("friend");
+    name.required = true;
+    let defaulted = FnEndpoint::new("greet", |inv: &Invocation<'_>| {
+        Ok(text(format!(
+            "hello, {}",
+            inv.inline_str("name").unwrap_or("friend")
+        )))
+    })
+    .with_description(
+        Description::new("greet")
+            .verb(Verb::Source)
+            .input(name)
+            .output("text/plain"),
+    );
+    let report = report_of(EndpointSpace::new().bind(Exact::new("urn:example:greet"), defaulted));
+    assert_caught(
+        &report,
+        Check::ArgSpecs,
+        "has a default but is marked required",
+    );
+    assert!(report.of(Check::Required).next().is_none(), "{report}");
+
+    // `in` required, `content` an optional alternative (ikigai-encrypt's shape):
+    // dropping `in` from the minimal call sends no `content` either, so the call is
+    // refused and the declaration holds, as it does for the engine's routing.
+    let either = FnEndpoint::new("seal", |inv: &Invocation<'_>| {
+        let body = inv
+            .inline_str("in")
+            .or_else(|_| inv.inline_str("content"))?;
+        Ok(text(body.to_uppercase()))
+    })
+    .with_description(
+        Description::new("seal")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("in").class(XSD_STRING))
+            .input(ArgSpec::new("content").class(XSD_STRING).optional())
+            .output("text/plain"),
+    );
+    let report = report_of(EndpointSpace::new().bind(Exact::new("urn:example:seal"), either));
+    assert!(report.is_clean(), "{report}");
+}
+
+/// A `Sink` declaring `content` and `title` required that defaults `title`, and
+/// counts its firings.
+fn note_write(fired: Arc<AtomicUsize>) -> FnEndpoint {
+    FnEndpoint::new("note-write", move |inv: &Invocation<'_>| {
+        fired.fetch_add(1, Ordering::SeqCst);
+        let body = inv.inline_str("content")?;
+        let title = inv.inline_str("title").unwrap_or("untitled");
+        Ok(text(format!("{title}: {body}")))
+    })
+    .with_description(
+        Description::new("note-write")
+            .verb(Verb::Sink)
+            .requires("urn:cap:notes:write")
+            .input(ArgSpec::new("content").class(XSD_STRING))
+            .input(ArgSpec::new("title").class(XSD_STRING))
+            .output("text/plain"),
+    )
+}
+
+#[test]
+fn required_fires_a_mutating_action_only_when_the_module_says_so() {
+    // Default: a Sink is held to nothing here, and fired exactly once (the
+    // pipeline probe; ENFORCED is refused by the kernel before the endpoint runs).
+    let fired = Arc::new(AtomicUsize::new(0));
+    let space = EndpointSpace::new().bind(
+        Exact::new("urn:example:note-write"),
+        note_write(fired.clone()),
+    );
+    let report = report_of(space);
+    assert!(report.of(Check::Required).next().is_none(), "{report}");
+    assert_eq!(fired.load(Ordering::SeqCst), 1, "{report}");
+
+    // Opted in: measured against the pipeline probe's firing, then one firing per
+    // required input. `title` is caught; `content` is refused, typed.
+    let fired = Arc::new(AtomicUsize::new(0));
+    let space = EndpointSpace::new().bind(
+        Exact::new("urn:example:note-write"),
+        note_write(fired.clone()),
+    );
+    let report = Suite::new()
+        .required_on_mutating()
+        .run_blocking(&kernel(space));
+    let found = only(&report, Check::Required);
+    assert_eq!(found.len(), 1, "{report}");
+    assert!(found[0].contains("declares `title` required"), "{report}");
+    assert_eq!(fired.load(Ordering::SeqCst), 3, "{report}");
+    assert!(
+        report
+            .to_string()
+            .contains("declared: REQUIRED fires `Sink` and `Delete` actions too"),
+        "{report}"
+    );
+}
+
+#[test]
+fn required_lists_an_action_whose_call_did_not_resolve_as_unprobed() {
+    // Needs a JSON document; the suite's `x` is not one, and no fixture says so.
+    let needs_json = FnEndpoint::new("json-keys", |inv: &Invocation<'_>| {
+        let raw = inv.inline_str("content")?;
+        if !raw.starts_with('{') {
+            return Err(Error::InvalidArgument {
+                name: "content".into(),
+                detail: "not a JSON object".into(),
+            });
+        }
+        Ok(text("keys"))
+    })
+    .with_description(
+        Description::new("json-keys")
+            .verb(Verb::Source)
+            .input(ArgSpec::new("content").class(XSD_STRING))
+            .output("text/plain"),
+    );
+    let report =
+        report_of(EndpointSpace::new().bind(Exact::new("urn:example:json-keys"), needs_json));
+    assert!(report.of(Check::Required).next().is_none(), "{report}");
+    assert!(
+        report.to_string().contains(
+            "unprobed: json-keys source REQUIRED: the call each required input is dropped from \
+             did not resolve"
+        ),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_required_declaration_that_reached_nothing_is_reported() {
+    // Nothing mutating declares a required input: the opt-in reached nothing.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), conforming());
+    let report = Suite::new()
+        .pure("upper")
+        .required_on_mutating()
+        .run_blocking(&kernel(space));
+    assert_caught(
+        &report,
+        Check::Declarations,
+        "`Suite::required_on_mutating` reached nothing",
+    );
+
+    // A waiver of REQUIRED for an endpoint with no required input waives nothing.
+    let optional_only = FnEndpoint::new("stats", |_inv: &Invocation<'_>| Ok(text("0")))
+        .with_description(
+            Description::new("stats")
+                .verb(Verb::Source)
+                .input(ArgSpec::new("since").class(XSD_STRING).optional())
+                .output("text/plain"),
+        );
+    let report = Suite::new()
+        .opt_out_check("stats", Check::Required, "defaults its window")
+        .run_blocking(&kernel(
+            EndpointSpace::new().bind(Exact::new("urn:example:stats"), optional_only),
+        ));
+    assert_caught(
+        &report,
+        Check::Declarations,
+        "no action of it REQUIRED probes declares a required by-value input",
+    );
 }
