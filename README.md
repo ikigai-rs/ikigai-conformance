@@ -726,8 +726,56 @@ anyone memoizes by id.
 
 ## Status
 
-0.7.2. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.8.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.7.2 → 0.8.0: `REQUIRED`, `Suite::own`, `Checks::STATIC` (ledger #329, #328, #348, #343, #340)
+
+**What is new.**
+
+- **A fourteenth check, `REQUIRED`** (ledger #329). Each input an action declares
+  required, by value and with no default, is dropped from the call the walk resolved,
+  and the call must then be refused, typed. A call that succeeds without the input is
+  a finding. `Source` and `Exists` by default; `Sink` and `Delete` under
+  `Suite::required_on_mutating()`.
+- **`Suite::own(id | "prefix*")`** (ledger #328). It scopes the walk to the module's
+  own endpoints. The rest are inherited, listed in `Declarations::inherited`, and not
+  walked.
+- **`Checks::STATIC` / `Checks::INVOKING`** (ledger #348). `STATIC` is the static-only
+  first run, which resolves nothing. See
+  [Before the first run](#before-the-first-run-a-walk-runs-what-your-endpoints-run).
+- **`oa:` and Dublin Core Elements 1.1 are well known** (ledger #343).
+- **A fixture argument naming no declared input is a `DECLARATIONS` finding** (ledger
+  #340); `as` is exempt.
+
+**Will it turn a green suite red?** It can. That is why this is a minor bump.
+
+- `REQUIRED` reports every action that declares an input required and succeeds
+  without it. Five adopters shipped exactly that before writing the check by hand, and
+  this crate's own test suite had one (a test double that ignored its required
+  `content`). An endpoint that refuses a missing input untyped (`Error::Endpoint`) is a
+  finding too. No adopter was surveyed before this release; expect findings on the
+  upgrade.
+- A fixture whose arguments name an input its action does not declare is now a
+  `DECLARATIONS` finding.
+- The well-known namespaces only remove findings. A `Suite::namespace` registered for
+  `oa:` or `dc:` now accounts for no term, so `DECLARATIONS` reports it as inert:
+  drop the registration.
+
+**Source changes for a consumer:**
+
+- `Check::ALL` is `[Check; 14]`, and `Check::Required` sits after `Check::Pipeline`
+  in report order. So the discriminants of `Names`, `Validate`, `SpaceName` and
+  `Declarations` move up by one. `Check` is `#[non_exhaustive]`; nothing here
+  exposes the discriminant.
+- `Declarations` gains three public fields: `required_on_mutating`, `own` and
+  `inherited`. A struct literal of it needs them, or `..Default::default()`.
+- `Check::invokes` is now a `const fn`.
+
+⚠ **Most adopters pin `"0.6.x"`**: 42 of the 44 adopter manifests counted at this
+release, and two more pin `"0.2.0"`. Under Cargo's 0.x caret rules `"0.6.0"` means
+`<0.7.0`, a ceiling below 0.7 and this release. They stay green against the older definition of
+"done" until they move.
 
 ### 0.7.1 → 0.7.2: the report escapes the endpoint id (ledger #1392)
 
