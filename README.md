@@ -28,6 +28,8 @@ probed 3 face(s) across 3 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
 probed: ik-context source `application/ld+json`: 0 triple(s) — nothing was checked
 probed: tag-suggest source `text/plain`: 96 byte(s)
+required: dropped 1 input(s) across 1 endpoint(s)
+required: sparql-construct source without `query`: refused missing-argument
 declared live: link-remove
 fixture: sparql-construct source query="CONSTRUCT WHERE { ?s ?p ?o }"
 unprobed: link-remove delete OUTPUTS: never fired under root: a mutating action is fired only by the pipeline probe (PIPELINE, on an action declaring `content`), so what it serves was not observed
@@ -37,7 +39,9 @@ The `probed:` lines are the positive half: a clean report would otherwise be
 indistinguishable from a never-probed one — an endpoint whose face is undeclared,
 unreachable or opted out produces no line and no finding, exactly like one whose
 face is perfect. The triple count says whether the pass meant anything, and a
-walk that resolved nothing says so rather than printing no section at all.
+walk that resolved nothing says so rather than printing no section at all. The
+`required:` lines do the same for `REQUIRED`: each input it dropped and the refusal
+that came back, or one line saying it had nothing to drop and why.
 
 The last finding is the same idea turned on the module's own declarations: a
 `live` on a `Delete` reached no check, changed nothing, and was printed in a clean
@@ -282,7 +286,10 @@ fixtures included (`fixture: file source path="README.md"`). The `x` is what
 PIPELINE pipes into a `content` with no fixture, so a Sink whose `content` has
 a grammar (TOML, JSON, a log segment) refuses it; when a failed resolution was
 sent that generic sample, the finding says so and names the fix,
-`Fixture::new(id, verb).arg("content", …)`:
+`Fixture::new(id, verb).arg("content", …)`. An input that is not text (a gzip
+stream, an image) takes `arg_bytes`, which sends the bytes exactly as given; the
+report prints a value that is not UTF-8 as its first 16 bytes in hex and its length
+(`fixture: gunzip source content=0x1f8b0800000000000003030000000000… (20 bytes)`):
 
 ```rust
 use ikigai_conformance::{Check, Fixture, Suite};
@@ -291,6 +298,7 @@ use ikigai_core::Verb;
 Suite::new()
     .fixture(Fixture::new("jsonld-expand", Verb::Source).arg("content", "{}"))
     .fixture(Fixture::new("file", Verb::Source).binding("path", "README.md"))
+    .fixture(Fixture::new("gunzip", Verb::Source).arg_bytes("content", EMPTY_GZIP))
     .opt_out("email-send", Some(Verb::Sink), "sends real mail")
     .opt_out_at("urn:orgfile:{path}", None, "jailed to a configured dir")
     .opt_out_check("review", Check::Vocabulary, "ik:quote lands in vocab 0.1.70")
@@ -329,7 +337,12 @@ that on its most security-relevant endpoint, for a release cycle, because four
 check, reason)` waives one rule for one endpoint, reason printed, and reaches the
 description-only checks (`NAMES`, `ARGSPECS`) nothing else can silence per id.
 Identical `(check, reason)` waivers print on one line listing their ids, and the
-`checked:` line stars a check that ran on only some endpoints.
+`checked:` line stars a check that ran on only some endpoints. The waived check still
+runs, with its findings set aside, so a waiver that suppressed nothing is a `note:`
+line beside it (a note, never a finding): the upstream fix it waited for has landed,
+and the waiver can go. Setting a check aside fires what the check fires on a read,
+and never a `Sink` or `Delete` the walk would not otherwise fire; a waiver it could
+judge only that way gets no note.
 
 **A `Description::id` is a name for a KIND of endpoint, not for a place one can be
 reached** — so `opt_out` excludes an id at *every* pattern it is bound at, and that
@@ -519,7 +532,9 @@ probed 7 face(s) across 5 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
 probed: ik-context source `application/ld+json`: 0 triple(s) — nothing was checked
 probed: wc source `text/plain`: 3 byte(s)
+required: nothing dropped — no `Source` or `Exists` action declares a required by-value input without a default; a `Sink` or `Delete` does, and REQUIRED fires those only under `Suite::required_on_mutating`
 opted out: a-face b-face c-face VOCABULARY: ik:madeUp lands in the next vocabulary release
+note: the waiver of VOCABULARY for c-face suppressed nothing — the check ran with it set aside and found nothing; drop it if its reason has passed (ik:madeUp lands in the next vocabulary release)
 unprobed: notes-delete delete OUTPUTS: never fired under root
 ```
 
@@ -530,7 +545,17 @@ unprobed: notes-delete delete OUTPUTS: never fired under root
   something. A walk that resolved nothing at all says so on one line rather than
   printing no section: a module with no graph face used to be indistinguishable
   from a walk that reached nothing.
+- **`required:`** — every input `REQUIRED` dropped and the refusal kind it got
+  (`refused missing-argument`; `resolved — declared required, actually optional` is
+  the finding), or ONE line saying it dropped nothing, and why: no required by-value
+  input on `Source`/`Exists`, `Sink`/`Delete` not walked without
+  `Suite::required_on_mutating`, every candidate opted out or unprobed. Five
+  adopters had to break their own code to learn whether a green `REQUIRED` had
+  bitten. As data: `Report::required_probes()` and `Report::required_nothing()`.
 - **`unprobed:`** — the actions a check could not observe, with the reason.
+- **`note:`** — an `opt_out_check` that suppressed nothing: the waived check ran
+  with its findings set aside and found none (`Report::idle_waivers()`). A note,
+  never a finding, so a waiver that is green today on purpose costs nothing.
 - **`collapsed:`** — bindings that would have issued the identical request, fired
   once, named so the smaller action count is an explanation rather than a mystery.
   Nothing was skipped: the second binding was the first one again.
@@ -726,8 +751,55 @@ anyone memoizes by id.
 
 ## Status
 
-0.8.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.8.1. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.8.0 → 0.8.1: `REQUIRED` shows its evidence, bytes fixtures, idle waivers (ledger #1493)
+
+From the 0.8 adoption wave: five adopters found that a clean `REQUIRED` read the same
+whether it dropped twelve inputs or none, one had to hand-write `REQUIRED` for
+endpoints whose input is binary, and one pinned a waiver with an exact-findings test
+because nothing said when it went stale.
+
+**What is new.**
+
+- **`required:` lines.** One per input `REQUIRED` dropped, with the refusal kind
+  (`Error::kind`: `missing-argument`, `invalid-argument`, or the untyped kind it
+  reports), or one `required: nothing dropped — …` line naming why: no required
+  by-value input on `Source`/`Exists`, `Sink`/`Delete` not walked, every candidate
+  opted out or unprobed. As data: `Report::required_probes()` (`RequiredProbe`) and
+  `Report::required_nothing()`.
+- **`Fixture::arg_bytes(name, bytes)`.** A by-value argument as bytes, sent as given,
+  so a decompressor or a sniffer can be fixtured and walked by every invoking check.
+  A value that is not UTF-8 prints as hex and a length.
+- **`note:` lines for an idle waiver.** An `opt_out_check` whose check, run with its
+  findings set aside, found nothing is named beside its reason, and listed by
+  `Report::idle_waivers()`. A note, never a finding.
+
+**Will it turn a green suite red?** No. Nothing new is a finding: the `required:` and
+`note:` lines are information, and every existing finding is reported exactly as
+before (the description-only checks and `DECLARATIONS` now run waived and are set
+aside, which leaves the findings list identical).
+
+**What a waiver now costs.** A waived check still runs, after the walk proper is
+done with the action, so a module with waivers sees the walk fire what the check
+fires UNWAIVED on a read: a waived `REQUIRED` fires its drops, a waived `CACHEABLE`
+its second resolution, a waived `ENFORCED` its no-grants read when `AUTHORITY` did not
+already make it. It never fires a `Sink` or a `Delete` the walk would not otherwise
+fire: a waiver that could be judged only that way (a `PIPELINE` waiver on a `Sink`,
+say) is left unjudged and gets no note. A `SPACE-NAME` waiver is never judged. If a
+read is one a test must not repeat, that endpoint wants `opt_out`, which still fires
+nothing.
+
+**Source changes for a consumer:**
+
+- `Declarations` gains one public field, `evidence` (`Evidence`, `#[non_exhaustive]`,
+  so the next piece of evidence is a field there and not here). A struct literal of
+  `Declarations` needs it, or `..Default::default()`. No adopter builds one; the
+  report is read, not written. Read the evidence through the `Report` methods.
+- New public types `Evidence` and `RequiredProbe`, both `#[non_exhaustive]`.
+
+Adopters pinned at `"0.8.0"` get 0.8.1 at their next lock update with no pin move.
 
 ### 0.7.2 → 0.8.0: `REQUIRED`, `Suite::own`, `Checks::STATIC` (ledger #329, #328, #348, #343, #340)
 

@@ -205,6 +205,88 @@ pub struct Unprobed {
     pub reason: String,
 }
 
+/// One input [`Check::Required`] dropped, and what the call without it got: the
+/// evidence a clean `REQUIRED` stands on, printed as a `required:` line.
+///
+/// Without these a clean report read the same whether `REQUIRED` dropped twelve
+/// inputs or none (ledger #1493): five adopters had to break their own code to learn
+/// whether the check had bitten.
+///
+/// ```
+/// use ikigai_conformance::{Check, Suite};
+/// use ikigai_core::{
+///     ArgSpec, Description, EndpointSpace, Exact, FnEndpoint, Invocation, Kernel, ReprType,
+///     Representation, Verb,
+/// };
+/// use std::sync::Arc;
+///
+/// const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+/// let greet = FnEndpoint::new("greet", |inv: &Invocation<'_>| {
+///     let name = inv.inline_str("name")?; // a typed MissingArgument when absent
+///     Ok(Representation::new(ReprType::new("text/plain"), format!("hello {name}")))
+/// })
+/// .with_description(
+///     Description::new("greet")
+///         .verb(Verb::Source)
+///         .input(ArgSpec::new("name").class(XSD_STRING))
+///         .output("text/plain"),
+/// );
+/// let root = EndpointSpace::new().bind(Exact::new("urn:example:greet"), greet);
+/// let report = Suite::new().run_blocking(&Kernel::new(Arc::new(root)));
+///
+/// let probe = &report.required_probes()[0];
+/// assert_eq!((probe.endpoint.as_str(), probe.input.as_str()), ("greet", "name"));
+/// assert_eq!(probe.refusal.as_deref(), Some("missing-argument"));
+/// assert!(
+///     report.to_string().contains("required: greet source without `name`: refused missing-argument\n"),
+///     "{report}"
+/// );
+/// assert_eq!(report.of(Check::Required).count(), 0);
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RequiredProbe {
+    /// The endpoint's description id.
+    pub endpoint: String,
+    /// The action's verb.
+    pub verb: Verb,
+    /// The required input left out of the call.
+    pub input: String,
+    /// The kind of refusal the call without it got, as
+    /// [`Error::kind`](ikigai_core::Error::kind) names it (`missing-argument`,
+    /// `invalid-argument`, the two the check expects, or `endpoint`, `timeout`, …),
+    /// or `None` when it RESOLVED: declared required, actually optional, which is a
+    /// finding.
+    pub refusal: Option<String>,
+}
+
+/// What the walk observed beyond findings and faces: `REQUIRED`'s evidence and the
+/// waivers that suppressed nothing. Filled in by the walk, like
+/// [`Declarations::inherited`]; read it through [`Report::required_probes`],
+/// [`Report::required_nothing`] and [`Report::idle_waivers`].
+///
+/// It lives on [`Declarations`] because `Report` is the `Err` of
+/// [`check`](crate::check), travels by value, and sits at clippy's 128-byte
+/// large-error bar; and it is one `#[non_exhaustive]` struct so the next piece of
+/// evidence is a field here rather than another field on `Declarations`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Evidence {
+    /// Every input [`Check::Required`] dropped, in walk order (`required:` lines).
+    pub required: Vec<RequiredProbe>,
+    /// Why `REQUIRED` dropped nothing at all, when it is selected and did not: no
+    /// required by-value input on the verbs it walks, mutating verbs off, every
+    /// candidate opted out or unprobed. `None` when it dropped something, or is not
+    /// selected. A clean `REQUIRED` with this set is a statement about declarations
+    /// only.
+    pub required_nothing: Option<String>,
+    /// The [`Suite::opt_out_check`](crate::Suite::opt_out_check) waivers that
+    /// suppressed nothing: the waived check ran with the waiver set aside, over every
+    /// action and description it covers, and found nothing (`note:` lines). A NOTE,
+    /// never a finding.
+    pub idle_waivers: Vec<OptedOutCheck>,
+}
+
 /// What one run of the suite found.
 ///
 /// A `Report` is the `Err` of [`check`](crate::check) so a `#[test]` can `unwrap()`
@@ -325,6 +407,10 @@ pub struct Declarations {
     /// The spaces the module declared to [`Check::SpaceName`], in declaration order,
     /// each with what checking it compared (`space: …`).
     pub spaces: Vec<DeclaredSpace>,
+    /// What the walk observed beyond findings: `REQUIRED`'s evidence and the waivers
+    /// that suppressed nothing (0.8.1). Filled in by the walk, as
+    /// [`inherited`](Self::inherited) is, and here for the same size reason.
+    pub evidence: Evidence,
 }
 
 impl Report {
@@ -376,6 +462,61 @@ impl Report {
             Ok(self)
         } else {
             Err(self)
+        }
+    }
+
+    /// Every input [`Check::Required`] dropped, and the refusal each drop got, in
+    /// walk order: the evidence behind a clean `REQUIRED` (the `required:` lines).
+    /// Empty when it dropped nothing; [`required_nothing`](Self::required_nothing)
+    /// then says why.
+    pub fn required_probes(&self) -> &[RequiredProbe] {
+        &self.declared.evidence.required
+    }
+
+    /// Why [`Check::Required`] dropped nothing, when it is selected and did not
+    /// (`required: nothing dropped — …`): a clean `REQUIRED` that is a statement
+    /// about declarations only. `None` when it dropped at least one input, or is
+    /// not selected.
+    ///
+    /// ```
+    /// use ikigai_conformance::Suite;
+    /// use ikigai_core::builtins;
+    /// use ikigai_core::{EndpointSpace, Kernel, UriTemplate};
+    /// use std::sync::Arc;
+    ///
+    /// // `echo` takes its one input as a template binding: nothing by value to drop.
+    /// let echo = UriTemplate::parse("urn:example:echo/{message}").unwrap();
+    /// let root = EndpointSpace::new().bind(echo, builtins::echo());
+    /// let report = Suite::new().run_blocking(&Kernel::new(Arc::new(root)));
+    /// assert!(report.required_probes().is_empty());
+    /// let why = report.required_nothing().unwrap();
+    /// assert!(why.contains("no `Source` or `Exists` action declares a required by-value input"), "{why}");
+    /// ```
+    pub fn required_nothing(&self) -> Option<&str> {
+        self.declared.evidence.required_nothing.as_deref()
+    }
+
+    /// The [`Suite::opt_out_check`](crate::Suite::opt_out_check) waivers that
+    /// suppressed nothing: the waived check ran with the waiver set aside and found
+    /// nothing (`note:` lines). Information, never a finding: a waiver can be green
+    /// today on purpose. A waiver the walk could not judge without firing a `Sink` or
+    /// a `Delete` it would not otherwise fire is never listed here.
+    pub fn idle_waivers(&self) -> &[OptedOutCheck] {
+        &self.declared.evidence.idle_waivers
+    }
+
+    /// An empty report over `checks`, for a probe whose findings are set aside.
+    pub(crate) fn scratch(checks: Checks) -> Report {
+        Report {
+            findings: Vec::new(),
+            endpoints: 0,
+            actions: 0,
+            checks,
+            declared: Box::default(),
+            unprobed: Box::default(),
+            probed: Vec::new(),
+            walked: Box::default(),
+            collapsed: Box::default(),
         }
     }
 }
@@ -506,6 +647,40 @@ impl fmt::Display for Report {
                 writeln!(f)?;
             }
         }
+        // What REQUIRED dropped, as `probed:` says what was resolved: a clean
+        // REQUIRED otherwise read the same over twelve drops and over none.
+        if self.checks.contains(Check::Required) {
+            let evidence = &declared.evidence;
+            if !evidence.required.is_empty() {
+                let endpoints: std::collections::BTreeSet<&str> = evidence
+                    .required
+                    .iter()
+                    .map(|p| p.endpoint.as_str())
+                    .collect();
+                writeln!(
+                    f,
+                    "required: dropped {} input(s) across {} endpoint(s)",
+                    evidence.required.len(),
+                    endpoints.len()
+                )?;
+            }
+            for p in &evidence.required {
+                write!(
+                    f,
+                    "required: {} {} without `{}`: ",
+                    visible(&p.endpoint),
+                    verb_name(p.verb),
+                    visible(&p.input)
+                )?;
+                match &p.refusal {
+                    Some(kind) => writeln!(f, "refused {kind}")?,
+                    None => writeln!(f, "resolved — declared required, actually optional")?,
+                }
+            }
+            if let Some(why) = &evidence.required_nothing {
+                writeln!(f, "required: nothing dropped — {why}")?;
+            }
+        }
         for out in &declared.opted_out {
             match out.verb {
                 Some(verb) => writeln!(
@@ -547,6 +722,17 @@ impl fmt::Display for Report {
         }
         for ((check, reason), ids) in groups {
             writeln!(f, "opted out: {} {}: {reason}", joined(&ids), check.label())?;
+        }
+        // A waiver that suppressed nothing: a note beside the waiver, never a finding.
+        for idle in &declared.evidence.idle_waivers {
+            writeln!(
+                f,
+                "note: the waiver of {} for {} suppressed nothing — the check ran with it set \
+                 aside and found nothing; drop it if its reason has passed ({})",
+                idle.check.label(),
+                visible(&idle.endpoint),
+                idle.reason
+            )?;
         }
         if !declared.own.is_empty() {
             writeln!(
@@ -750,6 +936,20 @@ mod tests {
                 namespaces: vec![],
                 fixtures: vec![Fixture::new(id, Verb::Source)],
                 spaces: vec![],
+                evidence: Evidence {
+                    required: vec![RequiredProbe {
+                        endpoint: id.into(),
+                        verb: Verb::Source,
+                        input: "in".into(),
+                        refusal: None,
+                    }],
+                    required_nothing: None,
+                    idle_waivers: vec![OptedOutCheck {
+                        endpoint: id.into(),
+                        check: Check::Names,
+                        reason: "an idle one".into(),
+                    }],
+                },
             }),
             unprobed: Box::new(vec![Unprobed {
                 endpoint: id.into(),
@@ -788,6 +988,8 @@ mod tests {
             format!("unprobed: {shown} delete OUTPUTS: never fired\n"),
             format!("own: {shown} (1 endpoint(s) walked)\n"),
             format!("inherited: {shown} — bound beside the module"),
+            format!("required: {shown} source without `in`: resolved"),
+            format!("note: the waiver of NAMES for {shown} suppressed nothing"),
         ] {
             assert!(text.contains(&expected), "missing {expected:?}:\n{text}");
         }
@@ -849,6 +1051,28 @@ mod tests {
                         opaque: 0,
                     },
                 ],
+                evidence: Evidence {
+                    required: vec![
+                        RequiredProbe {
+                            endpoint: "cms-graph".into(),
+                            verb: Verb::Source,
+                            input: "in".into(),
+                            refusal: Some("missing-argument".into()),
+                        },
+                        RequiredProbe {
+                            endpoint: "to-upper".into(),
+                            verb: Verb::Source,
+                            input: "in".into(),
+                            refusal: None,
+                        },
+                    ],
+                    required_nothing: None,
+                    idle_waivers: vec![OptedOutCheck {
+                        endpoint: "to-upper".into(),
+                        check: Check::Required,
+                        reason: "sign types its refusals in 0.4".into(),
+                    }],
+                },
             }),
             unprobed: Box::new(vec![Unprobed {
                 endpoint: "notes-delete".into(),
@@ -934,6 +1158,33 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("space: space(root) host-named\n"), "{text}");
+        assert!(
+            text.contains("required: dropped 2 input(s) across 2 endpoint(s)\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("required: cms-graph source without `in`: refused missing-argument\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "required: to-upper source without `in`: resolved — declared required, \
+                 actually optional\n"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("required: nothing dropped"), "{text}");
+        assert!(
+            text.contains(
+                "note: the waiver of REQUIRED for to-upper suppressed nothing — the check ran \
+                 with it set aside and found nothing; drop it if its reason has passed (sign \
+                 types its refusals in 0.4)\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(report.required_probes().len(), 2);
+        assert_eq!(report.idle_waivers().len(), 1);
+        assert_eq!(report.required_nothing(), None);
         assert!(!text.contains("space: none declared"), "{text}");
         assert!(report.is_clean());
         assert!(report.into_result().is_ok());

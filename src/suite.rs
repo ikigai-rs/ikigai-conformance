@@ -14,8 +14,8 @@ use ikigai_core::{
 use crate::checks::{Check, Checks};
 use crate::rdf;
 use crate::report::{
-    Collapsed, Declarations, DeclaredSpace, Finding, OptedOut, OptedOutAt, OptedOutCheck, Probed,
-    Report, SpaceNaming, Unprobed,
+    Collapsed, Declarations, DeclaredSpace, Evidence, Finding, OptedOut, OptedOutAt, OptedOutCheck,
+    Probed, Report, RequiredProbe, SpaceNaming, Unprobed,
 };
 
 /// The kernel's own operations are listed by [`Kernel::entries`] ahead of the root
@@ -38,6 +38,14 @@ const PLACEHOLDER_IRI: &str = "urn:example:conformance";
 
 /// The longest fixture value a report line prints before cutting it and saying so.
 const SHOWN: usize = 48;
+
+/// How many leading bytes a report line shows of a fixture value that is not UTF-8.
+const SHOWN_BYTES: usize = 16;
+
+/// The by-value arguments of one request, by name. Bytes, because that is what the
+/// wire carries (`ArgRef::Inline`): a gzip stream or a PNG is a fixture value too
+/// ([`Fixture::arg_bytes`]).
+type Args = BTreeMap<String, Vec<u8>>;
 
 /// The endpoint field of a finding about the suite itself rather than an endpoint —
 /// a registered namespace has no id. Matches `(kernel)`, used for a root space that
@@ -66,7 +74,7 @@ const SUITE: &str = "(suite)";
 pub struct Fixture {
     id: String,
     verb: Verb,
-    args: BTreeMap<String, String>,
+    args: Args,
     bindings: BTreeMap<String, String>,
     capability: Option<Capability>,
 }
@@ -93,6 +101,39 @@ impl Fixture {
     /// value and the walk tested something other than what the fixture says. A
     /// template variable is a [`binding`](Fixture::binding), never an argument.
     pub fn arg(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.args.insert(name.into(), value.into().into_bytes());
+        self
+    }
+
+    /// Supply (or override) one by-value argument as BYTES, for an endpoint whose
+    /// input is not text: a decompressor's gzip stream, an image a sniffer reads.
+    /// Everything [`arg`](Fixture::arg) says holds; the value reaches the endpoint
+    /// byte for byte (`ArgRef::Inline`), exactly as `arg`'s UTF-8 does.
+    ///
+    /// Before 0.8.1 a fixture value had to be a `String`, so an endpoint that reads
+    /// binary input could not be given one it accepts: every invoking check reported
+    /// its refusal of the suite's text sample, and the module opted it out of all of
+    /// them (`REQUIRED` included) and wrote them by hand (ledger #1493).
+    ///
+    /// The report prints a value that is not UTF-8 as its first 16 bytes in hex and
+    /// its length; one that is UTF-8 prints exactly as `arg`'s would.
+    ///
+    /// ```
+    /// use ikigai_conformance::Fixture;
+    /// use ikigai_core::Verb;
+    ///
+    /// // The 20-byte gzip of an empty input.
+    /// let empty_gzip: &[u8] = &[
+    ///     0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x03, 0x00, 0x00, 0x00,
+    ///     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    /// ];
+    /// let f = Fixture::new("gunzip", Verb::Source).arg_bytes("content", empty_gzip);
+    /// assert_eq!(f.to_string(), "gunzip source content=0x1f8b0800000000000003030000000000… (20 bytes)");
+    /// // UTF-8 bytes read exactly as `arg` would print them.
+    /// let g = Fixture::new("upper", Verb::Source).arg_bytes("in", b"abc".to_vec());
+    /// assert_eq!(g, Fixture::new("upper", Verb::Source).arg("in", "abc"));
+    /// ```
+    pub fn arg_bytes(mut self, name: impl Into<String>, value: impl Into<Vec<u8>>) -> Self {
         self.args.insert(name.into(), value.into());
         self
     }
@@ -213,7 +254,7 @@ impl fmt::Display for Fixture {
             write!(f, " {var}={}", shown(value))?;
         }
         for (name, value) in &self.args {
-            write!(f, " {name}={}", shown(value))?;
+            write!(f, " {name}={}", shown_bytes(value))?;
         }
         if let Some(cap) = &self.capability {
             match cap.scopes() {
@@ -255,6 +296,21 @@ fn shown_bare(value: &str) -> String {
     }
     let cut: String = escaped.chars().take(SHOWN).collect();
     format!("{cut}… ({len} chars)")
+}
+
+/// A by-value fixture argument as one printable token: as [`shown`] when it is
+/// UTF-8, else its leading bytes in hex with its length.
+fn shown_bytes(value: &[u8]) -> String {
+    if let Ok(text) = std::str::from_utf8(value) {
+        return shown(text);
+    }
+    let hex: String = value
+        .iter()
+        .take(SHOWN_BYTES)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let more = if value.len() > SHOWN_BYTES { "…" } else { "" };
+    format!("0x{hex}{more} ({} bytes)", value.len())
 }
 
 /// A fixture value as one printable token: escaped, and cut when long.
@@ -312,7 +368,7 @@ struct OptOutAt {
 struct Firing {
     target: String,
     verb: &'static str,
-    args: BTreeMap<String, String>,
+    args: Args,
 }
 
 /// One firing the walk considered, and every binding that would have issued it.
@@ -322,6 +378,48 @@ struct Fired {
     verb: Verb,
     target: String,
     patterns: Vec<String>,
+}
+
+/// What each [`Suite::opt_out_check`] waiver would have let through, counted as the
+/// walk goes: findings a waived check produced and the walk set aside, and the
+/// waivers no set-aside run could judge.
+#[derive(Debug, Default)]
+struct Tally {
+    /// Findings set aside, per waived `(id, check)`.
+    suppressed: BTreeMap<(String, Check), usize>,
+    /// The invoking `(id, check)` pairs at least one set-aside run judged.
+    judged: BTreeSet<(String, Check)>,
+    /// The pairs some set-aside run could not judge: it needed a `Sink` or `Delete`
+    /// firing, or could not observe the action.
+    unjudged: BTreeSet<(String, Check)>,
+}
+
+impl Tally {
+    /// Record what one waived run saw: `Some(n)` findings, or `None` when it could
+    /// not tell.
+    fn record(&mut self, id: &str, check: Check, seen: Option<usize>) {
+        let key = (id.to_string(), check);
+        match seen {
+            Some(n) => {
+                *self.suppressed.entry(key.clone()).or_default() += n;
+                self.judged.insert(key);
+            }
+            None => {
+                self.unjudged.insert(key);
+            }
+        }
+    }
+
+    /// Whether the waiver of `check` for `id` was judged and suppressed nothing. An
+    /// invoking check needs a set-aside run to have judged it; a description-only
+    /// one ran wherever the walk reached the id.
+    fn idle(&self, id: &str, check: Check) -> bool {
+        let key = (id.to_string(), check);
+        if self.unjudged.contains(&key) || self.suppressed.get(&key).is_some_and(|n| *n > 0) {
+            return false;
+        }
+        !check.invokes() || self.judged.contains(&key)
+    }
 }
 
 /// What the walk actually covered, recorded as it goes — the evidence
@@ -706,6 +804,20 @@ impl Suite {
     /// [`rdf::terms`](crate::rdf::terms) + [`rdf::is_defined`](crate::rdf::is_defined)
     /// reproduce `VOCABULARY` in a hand test, so the waiver can assert the undefined
     /// set is *exactly* the known list and go red in both directions.
+    ///
+    /// **A waiver that suppressed nothing is a `note:`** (0.8.1, ledger #1493). The
+    /// waived check still runs, with its findings set aside rather than reported, so
+    /// the report can say when it would have found nothing: `note: the waiver of
+    /// REQUIRED for sign suppressed nothing — …`, with the reason, and
+    /// [`Report::idle_waivers`](crate::Report::idle_waivers) as data. A note, never a
+    /// finding: a waiver can be green today on purpose (an upstream fix that comes
+    /// and goes). What the set-aside run costs is what the check costs unwaived, on a
+    /// READ: a description-only check reads the description, and an invoking one fires
+    /// the `Source` or `Exists` it would have fired, after the walk proper is done with
+    /// the action. It never fires a `Sink` or `Delete` the walk would not otherwise
+    /// fire: a waiver it could judge only that way is left unjudged and gets no note,
+    /// and so is a `SPACE-NAME` waiver. A waiver that could not have applied at all is
+    /// still a [`Check::Declarations`](crate::Check::Declarations) finding, as before.
     pub fn opt_out_check(
         mut self,
         id: impl Into<String>,
@@ -1042,6 +1154,7 @@ impl Suite {
                         opaque: 0,
                     })
                     .collect(),
+                evidence: Evidence::default(),
             }),
             unprobed: Box::default(),
             probed: Vec::new(),
@@ -1060,6 +1173,10 @@ impl Suite {
             // The spaces are the module's constructors, not the kernel: checkable
             // whatever the kernel lists.
             self.space_checks(&mut report);
+            if self.checks.contains(Check::Required) {
+                report.declared.evidence.required_nothing =
+                    Some("the root space is not enumerable, so nothing was walked".to_string());
+            }
             return report;
         };
 
@@ -1070,6 +1187,8 @@ impl Suite {
         // issues, with the index of its record so a repeat can name both bindings.
         let mut firings: BTreeMap<Firing, usize> = BTreeMap::new();
         let mut fired: Vec<Fired> = Vec::new();
+        // What every waiver would have suppressed, for the `note:` lines.
+        let mut tally = Tally::default();
         // What `Suite::own` scoped out, in walk order, and which patterns matched.
         let mut inherited: Vec<String> = Vec::new();
         let mut own_matched: BTreeSet<&str> = BTreeSet::new();
@@ -1101,7 +1220,8 @@ impl Suite {
                 }
             }
             let Some(description) = description else {
-                if self.runs(&entry.endpoint, Check::ArgSpecs) {
+                if self.checks.contains(Check::ArgSpecs) {
+                    let from = report.findings.len();
                     report.findings.push(Finding::new(
                         &entry.endpoint,
                         None,
@@ -1112,6 +1232,7 @@ impl Suite {
                             entry.pattern
                         ),
                     ));
+                    self.set_aside_waived(&mut report, from, &mut tally);
                 }
                 continue;
             };
@@ -1119,7 +1240,9 @@ impl Suite {
             if first_time {
                 report.endpoints += 1;
                 walk_order.push(description.id.clone());
+                let from = report.findings.len();
                 self.static_checks(&description, &mut report);
+                self.set_aside_waived(&mut report, from, &mut tally);
             }
             // What the walk covered, recorded from the DESCRIPTION rather than from
             // what was reached: a declaration is inert against the shape the module
@@ -1153,18 +1276,22 @@ impl Suite {
             }
             // Per entry, not per id: two patterns binding one endpoint are two
             // places it can be reached, each with its own template variables.
+            let from = report.findings.len();
             self.template_checks(&entry, &description, &mut report);
+            self.set_aside_waived(&mut report, from, &mut tally);
 
             let target = match self.target_for(&entry, &description) {
                 Ok(iri) => iri,
                 Err(detail) => {
-                    if self.runs(&description.id, Check::ArgSpecs) {
+                    if self.checks.contains(Check::ArgSpecs) {
+                        let from = report.findings.len();
                         report.findings.push(Finding::new(
                             &description.id,
                             None,
                             Check::ArgSpecs,
                             detail,
                         ));
+                        self.set_aside_waived(&mut report, from, &mut tally);
                     }
                     continue;
                 }
@@ -1235,6 +1362,8 @@ impl Suite {
                         .cloned()
                         .unwrap_or_else(Capability::root),
                     caller_used: false,
+                    shadow: None,
+                    shadow_blocked: false,
                 };
                 action.enforced(&mut report).await;
                 action.authority(&mut report).await;
@@ -1254,6 +1383,13 @@ impl Suite {
                 action.record_probe(&mut report);
                 if action.caller_used {
                     coverage.record_caller_used(&description.id, spec.verb);
+                }
+                // Last of all, once the walk proper is done with the action: every
+                // check WAIVED for it runs again with its findings set aside, so the
+                // report can say which waiver suppressed nothing (ledger #1493).
+                for check in self.waived_invoking(&description.id) {
+                    let seen = action.set_aside(check).await;
+                    tally.record(&description.id, check, seen);
                 }
             }
         }
@@ -1298,7 +1434,11 @@ impl Suite {
             .collect::<Vec<_>>()
             .into_boxed_slice();
         self.space_checks(&mut report);
+        let from = report.findings.len();
         self.declaration_checks(&coverage, &mut report);
+        self.set_aside_waived(&mut report, from, &mut tally);
+        report.declared.evidence.required_nothing = self.required_nothing(&coverage, &report);
+        report.declared.evidence.idle_waivers = self.idle_waivers(&coverage, &tally);
         report
     }
 
@@ -1901,8 +2041,11 @@ impl Suite {
 
     /// Record one inert-declaration finding, unless DECLARATIONS is itself
     /// unselected or waived for this id.
+    /// A waiver of DECLARATIONS for `id` is honored by the caller, which sets the
+    /// finding aside ([`Suite::set_aside_waived`]) and so can say when it suppressed
+    /// nothing.
     fn inert(&self, report: &mut Report, id: &str, detail: String) {
-        if self.runs(id, Check::Declarations) {
+        if self.checks.contains(Check::Declarations) {
             report
                 .findings
                 .push(Finding::new(id, None, Check::Declarations, detail));
@@ -1911,20 +2054,24 @@ impl Suite {
 
     // ----- description-only checks -------------------------------------------
 
+    /// Every selected description-only check, WAIVED ones included: the caller sets
+    /// a waived check's findings aside ([`Suite::set_aside_waived`]), which is how a
+    /// waiver that suppressed nothing can be told from one doing its job. Reading a
+    /// description fires nothing, so running a waived one costs nothing.
     fn static_checks(&self, description: &Description, report: &mut Report) {
-        if self.runs(&description.id, Check::ArgSpecs) {
+        if self.checks.contains(Check::ArgSpecs) {
             argspecs(description, report);
         }
-        if self.runs(&description.id, Check::RequiresVerb) {
+        if self.checks.contains(Check::RequiresVerb) {
             requires_verb(description, report);
         }
-        if self.runs(&description.id, Check::Names) {
+        if self.checks.contains(Check::Names) {
             names(description, report);
         }
-        if self.runs(&description.id, Check::Validate) {
+        if self.checks.contains(Check::Validate) {
             validate(description, report);
         }
-        if self.runs(&description.id, Check::Pipeline) {
+        if self.checks.contains(Check::Pipeline) {
             pipeline_static(description, report);
         }
     }
@@ -1932,8 +2079,9 @@ impl Suite {
     /// Every template variable of the entry's pattern must be a declared
     /// `Binding`-source input of every action — otherwise the manifold cannot form
     /// the IRI from the contract and drops the action.
+    /// Runs when ARGSPECS is selected, waived or not, like [`static_checks`](Self::static_checks).
     fn template_checks(&self, entry: &SpaceEntry, description: &Description, report: &mut Report) {
-        if !self.runs(&description.id, Check::ArgSpecs) {
+        if !self.checks.contains(Check::ArgSpecs) {
             return;
         }
         let Some(vars) = template_vars(&entry.pattern) else {
@@ -1983,11 +2131,95 @@ impl Suite {
     /// rather than `checks.contains`, so a per-id waiver silences one rule and one
     /// endpoint — never a second check by accident.
     fn runs(&self, id: &str, check: Check) -> bool {
-        self.checks.contains(check)
-            && !self
-                .opt_out_checks
-                .iter()
-                .any(|o| o.id == id && o.check == check)
+        self.checks.contains(check) && !self.waived(id, check)
+    }
+
+    /// Whether a [`Suite::opt_out_check`] waives `check` for `id`.
+    fn waived(&self, id: &str, check: Check) -> bool {
+        self.opt_out_checks
+            .iter()
+            .any(|o| o.id == id && o.check == check)
+    }
+
+    /// The selected INVOKING checks waived for `id`, each once: what an action of it
+    /// is re-run for with the findings set aside ([`Action::set_aside`]).
+    fn waived_invoking(&self, id: &str) -> Vec<Check> {
+        let mut checks: Vec<Check> = Vec::new();
+        for o in &self.opt_out_checks {
+            if o.id == id
+                && o.check.invokes()
+                && self.checks.contains(o.check)
+                && !checks.contains(&o.check)
+            {
+                checks.push(o.check);
+            }
+        }
+        checks
+    }
+
+    /// Take the findings appended since `from` that a waiver covers back out of the
+    /// report, counting each against its waiver. The description-only checks and
+    /// DECLARATIONS run waived or not and are honored here, so a waiver that took
+    /// nothing out is visible ([`Evidence::idle_waivers`]). The findings that stay
+    /// keep their order, so the report reads exactly as it did when those checks
+    /// were skipped outright.
+    fn set_aside_waived(&self, report: &mut Report, from: usize, tally: &mut Tally) {
+        if self.opt_out_checks.is_empty() || from >= report.findings.len() {
+            return;
+        }
+        for finding in report.findings.split_off(from) {
+            if self.waived(&finding.endpoint, finding.check) {
+                tally.record(&finding.endpoint, finding.check, Some(1));
+            } else {
+                report.findings.push(finding);
+            }
+        }
+    }
+
+    /// Why REQUIRED dropped nothing, when it is selected and did not.
+    fn required_nothing(&self, coverage: &Coverage, report: &Report) -> Option<String> {
+        if !self.checks.contains(Check::Required) || !report.declared.evidence.required.is_empty() {
+            return None;
+        }
+        let why = if report.endpoints == 0 {
+            "the walk reached no endpoint"
+        } else if !coverage.required_eligible.is_empty() {
+            "every action that declares a required by-value input without a default was \
+             opted out, waived, or did not resolve (see the `opted out:` and `unprobed:` lines)"
+        } else if self.required_on_mutating {
+            "no walked action declares a required by-value input without a default"
+        } else if coverage.required_mutating_candidates {
+            "no `Source` or `Exists` action declares a required by-value input without a \
+             default; a `Sink` or `Delete` does, and REQUIRED fires those only under \
+             `Suite::required_on_mutating`"
+        } else {
+            "no `Source` or `Exists` action declares a required by-value input without a \
+             default, and `Sink` and `Delete` are not walked (`Suite::required_on_mutating` \
+             is off)"
+        };
+        Some(why.to_string())
+    }
+
+    /// The waivers that suppressed nothing: judged (every description it covers read,
+    /// every action it covers re-run without a mutating firing it was refused), and
+    /// nothing found. A waiver DECLARATIONS already reports as structurally inert is
+    /// not repeated here, and a SPACE-NAME waiver is never judged: re-running it would
+    /// fill in the `space:` line the waiver keeps empty.
+    fn idle_waivers(&self, coverage: &Coverage, tally: &Tally) -> Vec<OptedOutCheck> {
+        self.opt_out_checks
+            .iter()
+            .filter(|o| o.check != Check::SpaceName)
+            .filter(|o| {
+                self.unreachable_check(&o.id, o.check, coverage, false)
+                    .is_none()
+            })
+            .filter(|o| tally.idle(&o.id, o.check))
+            .map(|o| OptedOutCheck {
+                endpoint: o.id.clone(),
+                check: o.check,
+                reason: o.reason.clone(),
+            })
+            .collect()
     }
 
     fn fixture_for(&self, id: &str, verb: Verb) -> Option<&Fixture> {
@@ -2035,12 +2267,12 @@ impl Suite {
 
     /// The minimal by-value arguments for an action: one derived value per required
     /// `Argument`-source input, overlaid with the fixture's arguments.
-    fn args_for(&self, id: &str, spec: &ActionSpec) -> BTreeMap<String, String> {
-        let mut args: BTreeMap<String, String> = spec
+    fn args_for(&self, id: &str, spec: &ActionSpec) -> Args {
+        let mut args: Args = spec
             .inputs
             .iter()
             .filter(|i| i.required && i.source == InputSource::Argument)
-            .map(|i| (i.name.clone(), sample_value(i)))
+            .map(|i| (i.name.clone(), sample_value(i).into_bytes()))
             .collect();
         if let Some(fixture) = self.fixture_for(id, spec.verb) {
             for (k, v) in &fixture.args {
@@ -2128,10 +2360,19 @@ fn sample_value(spec: &ArgSpec) -> String {
     }
 }
 
-fn build_request(verb: Verb, target: &Iri, args: &BTreeMap<String, String>) -> Request {
+/// What a set-aside run gets in place of a firing it may not make
+/// ([`Action::may_fire`]). Never reaches the report: the run's findings are set aside,
+/// and a refused firing leaves the waiver unjudged.
+fn set_aside_refusal() -> Error {
+    Error::Endpoint(
+        "not fired: a set-aside run of a waived check fires no `Sink` or `Delete`".into(),
+    )
+}
+
+fn build_request(verb: Verb, target: &Iri, args: &Args) -> Request {
     let mut request = Request::new(verb, target.clone());
     for (name, value) in args {
-        request = request.with_arg(name, ArgRef::Inline(value.as_bytes().to_vec()));
+        request = request.with_arg(name, ArgRef::Inline(value.clone()));
     }
     request
 }
@@ -2390,10 +2631,17 @@ struct Action<'a> {
     /// Whether any probe actually resolved under `caller` — what DECLARATIONS reads to
     /// say a fixture's capability reached nothing.
     caller_used: bool,
+    /// The one WAIVED check this action is re-run for, with its findings set aside,
+    /// so the report can say a waiver suppressed nothing ([`Action::set_aside`]).
+    /// `None` on the walk proper, where every check asks [`Suite::runs`].
+    shadow: Option<Check>,
+    /// Set when a set-aside run needed a firing of a `Sink` or a `Delete` and was
+    /// refused it ([`Action::may_fire`]): that waiver could not be judged.
+    shadow_blocked: bool,
 }
 
 impl<'a> Action<'a> {
-    fn request(&self, args: &BTreeMap<String, String>) -> Request {
+    fn request(&self, args: &Args) -> Request {
         build_request(self.spec.verb, self.target, args)
     }
 
@@ -2402,8 +2650,58 @@ impl<'a> Action<'a> {
     }
 
     /// Whether `check` runs for this action — selected, and not waived for this id.
+    /// During a set-aside run, exactly the one waived check being judged.
     fn runs(&self, check: Check) -> bool {
-        self.suite.runs(self.id, check)
+        match self.shadow {
+            Some(judged) => judged == check,
+            None => self.suite.runs(self.id, check),
+        }
+    }
+
+    /// Whether this action may be fired now. Always on the walk proper. During a
+    /// set-aside run a read may be (it is what the waived check would have fired), and
+    /// a `Sink` or a `Delete` never: a waiver is no license for a write the walk would
+    /// not otherwise make, so the waiver is left unjudged instead. A memoized answer
+    /// is read without asking.
+    fn may_fire(&mut self) -> bool {
+        if self.shadow.is_some() && self.spec.verb.is_mutating() {
+            self.shadow_blocked = true;
+            return false;
+        }
+        true
+    }
+
+    /// Re-run one WAIVED check on this action with its findings set aside: how many
+    /// it would have reported, or `None` when that could not be told — it needed a
+    /// mutating firing, or could not observe the action (an `unprobed` of its own).
+    /// Called after the walk proper is done with the action, so it reads what the
+    /// walk already resolved and changes nothing the report prints.
+    async fn set_aside(&mut self, check: Check) -> Option<usize> {
+        let mut scratch = Report::scratch(self.suite.checks);
+        let mut coverage = Coverage::default();
+        let (caller_used, failure_reported) = (self.caller_used, self.failure_reported);
+        self.shadow = Some(check);
+        self.shadow_blocked = false;
+        self.failure_reported = false;
+        match check {
+            Check::Enforced => self.enforced(&mut scratch).await,
+            Check::Authority => self.authority(&mut scratch).await,
+            Check::SkolemRdf | Check::Vocabulary => {
+                self.rdf_faces(&mut scratch, &mut coverage).await
+            }
+            Check::Cacheable => self.cacheable(&mut scratch, &mut coverage).await,
+            Check::Pipeline => self.pipeline(&mut scratch).await,
+            Check::Required => self.required(&mut scratch).await,
+            Check::Outputs => self.outputs(&mut scratch).await,
+            _ => {}
+        }
+        self.shadow = None;
+        self.caller_used = caller_used;
+        self.failure_reported = failure_reported;
+        if self.shadow_blocked || scratch.unprobed.iter().any(|u| u.check == check) {
+            return None;
+        }
+        Some(scratch.findings.len())
     }
 
     /// Resolve with minimal inputs as the caller (root, or the fixture's capability),
@@ -2417,6 +2715,9 @@ impl<'a> Action<'a> {
             if let Some(memo) = &self.minimal {
                 return memo.clone();
             }
+        }
+        if !self.may_fire() {
+            return Err(set_aside_refusal());
         }
         let args = self.suite.args_for(self.id, self.spec);
         let collector = Arc::new(Collector::default());
@@ -2437,13 +2738,7 @@ impl<'a> Action<'a> {
     /// Report a minimal-resolution failure under `check`, once per action. `args` are
     /// the by-value arguments of the request that failed, so the finding can say when
     /// the `content` in it was the suite's generic sample rather than a fixture's.
-    fn report_failure(
-        &mut self,
-        check: Check,
-        err: &Error,
-        args: &BTreeMap<String, String>,
-        report: &mut Report,
-    ) {
+    fn report_failure(&mut self, check: Check, err: &Error, args: &Args, report: &mut Report) {
         if self.failure_reported {
             return;
         }
@@ -2491,8 +2786,8 @@ impl<'a> Action<'a> {
     /// The `content` value in `args` when it is the suite's generic sample: the action
     /// declares `content` by value with no default and no `one_of` (either of which
     /// would make the value the endpoint's own choice), and no fixture supplied it.
-    fn sampled_content<'b>(&self, args: &'b BTreeMap<String, String>) -> Option<&'b str> {
-        let sent = args.get("content")?;
+    fn sampled_content<'b>(&self, args: &'b Args) -> Option<&'b str> {
+        let sent = std::str::from_utf8(args.get("content")?).ok()?;
         let spec = self.content_spec()?;
         if spec.default.is_some() || !spec.one_of.is_empty() {
             return None;
@@ -2501,7 +2796,7 @@ impl<'a> Action<'a> {
             .suite
             .fixture_for(self.id, self.spec.verb)
             .is_some_and(|f| f.args.contains_key("content"));
-        (!fixture_sets_it).then_some(sent.as_str())
+        (!fixture_sets_it).then_some(sent)
     }
 
     /// The `content` input the action declares by value, where a pipe's value lands.
@@ -2514,10 +2809,10 @@ impl<'a> Action<'a> {
 
     /// The arguments the pipeline probe fires with: the minimal ones, plus `content`
     /// (the fixture's if it gave one, else a sample) where the action declares it.
-    fn pipeline_args(&self, content: &ArgSpec) -> BTreeMap<String, String> {
+    fn pipeline_args(&self, content: &ArgSpec) -> Args {
         let mut args = self.suite.args_for(self.id, self.spec);
         args.entry("content".to_string())
-            .or_insert_with(|| sample_value(content));
+            .or_insert_with(|| sample_value(content).into_bytes());
         args
     }
 
@@ -2530,6 +2825,9 @@ impl<'a> Action<'a> {
     async fn probe_no_grants(&mut self) -> Result<Representation, Error> {
         if let Some(memo) = &self.no_grants {
             return memo.clone();
+        }
+        if !self.may_fire() {
+            return Err(set_aside_refusal());
         }
         let args = self.suite.args_for(self.id, self.spec);
         let none = Capability::scoped(Vec::<String>::new());
@@ -2648,7 +2946,11 @@ impl<'a> Action<'a> {
             let mut args = self.suite.args_for(self.id, self.spec);
             let result = if self.spec.outputs.len() > 1 {
                 // Several faces: `as=` picks this one, the universal conneg selector.
-                args.entry("as".to_string()).or_insert_with(|| face.clone());
+                args.entry("as".to_string())
+                    .or_insert_with(|| face.clone().into_bytes());
+                if !self.may_fire() {
+                    return;
+                }
                 self.caller_used = true;
                 self.kernel.issue(self.request(&args), &self.caller).await
             } else {
@@ -2954,6 +3256,9 @@ impl<'a> Action<'a> {
             return;
         };
         let args = self.pipeline_args(content);
+        if !self.may_fire() {
+            return;
+        }
         self.caller_used = true;
         let result = self.kernel.issue(self.request(&args), &self.caller).await;
         self.fired = Some(result.clone());
@@ -2999,6 +3304,9 @@ impl<'a> Action<'a> {
                     (self.pipeline_args(content), fired.clone().map(|_| ()))
                 }
                 _ => {
+                    if !self.may_fire() {
+                        return;
+                    }
                     let args = self.suite.args_for(self.id, self.spec);
                     self.caller_used = true;
                     let fired = self.kernel.issue(self.request(&args), &self.caller).await;
@@ -3027,8 +3335,22 @@ impl<'a> Action<'a> {
             if dropped.remove(name).is_none() {
                 continue;
             }
+            if !self.may_fire() {
+                return;
+            }
             self.caller_used = true;
-            match self.kernel.issue(self.request(&dropped), &self.caller).await {
+            let outcome = self
+                .kernel
+                .issue(self.request(&dropped), &self.caller)
+                .await;
+            // The evidence, whatever came back: a clean REQUIRED says what it dropped.
+            report.declared.evidence.required.push(RequiredProbe {
+                endpoint: self.id.to_string(),
+                verb: self.spec.verb,
+                input: name.clone(),
+                refusal: outcome.as_ref().err().map(|e| e.kind().to_string()),
+            });
+            match outcome {
                 Ok(_) => report.findings.push(self.finding(
                     Check::Required,
                     format!(
@@ -3123,7 +3445,11 @@ impl<'a> Action<'a> {
         // emits SVG is relabeled `image/svg+xml` by a fixture's `as`, and the
         // declared outputs (what the endpoint chooses by itself) need not list it.
         let args = self.suite.args_for(self.id, self.spec);
-        if let Some(label) = args.get("as").map(|a| rdf::bare_media_type(a)) {
+        if let Some(label) = args
+            .get("as")
+            .and_then(|a| std::str::from_utf8(a).ok())
+            .map(rdf::bare_media_type)
+        {
             if label == got {
                 self.unprobed(
                     report,
