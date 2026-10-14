@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-conformance"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "What \"done\" means for an ikigai module, as one test: walks every endpoint a kernel binds and reports every violation of the module recipe at once — ArgSpec completeness, requires implies a verb, declared = enforced, declared outputs = served outputs, skolemized RDF faces, vocabulary terms only, the cacheable-twice probe, pipeline citizenship, a space's name is a claim (same name, same doors), every description passes core's own validate, a required input is required — and says what it did NOT do: what it probed, what it could not, and which of your own declarations reached no check at all."
@@ -99,7 +99,10 @@ ikigai-core = "0.1.100"
 # <0.2.0). vocab 0.1.101 requires `ikigai-core ^0.1.101`, so this pin lifts the core this
 # crate resolves with to 0.1.101 transitively; the `ikigai-core` pin above stays at 0.1.100
 # because that is still the API and the semantics this crate uses.
-ikigai-vocab = "0.1.101"
+# 0.8.1: re-checked — 0.1.102 is the head on crates.io; raised to it (the RANGE >=0.1.102,
+# <0.2.0). vocab 0.1.102 requires `ikigai-core ^0.1.101`, so the core this crate resolves
+# with stays lifted to 0.1.101 transitively; the `ikigai-core` pin above stays at 0.1.100.
+ikigai-vocab = "0.1.102"
 # One parser for every RDF face a module can declare (Turtle, N-Triples, N-Quads,
 # TriG, RDF/XML, JSON-LD). 0.2.5 is the version whose `for_slice` and
 # `RdfFormat::from_media_type` this crate was written against.
