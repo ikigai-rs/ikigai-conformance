@@ -858,6 +858,40 @@ impl Suite {
     /// bounds the answer, so a clock reading cacheable to the minute is not asked to
     /// be pure. A `pure` on such an endpoint is still counted as consulted, since
     /// the same endpoint may answer `Never` under another kernel (a pinned clock).
+    ///
+    /// **The claim is checked, not taken on trust** (since 0.8.3, ledger #1508): a
+    /// cacheable result of an endpoint declared pure that carries a thread which is
+    /// neither its own name nor the name or a thread of anything it read is a
+    /// [`Check::Cacheable`] finding, `declared pure (`Suite::pure`) but carries a
+    /// foreign thread …`. Such a thread names state the endpoint hangs from, so it is
+    /// not a pure function of its inputs — and before this the declaration passed
+    /// clean, because the foreign thread is exactly what silences the rule `pure`
+    /// exempts from. A thread it cannot attribute is never reported (see the README).
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use ikigai_conformance::{Check, Suite};
+    /// use ikigai_core::{
+    ///     Description, EndpointSpace, Exact, FnEndpoint, Invocation, Kernel, ReprType,
+    ///     Representation, Verb,
+    /// };
+    ///
+    /// // Declared pure, but its answer hangs from a store it never reads by name.
+    /// let lookup = FnEndpoint::new("lookup", |_inv: &Invocation<'_>| {
+    ///     Ok(Representation::new(ReprType::new("text/plain"), "row 7")
+    ///         .cacheable()
+    ///         .depends_on("urn:example:db"))
+    /// })
+    /// .with_description(Description::new("lookup").verb(Verb::Source).output("text/plain"));
+    /// let kernel = Kernel::new(Arc::new(
+    ///     EndpointSpace::new().bind(Exact::new("urn:example:lookup"), lookup),
+    /// ));
+    /// let report = Suite::new().pure("lookup").run_blocking(&kernel);
+    /// let finding = report.of(Check::Cacheable).next().unwrap();
+    /// assert!(finding
+    ///     .detail
+    ///     .starts_with("declared pure (`Suite::pure`) but carries a foreign thread `urn:example:db`:"));
+    /// ```
     pub fn pure(mut self, id: impl Into<String>) -> Self {
         self.pure.push(id.into());
         self
@@ -3282,6 +3316,10 @@ impl<'a> Action<'a> {
             // violation below nor a failed second resolution makes a declaration
             // that WAS consulted read as inert.
             coverage.pure_consulted.insert(self.id.to_string());
+            if self.suite.pure.iter().any(|p| p == self.id) {
+                self.pure_carries_no_foreign_thread(&first, &first_events, report)
+                    .await;
+            }
         }
         if declared_live && first.expiry != Expiry::Always {
             report.findings.push(self.finding(
@@ -3400,6 +3438,98 @@ impl<'a> Action<'a> {
                  function of its inputs; otherwise `depends_on` the thread of the state it reads",
             ));
         }
+    }
+
+    /// Hold a `Suite::pure` declaration to what it claims (ledger #1508). `pure`
+    /// exempts a cacheable result from the no-thread-but-its-own-name finding, and
+    /// before this the suite took the claim on trust: an endpoint declared pure whose
+    /// answer hung from some piece of state's thread (`depends_on("urn:example:db")`)
+    /// passed clean, because a FOREIGN thread is exactly what silences the rule the
+    /// declaration exempts. A pure function hangs from nothing but what it read, so
+    /// every thread on its answer must be accounted for by the resolution itself:
+    ///
+    /// - its own name, listed or canonical (the kernel hangs every cacheable read on
+    ///   it);
+    /// - the name of every resource it read on the way, at any depth (a sub-request,
+    ///   a by-reference argument): the kernel folds each one's own-name thread into
+    ///   the composite's set;
+    /// - every thread a resource it read carries, read back from the cache, so a
+    ///   pure transform over a STATEFUL input (a query over a graph that hangs from
+    ///   its store) is not blamed for its input's thread. A kernel face counts like
+    ///   any other resource: a catalog rendered as RDF carries the catalog's
+    ///   `urn:kernel:bindings` thread, and reads as a function of what is bound.
+    ///
+    /// What is left is a thread the endpoint named itself for state no request in
+    /// this resolution was made to: the declaration is false.
+    ///
+    /// Reads the trace the first minimal resolution already recorded. The only reads
+    /// of its own are of the resources that resolution read directly, and only when
+    /// the cache already holds them under the same caller, so each is a cache hit
+    /// that computes nothing; and only when a thread is left over at all. When a
+    /// thread cannot be attributed — the first resolution was itself a cache hit (no
+    /// children in its trace), or a resource it read is not in the cache under a
+    /// plain `Source` of its name (it was read with arguments, or under a narrower
+    /// capability) — nothing is said: the check refuses only what it can show.
+    async fn pure_carries_no_foreign_thread(
+        &self,
+        first: &Representation,
+        first_events: &[TraceEvent],
+        report: &mut Report,
+    ) {
+        let mut accounted: BTreeSet<Thread> = BTreeSet::from([Thread::from(self.target.as_str())]);
+        accounted.extend(first_events.iter().map(|e| Thread::from(e.target.as_str())));
+        let left = |accounted: &BTreeSet<Thread>| -> Vec<String> {
+            first
+                .threads()
+                .iter()
+                .filter(|t| !accounted.contains(*t))
+                .map(|t| format!("`{}`", t.as_str()))
+                .collect()
+        };
+        if left(&accounted).is_empty() {
+            return;
+        }
+        let root = first_events.iter().find(|e| e.parent.is_none());
+        if root.is_some_and(|r| r.cache_hit) {
+            return;
+        }
+        let children: BTreeSet<&str> = match root {
+            Some(r) => first_events
+                .iter()
+                .filter(|e| e.parent == Some(r.span))
+                .map(|e| e.target.as_str())
+                .collect(),
+            None => BTreeSet::new(),
+        };
+        for child in children {
+            let Ok(iri) = Iri::parse(child) else {
+                return;
+            };
+            let read = Request::new(Verb::Source, iri);
+            if !self.kernel.is_cached(&read, &self.caller) {
+                return;
+            }
+            match self.kernel.issue(read, &self.caller).await {
+                Ok(repr) => accounted.extend(repr.threads().iter().cloned()),
+                Err(_) => return,
+            }
+        }
+        let foreign = left(&accounted);
+        let (noun, list) = match foreign.as_slice() {
+            [] => return,
+            [one] => ("a foreign thread", one.clone()),
+            many => ("foreign threads", many.join(", ")),
+        };
+        report.findings.push(self.finding(
+            Check::Cacheable,
+            format!(
+                "declared pure (`Suite::pure`) but carries {noun} {list}: neither its own name \
+                 nor anything it read, so the answer hangs from state that is not one of its \
+                 inputs, and a pure function reads none. Drop the `pure` declaration (the thread \
+                 already answers \"what cuts this?\"), or drop the dependency if the endpoint \
+                 really is a function of its inputs"
+            ),
+        ));
     }
 
     // ----- PIPELINE (invoking half) --------------------------------------------
