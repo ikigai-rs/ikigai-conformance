@@ -2023,6 +2023,17 @@ fn pipeline_catches_an_all_optional_sink_without_content() {
             EndpointSpace::new().bind(Exact::new("urn:example:log-write"), all_optional_sink()),
         ));
     assert!(waived.of(Check::Pipeline).next().is_none(), "{waived}");
+    // A Delete with only optional inputs keeps the old rule: a `reason` beside a
+    // deletion is metadata, not a body (ikigai-ledger's `ledger-item` delete).
+    let delete = FnEndpoint::new("item", |_inv: &Invocation<'_>| Ok(text("gone")))
+        .with_description(
+            Description::new("item")
+                .verb(Verb::Delete)
+                .input(ArgSpec::new("reason").class(XSD_STRING).optional())
+                .output("text/plain"),
+        );
+    let report = report_of(EndpointSpace::new().bind(Exact::new("urn:example:item"), delete));
+    assert!(report.of(Check::Pipeline).next().is_none(), "{report}");
     // A Sink with no by-value input at all is not reported: nothing names its body.
     let bare = FnEndpoint::new("tick", |_inv: &Invocation<'_>| Ok(text("ok"))).with_description(
         Description::new("tick")

@@ -2953,13 +2953,21 @@ fn pipeline_static(description: &Description, report: &mut Report) {
             .iter()
             .filter(|i| i.source == InputSource::Argument)
             .collect();
-        // ANY by-value input, required or not (ledger #339). The rule used to fire only
-        // when one was required, which is inverted from the risk: an action whose
-        // inputs are all optional is the one a caller most often drives with a pipe
-        // alone, and `urn:log:write` shipped reading the piped `content` as an
-        // undeclared fallback for its optional `msg` with this check clean.
+        // For a `Sink`, ANY by-value input, required or not (ledger #339). The rule used
+        // to fire only when one was required, which is inverted from the risk: a Sink
+        // whose inputs are all optional is the one a caller most often drives with a
+        // pipe alone, and `urn:log:write` shipped reading the piped `content` as an
+        // undeclared fallback for its optional `msg` with this check clean. A `Delete`
+        // keeps the old rule: it has no body, and optional inputs beside it (a `reason`,
+        // an `author`) are metadata about the deletion, not where a pipe's value goes.
+        let has_required = by_value.iter().any(|i| i.required);
         let has_content = by_value.iter().any(|i| i.name == "content");
-        if !by_value.is_empty() && !has_content {
+        let fires = if spec.verb == Verb::Sink {
+            !by_value.is_empty()
+        } else {
+            has_required
+        };
+        if fires && !has_content {
             let all_optional = by_value.iter().all(|i| !i.required);
             report.findings.push(Finding::new(
                 &description.id,

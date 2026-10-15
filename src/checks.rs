@@ -103,9 +103,10 @@ pub enum Check {
     Cacheable,
     /// **Pipeline citizenship.** A mutating action with by-value inputs declares
     /// `content` (where a pipe's value arrives), and an action declaring `content`
-    /// reads it. Any by-value input counts, required or not (0.8.4, ledger #339): an
-    /// action whose inputs are all optional is the one a pipe alone most often drives,
-    /// and before 0.8.4 it was the one the rule skipped.
+    /// reads it. On a `Sink`, any by-value input counts, required or not (0.8.4, ledger
+    /// #339): a Sink whose inputs are all optional is the one a pipe alone most often
+    /// drives, and before 0.8.4 it was the one the rule skipped. A `Delete` is held to
+    /// it only when an input is required: its optional inputs (a `reason`) are metadata.
     Pipeline,
     /// **Required is required.** Each input an action declares required, by value and
     /// with no default, is dropped from the call the walk resolved, one at a time, and
