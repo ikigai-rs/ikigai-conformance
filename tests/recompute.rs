@@ -103,21 +103,43 @@ fn a_deterministic_threaded_result_recomputes_identically() {
     );
     assert!(
         report.to_string().contains(
-            "recomputed: seal source after a cut of 2 thread(s), and of each of 1 declared one \
-             alone: identical\n"
+            "recomputed: seal source 24 times after a cut of 2 thread(s), and of each of 1 \
+             declared one alone: identical\n"
         ),
         "{report}"
     );
 }
 
 #[test]
+fn every_recomputation_is_held_to_the_first() {
+    // Computations 1 to 4 agree and the fifth differs: one recomputation (the third
+    // resolution) saw the same bytes and walked clean. The fourth forced one is the
+    // first to differ, and the finding says the earlier ones agreed by chance.
+    let late = counting(
+        |n| if n < 5 { "a=1\nb=2" } else { "b=2\na=1" }.to_string(),
+        Representation::cacheable,
+    );
+    let report = walk(late, Suite::new().pure("seal"));
+    let found: Vec<_> = report.of(Check::Recompute).collect();
+    assert_eq!(found.len(), 1, "{report}");
+    assert!(found[0].detail.contains(DIFFERENT), "{report}");
+    assert!(
+        found[0]
+            .detail
+            .contains("(recomputation 4 of 24; the 3 before it repeated the first by chance)"),
+        "{report}"
+    );
+    assert!(report.recomputed().is_empty(), "{report}");
+}
+
+#[test]
 fn each_declared_thread_is_cut_alone_and_recomputed() {
-    // Computation 1 is the first resolution, 2 the forced one after the full cut (the
-    // same bytes), 3 the one after a cut of the declared thread alone (different):
-    // only the narrower half reaches the third.
+    // Computation 1 is the first resolution, 2 to 25 the 24 forced ones after the full
+    // cut (the same bytes), 26 the one after a cut of the declared thread alone
+    // (different): only the narrower half reaches it.
     let drifting = counting(
         |n| {
-            if n <= 2 {
+            if n <= 25 {
                 "v1".to_string()
             } else {
                 "v2".to_string()
@@ -214,4 +236,40 @@ fn recompute_stands_down_when_cacheable_already_saw_two_computations_differ() {
         .run_blocking(&kernel);
     assert!(report.of(Check::Recompute).next().is_none(), "{report}");
     assert!(report.of(Check::Cacheable).next().is_some(), "{report}");
+}
+
+/// Two entries in a `HashMap`, serialized in iteration order: each computation builds
+/// a new map with a fresh `RandomState`, so two computations agree on the order about
+/// half the time. The shape of the jsonld, shacl and rdf-union defects.
+fn hash_ordered() -> FnEndpoint {
+    FnEndpoint::new("seal", |_inv: &Invocation<'_>| {
+        let entries: std::collections::HashMap<&str, &str> =
+            [("a", "1"), ("b", "2")].into_iter().collect();
+        let body: Vec<String> = entries.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        Ok(text(body.join("\n")).cacheable())
+    })
+    .with_description(
+        Description::new("seal")
+            .verb(Verb::Source)
+            .output("text/plain"),
+    )
+}
+
+#[test]
+fn a_two_entry_hash_order_is_caught_on_every_walk() {
+    // One forced recomputation of a two-entry map agrees with the first about half
+    // the time (ikigai-jsonld's ANONYMOUS fixture: 5 catches in 12 runs). Repeated
+    // recomputations, each held to the first, make a miss negligible: fifty walks,
+    // every one must say so.
+    let mut missed = 0;
+    for _ in 0..50 {
+        let report = walk(hash_ordered(), Suite::new().pure("seal"));
+        if !report
+            .of(Check::Recompute)
+            .any(|f| f.detail.contains(DIFFERENT))
+        {
+            missed += 1;
+        }
+    }
+    assert_eq!(missed, 0, "{missed} of 50 walks missed the order defect");
 }

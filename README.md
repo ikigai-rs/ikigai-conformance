@@ -71,7 +71,7 @@ pointing at the check.
 | `SPACE-NAME` | a name is a claim: same name, same doors | a space the module declares **self-named** claims `space_iri("<module>")` (`urn:iki:space:<module>`), on its topology root too, and two calls of its constructor claim the same name over the same doors; a space it declares **host-named** claims nothing. See [A space's name](#a-spaces-name-space-name) |
 | `DECLARATIONS` | — | every declaration the module made (`live`, `cacheable`, `pure`, `namespace`, `required_on_mutating`, a `Fixture`, an `opt_out`, an `opt_out_check`, a declared space) reached the check that would honor it. A `live` on a `Sink` reached nothing and the report printed `declared live:` anyway |
 | `RESOLVES` | — | the resolution another check needed (the minimal one that `OUTPUTS`, `SKOLEM-RDF`, `VOCABULARY` and `CACHEABLE` read; the pipeline probe's firing of a `Sink`) resolved. A failure is reported ONCE per action under this label, with the refusal's kind, the check that needed it and, where the walk had to invent a value for an input that declares no class, that input by name: fixing it fixes both findings. It fires nothing of its own. Not selected (a selection written before 0.8.4), the failure is reported under the check that needed it, as before |
-| `RECOMPUTE` | cacheability | an `Expiry::Never` answer the cache holds is recomputed after a cut of every thread it carries and of everything it read, and must repeat the first computation's bytes; each thread an endpoint declared (`depends_on`) is also cut alone and recomputed. `CACHEABLE`'s second resolution is the cache hit, so it can only repeat the first: this is the witness that sees a wrong `.cacheable()` (a fresh nonce, key or timestamp, a `HashMap` order). An `Expiry::At` answer is exempt (a function of the time too). Each clean recomputation is a `recomputed:` line. Subtract it (`Checks::all() - Checks::RECOMPUTE`) for a test that pins how often a fixture is read, or waive it per endpoint with the reason an answer differs by design |
+| `RECOMPUTE` | cacheability | an `Expiry::Never` answer the cache holds is recomputed after a cut of every thread it carries and of everything it read, 24 times, and every computation must repeat the first one's bytes (one recomputation agrees with the first by chance as often as a two-entry map's order does); each thread an endpoint declared (`depends_on`) is also cut alone and recomputed. `CACHEABLE`'s second resolution is the cache hit, so it can only repeat the first: this is the witness that sees a wrong `.cacheable()` (a fresh nonce, key or timestamp, a `HashMap` order). An order is caught only if the fixture has enough entries for order to matter ([below](#a-fixture-gives-an-order-something-to-order)). An `Expiry::At` answer is exempt (a function of the time too). Each clean answer is a `recomputed:` line. Subtract it (`Checks::all() - Checks::RECOMPUTE`) for a test that pins how often a fixture is read, or waive it per endpoint with the reason an answer differs by design |
 
 ### Why `VALIDATE` is here and not in `bind`
 
@@ -399,8 +399,8 @@ for that action) — the footprint a fixture author can count on.
 It is stated **per FIRING, and a firing is a request**: the verb, the target IRI,
 and the arguments. Per firing: a `Source` or `Exists` is resolved once (twice when
 cacheable; the second is the cache probe; `RECOMPUTE` resolves a cached `Expiry::Never`
-answer once more after a cut of every thread it carries, which re-reads what it was built
-from, and once more per thread an endpoint declared on it, cut alone) and once more per
+answer 24 more times, each after a cut of every thread it carries, which re-reads what it
+was built from each time, and once more per thread an endpoint declared on it, cut alone) and once more per
 required by-value input
 without a default (`REQUIRED`), each declared RDF face beyond the first
 is resolved once more with `as=`, and a `Sink` or `Delete` declaring `content` is
@@ -458,6 +458,22 @@ the state on the kernel it passes, before the walk: record the posture, seed the
 open the window. Then read that endpoint's `probed:` line, whose triple or byte count is
 the evidence the walk saw the state you set; a count that matches the empty answer is
 the tell.
+
+#### A fixture gives an order something to order
+
+`RECOMPUTE` catches an answer serialized in `HashMap` (or `HashSet`) iteration order
+only when the order can differ, and over a fixture with one node, one statement or one
+key it cannot. **Give a cacheable endpoint's fixture enough entries for order to
+matter: three or more beats two.** Two computations over a two-entry map agree on the
+order about half the time (0.508 measured over four million pairs), so one
+recomputation missed `ikigai-jsonld`'s two-node defect about one walk in two (5 runs of
+12, ledger #1573). The check now recomputes 24 times and holds every computation to
+the first, which puts a two-entry miss at about 6 in 10 million walks (111 in 200
+million sequences of fresh maps, measured; more than 0.508^24, because the order is
+not a fair coin: a two-entry map iterates in insertion order 56% of the time, and 0.563^25
+is the same 6 in 10 million). Three
+entries agree far less often, and the miss rate falls with them. Content-addressed IRIs and blank-node
+labels that number nodes in iteration order count as order too.
 
 ### A composing host scopes the walk to its own endpoints (`Suite::own`)
 
@@ -927,10 +943,22 @@ anyone memoizes by id.
   copy of itself, and a wrong `.cacheable()` walked clean (`ikigai-encrypt`'s age
   ciphertext, a fresh ephemeral key per call). For a cached `Expiry::Never` answer,
   `RECOMPUTE` cuts every thread the answer carries and the name of everything it read,
-  resolves again, and holds the bytes to the first computation's; then it cuts each
-  thread an endpoint declared alone and does the same. It needs nothing from core: a
-  pure answer has a thread to cut too (its own name, core 0.1.73). Each clean
-  recomputation is a `recomputed:` line; an `Expiry::At` answer is exempt.
+  resolves again, and holds the bytes to the first computation's; it does that **24
+  times**, every computation held to the first (ledger #1573); then it cuts each thread
+  an endpoint declared alone and does the same once. It needs nothing from core: a pure
+  answer has a thread to cut too (its own name, core 0.1.73). Each clean answer is a
+  `recomputed:` line (`recomputed: upper source 24 times after a cut of 1 thread(s):
+  identical`, `Recomputed::recomputations`); an `Expiry::At` answer is exempt.
+- **Why 24, not one** (ledger #1573). One recomputation caught a `HashMap`-order defect
+  only by luck: two computations over a two-entry map agree on the order about half the
+  time, and `ikigai-jsonld`'s two-node fixture was caught in 5 runs of 12. Measured on
+  real adopters, one recomputation against 24: `ikigai-jsonld` before its fix (its
+  anonymous-document walk) passed 25 of 50 runs against 0 of 50, and `ikigai-rdf`'s
+  `rdf-union` (still unfixed) 15 of 50 against 0 of 50. A two-entry miss is now about 6
+  walks in 10 million. A finding past the first recomputation says so: `(recomputation 4
+  of 24; the 3 before it repeated the first by chance)`. And give a cacheable fixture
+  enough entries for order to matter (see
+  [A fixture gives an order something to order](#a-fixture-gives-an-order-something-to-order)).
 - **`Suite::enforced_under(Fixture)`** (ledger #331), opt-in. `ENFORCED` proves the
   kernel's floor; this reaches the module's own rule with a caller that passes the floor
   but should not pass the module, and requires a typed `Denied`. See
@@ -938,8 +966,9 @@ anyone memoizes by id.
 
 **Will it turn a green suite red?** `Suite::enforced_under` cannot: nothing is probed
 for an action no probe names. `RECOMPUTE` was run against 40 adopter repos (every
-version-pinned adopter but the retired ikigai-dev-server) before release. It turned five
-red:
+version-pinned adopter but the retired ikigai-dev-server) before release, with ONE
+recomputation: an order defect over a small fixture could pass that sweep by chance, so
+these are the ones it found, not necessarily all. It turned five red:
 
 - **Four real defects**, each a cacheable answer whose bytes differ per computation over
   the same input, three of them a `HashMap`-order serialization: `jsonld-flatten`
@@ -951,7 +980,8 @@ red:
   so a reader is served the first computation's time, which may be by design: if it is,
   waive `RECOMPUTE` for it with that reason).
 - **One footprint pin, not a defect**: ikigai-org counts how often its fixture file is
-  read (2), and a cut re-reads it (8). Update the count, or subtract `RECOMPUTE`
+  read (2), and the cuts re-read it (54 with 24 recomputations; 8 with one). Update the
+  count, or subtract `RECOMPUTE`
   (`Checks::all() - Checks::RECOMPUTE`) for that suite.
 
 A selection built from named checks (`Checks::CACHEABLE | …`) runs `RECOMPUTE` only if it
@@ -960,9 +990,12 @@ names it; `Checks::all()` and `Checks::INVOKING` are derived, so they include it
 **Source changes for a consumer:** none required. `Check` is `#[non_exhaustive]`, and the
 new `Evidence` fields are on a `#[non_exhaustive]` struct.
 
-**Footprint.** One more resolution per cached `Expiry::Never` answer, plus one per
-declared thread, and the cut re-reads what each answer was built from; one per
-`enforced_under` probe.
+**Footprint.** 24 more resolutions per cached `Expiry::Never` answer, plus one per
+declared thread, and each cut re-reads what the answer was built from; one per
+`enforced_under` probe. Measured against one recomputation, on a debug build (as CI
+runs it), the conformance test binary's wall time: `ikigai-text` 4.0 → 6.4 ms,
+`ikigai-jsonld` 14 → 45 ms, `ikigai-sparql` 0.18 → 0.80 s (four SPARQL endpoints, 24
+oxigraph queries each), the last inside a crate whose tests take about 42 s in all.
 
 ### 0.8.3 → 0.8.4: `RESOLVES`, walks through a mount, an all-optional `Sink`, report ergonomics
 
