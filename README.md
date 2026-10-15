@@ -23,7 +23,7 @@ cms-graph  VOCABULARY  source: the `text/turtle` face uses `https://ikigai-rs.de
 sparql-construct  OUTPUTS  source: served `text/turtle` with its minimal inputs but declares only `application/sparql-results+json`: a face the manifold does not announce and the RDF checks never saw — declare it (`.output("text/turtle")`) or serve what is declared
 link-remove  DECLARATIONS  declared live (`Suite::live`) but nothing held it to it: it declares no cacheable verb (it declares delete), and CACHEABLE returns early on a mutating one. The report prints `declared live: link-remove`, which reads as a check that ran
 7 finding(s) across 4 endpoint(s), 4 action(s)
-checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES
+checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES RECOMPUTE
 probed 3 face(s) across 3 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
 probed: ik-context source `application/ld+json`: 0 triple(s) — nothing was checked
@@ -58,7 +58,7 @@ pointing at the check.
 |---|---|---|
 | `ARGSPECS` | ArgSpecs from day one | at least one action per description; every input has an IRI `class`; a `default` is one of the `one_of` values when both exist; input names unique per action; every template variable (`urn:file:{path}`) is a declared `.binding()` input |
 | `REQUIRES-VERB` | declared = enforced | a `requires` with no verb — enforced on every verb since core 0.1.85 (it was silently inert before), but the catalog cannot say which actions it gates |
-| `ENFORCED` | declared = enforced | under a capability holding no grants, every action with a `requires` is refused with a typed `Denied`; an action declaring nothing is not. An undeclared gate makes the manifold over-offer, and the finding names both readings, since their fixes differ: a CAPABILITY it enforces is declared (`.requires(…)`), a STATE no capability expresses (refused until another resource opens a window) is documented and `ENFORCED` waived with that reason |
+| `ENFORCED` | declared = enforced | under a capability holding no grants, every action with a `requires` is refused with a typed `Denied`; an action declaring nothing is not. An undeclared gate makes the manifold over-offer, and the finding names both readings, since their fixes differ: a CAPABILITY it enforces is declared (`.requires(…)`), a STATE no capability expresses (refused until another resource opens a window) is documented and `ENFORCED` waived with that reason. And, opt-in, the module's OWN rule: a caller a `Suite::enforced_under` probe names (some grant under the declared prefix, not the one for this target) is refused with a typed `Denied` on the module's path |
 | `AUTHORITY` | declared = enforced | the fourth cell of `ENFORCED`'s own probe: a `Sink` or a `Delete` that declares no `requires` and **mutated anyway** under a capability holding no grants. Nothing gates the write, so nothing can be withheld — a party that should read and report cannot be given read alone, because read is all there is. A `Source` is not in scope (a public read is a decision a module makes); a mutating action refused for some *other* reason is recorded as `unprobed`, never as a finding, because what an ungranted caller could do through it was not observed |
 | `OUTPUTS` | faces are declared | the bare media type the action serves with its minimal inputs (`;charset=` and other parameters stripped, no `as=`) is one of its declared `outputs`. A wrong declaration hides a face from every consumer that reads outputs — `SKOLEM-RDF` and `VOCABULARY` included, which filter the declaration for RDF faces before probing; linkeddata's `sparql-construct` declared only `application/sparql-results+json` over Turtle for its whole life and the RDF checks saw nothing. What the check cannot observe (a mutating action never fired under root, a failed minimal resolution, a caller's `as=` label) is printed as `unprobed`, never as a finding |
 | `SKOLEM-RDF` | skolemize; no blank nodes | every declared RDF face (`text/turtle`, `application/ld+json`, `application/rdf+xml`, N-Triples, N-Quads, TriG) resolves with the smallest inputs its ArgSpecs allow, parses, and has no blank node |
@@ -71,6 +71,7 @@ pointing at the check.
 | `SPACE-NAME` | a name is a claim: same name, same doors | a space the module declares **self-named** claims `space_iri("<module>")` (`urn:iki:space:<module>`), on its topology root too, and two calls of its constructor claim the same name over the same doors; a space it declares **host-named** claims nothing. See [A space's name](#a-spaces-name-space-name) |
 | `DECLARATIONS` | — | every declaration the module made (`live`, `cacheable`, `pure`, `namespace`, `required_on_mutating`, a `Fixture`, an `opt_out`, an `opt_out_check`, a declared space) reached the check that would honor it. A `live` on a `Sink` reached nothing and the report printed `declared live:` anyway |
 | `RESOLVES` | — | the resolution another check needed (the minimal one that `OUTPUTS`, `SKOLEM-RDF`, `VOCABULARY` and `CACHEABLE` read; the pipeline probe's firing of a `Sink`) resolved. A failure is reported ONCE per action under this label, with the refusal's kind, the check that needed it and, where the walk had to invent a value for an input that declares no class, that input by name: fixing it fixes both findings. It fires nothing of its own. Not selected (a selection written before 0.8.4), the failure is reported under the check that needed it, as before |
+| `RECOMPUTE` | cacheability | an `Expiry::Never` answer the cache holds is recomputed after a cut of every thread it carries and of everything it read, and must repeat the first computation's bytes; each thread an endpoint declared (`depends_on`) is also cut alone and recomputed. `CACHEABLE`'s second resolution is the cache hit, so it can only repeat the first: this is the witness that sees a wrong `.cacheable()` (a fresh nonce, key or timestamp, a `HashMap` order). An `Expiry::At` answer is exempt (a function of the time too). Each clean recomputation is a `recomputed:` line. Subtract it (`Checks::all() - Checks::RECOMPUTE`) for a test that pins how often a fixture is read, or waive it per endpoint with the reason an answer differs by design |
 
 ### Why `VALIDATE` is here and not in `bind`
 
@@ -397,7 +398,10 @@ every term under it forever, including the next one somebody invents.
 for that action) — the footprint a fixture author can count on.
 It is stated **per FIRING, and a firing is a request**: the verb, the target IRI,
 and the arguments. Per firing: a `Source` or `Exists` is resolved once (twice when
-cacheable; the second is the cache probe) and once more per required by-value input
+cacheable; the second is the cache probe; `RECOMPUTE` resolves a cached `Expiry::Never`
+answer once more after a cut of every thread it carries, which re-reads what it was built
+from, and once more per thread an endpoint declared on it, cut alone) and once more per
+required by-value input
 without a default (`REQUIRED`), each declared RDF face beyond the first
 is resolved once more with `as=`, and a `Sink` or `Delete` declaring `content` is
 fired **once**, by the pipeline probe — `OUTPUTS` reads that same firing rather than
@@ -406,7 +410,8 @@ making another. A mutating action without `content` is never fired under root
 endpoint); the report lists it as `unprobed`. Under `Suite::required_on_mutating()`
 a `Sink` or `Delete` is also fired once per required by-value input, and once more as
 the baseline when the pipeline probe did not fire it. Sinks land: capture what a
-fixture reads before the walk and assert effects after it.
+fixture reads before the walk and assert effects after it. Each
+`Suite::enforced_under` probe fires its action once more, as the probe's caller.
 
 **An endpoint bound N times is fired once per DISTINCT request those bindings
 produce, not N times.** The invoking checks are memoized on the request, because
@@ -592,6 +597,53 @@ value; declare `xsd:string` — the type the wire carries — and say so in a co
 The kernel's own `urn:kernel:*` operations are core's, not the module's: the walk
 skips them unless `Suite::include_kernel_ops()` asks.
 
+### A module's own access rule (`Suite::enforced_under`)
+
+`ENFORCED` probes every action under a capability holding no grants. For an action
+declaring a parameterized scope (`urn:cap:net:*`, `urn:cap:secret:read:*`) the kernel's
+floor refuses that caller before the endpoint runs, so the typed `Denied` the check sees
+is the kernel's, and the module's own rule (per host, per name, per prefix: the real
+gate) is never reached. Nine adoptions tested it by hand, and two found real defects: a
+per-host refusal returned as `Error::Endpoint` (ikigai-llm), and a refusal flattened
+into a string on the way out (ikigai-lisp).
+
+`Suite::enforced_under(probe)` names a caller that passes the floor but should not pass
+the module, and the inputs that reach the rule:
+
+```rust
+use ikigai_conformance::{Fixture, Suite};
+use ikigai_core::{Capability, Verb};
+
+let report = Suite::new()
+    .enforced_under(
+        Fixture::new("http-get", Verb::Source)
+            .arg("url", "http://127.0.0.1/")
+            .capability(Capability::scoped(["urn:cap:net:example.com"])),
+    )
+    .run_blocking(&my_kernel());
+```
+
+The module must refuse it with a typed `Denied`, on its own path or on a sub-request it
+makes. Resolving is an `ENFORCED` finding (the rule let the caller through), and so is
+any other refusal (the type was lost). Each probe that ran is an `enforced under:` line
+saying where the refusal came from, read from the kernel's trace: `by the endpoint
+itself`, `on its sub-request <iri>`, or `by the kernel's floor`, which means the probe's
+caller lacks a declared scope and never reached the module's rule (a `DECLARATIONS`
+finding, as is a probe with no caller, or one for an action the walk did not run).
+
+Why a `Fixture` and its own list, not a flag on the action's fixture: a gate in a
+SUB-RESOLUTION is reachable only by its own input shape (an `http(s)://` stylesheet, a
+program that issues a request, a remote context), which is not the input the walk's
+happy path wants, and one action can have several shapes worth pinning (ikigai-meeting
+tested five). So the probe's arguments are laid over the walk's minimal ones for that
+action, its bindings form the target for the probe alone, and the action's own fixture
+is untouched.
+
+Opt-in: nothing is probed for an action no `enforced_under` names, so a suite that does
+not call it reports exactly what it did. Where the kernel's floor IS the whole gate (an
+exact scope, ikigai-encrypt), there is no "some grant, but not this one" caller to name,
+and no probe to write.
+
 ### Through a mount
 
 A mounted binding carries an `origin` (the mount's alias or connection), and two things
@@ -622,7 +674,7 @@ not reach as loudly as what it found.
 
 ```
 0 finding(s) across 6 endpoint(s), 9 action(s)
-checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS* SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES
+checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS* SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES RECOMPUTE
 * OUTPUTS ran on 1 of 6 endpoint(s); waived on the rest (see `opted out:`)
 probed 7 face(s) across 5 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
@@ -865,6 +917,52 @@ anyone memoizes by id.
 
 0.8.4. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.8.4 → next (unreleased): `RECOMPUTE`, `Suite::enforced_under` (ledger #330, #331)
+
+**What is new.**
+
+- **`RECOMPUTE`** (ledger #330), a sixteenth check, on by default. `CACHEABLE`'s second
+  resolution is the cache hit, so "byte-identical" compared the first computation with a
+  copy of itself, and a wrong `.cacheable()` walked clean (`ikigai-encrypt`'s age
+  ciphertext, a fresh ephemeral key per call). For a cached `Expiry::Never` answer,
+  `RECOMPUTE` cuts every thread the answer carries and the name of everything it read,
+  resolves again, and holds the bytes to the first computation's; then it cuts each
+  thread an endpoint declared alone and does the same. It needs nothing from core: a
+  pure answer has a thread to cut too (its own name, core 0.1.73). Each clean
+  recomputation is a `recomputed:` line; an `Expiry::At` answer is exempt.
+- **`Suite::enforced_under(Fixture)`** (ledger #331), opt-in. `ENFORCED` proves the
+  kernel's floor; this reaches the module's own rule with a caller that passes the floor
+  but should not pass the module, and requires a typed `Denied`. See
+  [A module's own access rule](#a-modules-own-access-rule-suiteenforced_under).
+
+**Will it turn a green suite red?** `Suite::enforced_under` cannot: nothing is probed
+for an action no probe names. `RECOMPUTE` was run against 40 adopter repos (every
+version-pinned adopter but the retired ikigai-dev-server) before release. It turned five
+red:
+
+- **Four real defects**, each a cacheable answer whose bytes differ per computation over
+  the same input, three of them a `HashMap`-order serialization: `jsonld-flatten`
+  (ikigai-jsonld; the node order over a document with blank nodes), `shacl-validate`
+  (ikigai-shacl; the statement order AND the content-addressed report IRIs differ per
+  run, 6 distinct outputs in 6 runs), `rdf-union` (ikigai-linkeddata's ikigai-rdf; the
+  statement order, 4 distinct outputs in 8 runs), and `ledger-doctor` (ikigai-ledger;
+  the text face stamps `checked: … at <now>` and is cached `Expiry::Never` until a write,
+  so a reader is served the first computation's time, which may be by design: if it is,
+  waive `RECOMPUTE` for it with that reason).
+- **One footprint pin, not a defect**: ikigai-org counts how often its fixture file is
+  read (2), and a cut re-reads it (8). Update the count, or subtract `RECOMPUTE`
+  (`Checks::all() - Checks::RECOMPUTE`) for that suite.
+
+A selection built from named checks (`Checks::CACHEABLE | …`) runs `RECOMPUTE` only if it
+names it; `Checks::all()` and `Checks::INVOKING` are derived, so they include it.
+
+**Source changes for a consumer:** none required. `Check` is `#[non_exhaustive]`, and the
+new `Evidence` fields are on a `#[non_exhaustive]` struct.
+
+**Footprint.** One more resolution per cached `Expiry::Never` answer, plus one per
+declared thread, and the cut re-reads what each answer was built from; one per
+`enforced_under` probe.
 
 ### 0.8.3 → 0.8.4: `RESOLVES`, walks through a mount, an all-optional `Sink`, report ergonomics
 

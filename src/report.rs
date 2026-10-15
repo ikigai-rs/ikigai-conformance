@@ -359,6 +359,101 @@ pub struct RequiredProbe {
     pub refusal: Option<String>,
 }
 
+/// Where a [`Suite::enforced_under`](crate::Suite::enforced_under) probe's refusal
+/// came from, read from the kernel's trace of the probe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RefusedBy {
+    /// The endpoint itself returned the `Denied`: its own rule was reached.
+    Module,
+    /// A sub-request the endpoint made was refused, by the kernel's floor or by the
+    /// endpoint it reached, and the typed `Denied` came back on the module's path: the
+    /// gate that lives in a sub-resolution (a remote stylesheet, a program's own
+    /// request) was reached.
+    SubRequest {
+        /// The sub-request's target IRI.
+        target: String,
+    },
+    /// The kernel's floor refused the probe before the endpoint ran, because the
+    /// caller lacks a scope the action declares (`lacking`). The module's own rule
+    /// was NOT reached: the probe's capability is the problem, and
+    /// [`Check::Declarations`] says so.
+    Floor {
+        /// The declared scope the caller lacked, as the kernel named it.
+        lacking: String,
+    },
+    /// No trace event says where (a path that records none, such as a peer across a
+    /// mount): the `Denied` is typed, and its origin is unknown.
+    Untraced,
+}
+
+/// One [`Suite::enforced_under`](crate::Suite::enforced_under) probe and what it got:
+/// the evidence that a module's OWN access rule was reached, printed as an
+/// `enforced under:` line.
+///
+/// ```
+/// use ikigai_conformance::{Checks, Fixture, RefusedBy, Suite};
+/// use ikigai_core::{
+///     ArgSpec, Capability, Description, EndpointSpace, Error, Exact, FnEndpoint, Invocation,
+///     Kernel, ReprType, Representation, Verb,
+/// };
+/// use std::sync::Arc;
+///
+/// // A per-name rule: some grant under `urn:cap:example:read:` passes the kernel's
+/// // floor, and the endpoint answers only for the name the grant names.
+/// let secret = FnEndpoint::new("secret", |inv: &Invocation<'_>| {
+///     let name = inv.inline_str("name")?;
+///     if !inv.capability.allows(&format!("urn:cap:example:read:{name}")) {
+///         return Err(Error::Denied(format!("no grant on `{name}`")));
+///     }
+///     Ok(Representation::new(ReprType::new("text/plain"), b"s3cret".to_vec()))
+/// })
+/// .with_description(
+///     Description::new("secret")
+///         .verb(Verb::Source)
+///         .input(ArgSpec::new("name").class("http://www.w3.org/2001/XMLSchema#string"))
+///         .output("text/plain")
+///         .requires("urn:cap:example:read:*"),
+/// );
+/// let space = EndpointSpace::new().bind(Exact::new("urn:example:secret"), secret);
+/// let report = Suite::new()
+///     .checks(Checks::ENFORCED)
+///     .enforced_under(
+///         Fixture::new("secret", Verb::Source)
+///             .arg("name", "db")
+///             .capability(Capability::scoped(["urn:cap:example:read:mail"])),
+///     )
+///     .run_blocking(&Kernel::new(Arc::new(space)));
+/// report.assert_clean();
+/// let probe = &report.enforced_under_probes()[0];
+/// assert_eq!(probe.refusal.as_deref(), Some("denied"));
+/// assert_eq!(probe.refused_by, Some(RefusedBy::Module));
+/// assert!(report.to_string().contains(
+///     "enforced under: secret source name=\"db\" holding `urn:cap:example:read:mail`: \
+///      refused denied by the endpoint itself\n"
+/// ), "{report}");
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EnforcedUnder {
+    /// The endpoint's description id.
+    pub endpoint: String,
+    /// The action's verb.
+    pub verb: Verb,
+    /// The probe's bindings and arguments, as a fixture line prints them, without its
+    /// caller (which is [`holding`](Self::holding)).
+    pub probe: String,
+    /// The scopes the probe's caller holds, its principal included, sorted.
+    pub holding: Vec<String>,
+    /// The kind of refusal the probe got, as
+    /// [`Error::kind`](ikigai_core::Error::kind) names it (`denied` is the one the
+    /// check expects), or `None` when it RESOLVED: the module's rule let a caller
+    /// through that it should have refused, which is a finding.
+    pub refusal: Option<String>,
+    /// Where a `Denied` came from; `None` for any other outcome.
+    pub refused_by: Option<RefusedBy>,
+}
+
 /// What the walk observed beyond findings and faces: `REQUIRED`'s evidence and the
 /// waivers that suppressed nothing. Filled in by the walk, like
 /// [`Declarations::inherited`]; read it through [`Report::required_probes`],
@@ -394,6 +489,64 @@ pub struct Evidence {
     /// [`inherited_because`](Self::inherited_because) is; read it through
     /// [`Report::label`].
     pub label: Option<String>,
+    /// Every [`Suite::enforced_under`](crate::Suite::enforced_under) probe that ran, in
+    /// walk order (`enforced under:` lines): the evidence that a module's own access
+    /// rule, not only the kernel's floor, was reached.
+    pub enforced_under: Vec<EnforcedUnder>,
+    /// Every cacheable result the forced-recomputation witness of
+    /// [`Check::Recompute`] recomputed and found identical, in walk order
+    /// (`recomputed:` lines).
+    pub recomputed: Vec<Recomputed>,
+}
+
+/// One cacheable result [`Check::Recompute`] forced to recompute and found
+/// byte-identical: the evidence a clean `RECOMPUTE` stands on, printed as a
+/// `recomputed:` line.
+///
+/// The cacheable-twice probe's second resolution is the cache hit, so it can only
+/// repeat the first. The witness cuts every thread of the first result, its own name
+/// included, and everything it read, resolves again, and holds the bytes to the
+/// first's; then cuts each thread an endpoint DECLARED alone, and does the same.
+///
+/// ```
+/// use ikigai_conformance::{Checks, Suite};
+/// use ikigai_core::{
+///     ArgSpec, Description, EndpointSpace, Exact, FnEndpoint, Invocation, Kernel, ReprType,
+///     Representation, Verb,
+/// };
+/// use std::sync::Arc;
+///
+/// let upper = FnEndpoint::new("upper", |inv: &Invocation<'_>| {
+///     Ok(Representation::new(ReprType::new("text/plain"),
+///         inv.inline_str("in")?.to_uppercase().into_bytes()).cacheable())
+/// })
+/// .with_description(Description::new("upper").verb(Verb::Source)
+///     .input(ArgSpec::new("in").class("http://www.w3.org/2001/XMLSchema#string"))
+///     .output("text/plain"));
+/// let space = EndpointSpace::new().bind(Exact::new("urn:example:upper"), upper);
+/// let report = Suite::new()
+///     .checks(Checks::CACHEABLE | Checks::RECOMPUTE)
+///     .pure("upper")
+///     .run_blocking(&Kernel::new(Arc::new(space)));
+/// report.assert_clean();
+/// assert_eq!(report.recomputed()[0].cut, 1); // its own name
+/// assert!(report.to_string().contains(
+///     "recomputed: upper source after a cut of 1 thread(s): identical\n"
+/// ), "{report}");
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Recomputed {
+    /// The endpoint's description id.
+    pub endpoint: String,
+    /// The action's verb.
+    pub verb: Verb,
+    /// How many threads the forced recomputation cut: every thread of the first
+    /// result and the name of everything it read.
+    pub cut: usize,
+    /// How many of them an endpoint declared (`depends_on`), each also cut alone and
+    /// recomputed once more.
+    pub declared: usize,
 }
 
 /// What one run of the suite found.
@@ -646,6 +799,19 @@ impl Report {
     /// lines), in declaration order. Empty when nothing was declared with a reason.
     pub fn inherited_because(&self) -> &[Inherited] {
         &self.declared.evidence.inherited_because
+    }
+
+    /// Every [`Suite::enforced_under`](crate::Suite::enforced_under) probe that ran and
+    /// what it got, in walk order: the evidence behind a clean `ENFORCED` on a module's
+    /// own access rule (the `enforced under:` lines). Empty when the suite declared none.
+    pub fn enforced_under_probes(&self) -> &[EnforcedUnder] {
+        &self.declared.evidence.enforced_under
+    }
+
+    /// Every cacheable result [`Check::Recompute`]'s forced-recomputation witness
+    /// recomputed and found identical (the `recomputed:` lines), in walk order.
+    pub fn recomputed(&self) -> &[Recomputed] {
+        &self.declared.evidence.recomputed
     }
 
     /// Which run produced this report: the [`Suite::label`](crate::Suite::label), or
@@ -950,6 +1116,59 @@ impl fmt::Display for Report {
             }
             if let Some(why) = &evidence.required_nothing {
                 writeln!(f, "required: nothing dropped — {why}")?;
+            }
+        }
+        // What the forced recomputation saw, as `required:` says what was dropped.
+        if self.checks.contains(Check::Recompute) {
+            for r in &declared.evidence.recomputed {
+                write!(
+                    f,
+                    "recomputed: {} {} after a cut of {} thread(s)",
+                    visible(&r.endpoint),
+                    verb_name(r.verb),
+                    r.cut
+                )?;
+                if r.declared > 0 {
+                    write!(f, ", and of each of {} declared one alone", r.declared)?;
+                }
+                writeln!(f, ": identical")?;
+            }
+        }
+        // What each `enforced_under` probe got: the module's own rule, reached or not.
+        for p in &declared.evidence.enforced_under {
+            let holding = p
+                .holding
+                .iter()
+                .map(|s| format!("`{}`", visible(s)))
+                .collect::<Vec<_>>();
+            write!(
+                f,
+                "enforced under: {} holding {}: ",
+                p.probe,
+                if holding.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    holding.join(", ")
+                }
+            )?;
+            match (&p.refusal, &p.refused_by) {
+                (None, _) => writeln!(f, "resolved — the module's own rule let it through")?,
+                (Some(kind), None) => writeln!(f, "refused {kind} — not a typed `Denied`")?,
+                (Some(kind), Some(RefusedBy::Module)) => {
+                    writeln!(f, "refused {kind} by the endpoint itself")?
+                }
+                (Some(kind), Some(RefusedBy::SubRequest { target })) => {
+                    writeln!(f, "refused {kind} on its sub-request `{}`", visible(target))?
+                }
+                (Some(kind), Some(RefusedBy::Floor { lacking })) => writeln!(
+                    f,
+                    "refused {kind} by the kernel's floor (it lacks `{}`) — the module's own \
+                     rule was not reached",
+                    visible(lacking)
+                )?,
+                (Some(kind), Some(RefusedBy::Untraced)) => {
+                    writeln!(f, "refused {kind} (no trace says where)")?
+                }
             }
         }
         for out in &declared.opted_out {
@@ -1275,6 +1494,8 @@ mod tests {
                 spaces: vec![],
                 evidence: Evidence {
                     label: None,
+                    enforced_under: vec![],
+                    recomputed: vec![],
                     required: vec![RequiredProbe {
                         endpoint: id.into(),
                         verb: Verb::Source,
@@ -1396,6 +1617,8 @@ mod tests {
                 ],
                 evidence: Evidence {
                     label: None,
+                    enforced_under: vec![],
+                    recomputed: vec![],
                     required: vec![
                         RequiredProbe {
                             endpoint: "cms-graph".into(),

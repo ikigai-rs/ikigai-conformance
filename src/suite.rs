@@ -8,14 +8,15 @@ use std::sync::{Arc, Mutex};
 use ikigai_core::{
     space_iri, ActionSpec, ArgRef, ArgSpec, Capability, Description, Error, Expiry, InputSource,
     Iri, Kernel, Representation, Request, Space, SpaceEntry, SpaceKind, Thread, Topology,
-    TraceEvent, Tracer, UriTemplate, Verb, SPACE_PREFIX,
+    TraceEvent, Tracer, UriTemplate, Verb, DENIED_NOTE, FAILED_NOTE, SPACE_PREFIX,
 };
 
 use crate::checks::{Check, Checks};
 use crate::rdf;
 use crate::report::{
-    Collapsed, Declarations, DeclaredSpace, Evidence, Finding, Inherited, OptedOut, OptedOutAt,
-    OptedOutCheck, Probed, Report, RequiredProbe, SpaceNaming, Unprobed,
+    Collapsed, Declarations, DeclaredSpace, EnforcedUnder, Evidence, Finding, Inherited, OptedOut,
+    OptedOutAt, OptedOutCheck, Probed, Recomputed, RefusedBy, Report, RequiredProbe, SpaceNaming,
+    Unprobed,
 };
 
 /// The kernel's own operations are listed by [`Kernel::entries`] ahead of the root
@@ -482,6 +483,13 @@ struct Coverage {
     required_mutating_candidates: bool,
     /// Ids [`Suite::own`] scoped out: bound, and deliberately not walked.
     inherited: BTreeSet<String>,
+    /// The [`Suite::enforced_under`] probes (by index) that ran at some binding.
+    under_ran: BTreeSet<usize>,
+    /// The probes the kernel's floor refused before the endpoint ran, with the scope
+    /// the caller lacked: they did not reach the module's own rule.
+    under_floor: BTreeMap<usize, String>,
+    /// The probes whose bindings formed no IRI at some binding, with why.
+    under_untargeted: BTreeMap<usize, String>,
 }
 
 /// The input names one action declares: by value (what a fixture argument may
@@ -646,6 +654,7 @@ struct OptOutCheck {
 pub struct Suite {
     checks: Checks,
     fixtures: Vec<Fixture>,
+    enforced_under: Vec<Fixture>,
     opt_outs: Vec<OptOut>,
     opt_outs_at: Vec<OptOutAt>,
     opt_out_checks: Vec<OptOutCheck>,
@@ -673,6 +682,7 @@ impl Suite {
         Suite {
             checks: Checks::all(),
             fixtures: Vec::new(),
+            enforced_under: Vec::new(),
             opt_outs: Vec::new(),
             opt_outs_at: Vec::new(),
             opt_out_checks: Vec::new(),
@@ -698,6 +708,82 @@ impl Suite {
     /// Supply inputs for one action.
     pub fn fixture(mut self, fixture: Fixture) -> Self {
         self.fixtures.push(fixture);
+        self
+    }
+
+    /// Hold one action's OWN access rule to a typed `Denied`, under a caller that
+    /// passes the kernel's floor but should not pass the module (ledger #331).
+    ///
+    /// [`Check::Enforced`] probes every action under a capability holding no grants,
+    /// so for an action declaring a parameterized scope (`urn:cap:net:*`,
+    /// `urn:cap:secret:read:*`) the kernel refuses first, before the endpoint runs,
+    /// and the `Denied` the check sees is the kernel's. The module's own rule (per
+    /// host, per name, per prefix: the real gate) is never reached. This probe
+    /// reaches it: the caller holds SOME grant under the declared prefix, but not the
+    /// one for this target, so the floor lets it through and only the module can
+    /// refuse. The module must refuse with a typed `Denied`, on its own path or on a
+    /// sub-request it makes; it is a finding when it resolves (the rule let the caller
+    /// through) and when it refuses some other way (an `Error::Endpoint`, a refusal
+    /// wrapped into prose: the type was lost on the way out).
+    ///
+    /// The probe is a [`Fixture`], so it says everything a fixture can: the caller
+    /// ([`Fixture::capability`], required: a probe without one would run as root,
+    /// which holds every grant, so it does not run and
+    /// [`Check::Declarations`] says so), and the inputs that reach the gate, which
+    /// need not be the walk's. A gate in a SUB-RESOLUTION is reachable only by its own
+    /// input shape (an `http(s)://` stylesheet, a program that issues a request, a
+    /// remote context), so the probe's arguments are laid over the walk's minimal ones
+    /// for this action (a [`Suite::fixture`]'s included) and its bindings form the
+    /// target for this probe alone. It does not replace the action's fixture, and an
+    /// action can have several probes: one per capability shape worth pinning.
+    ///
+    /// Opt-in: nothing is probed for an action no `enforced_under` names. It runs
+    /// where `ENFORCED` runs (selected, not waived for the id) and fires the action
+    /// once per probe, under the probe's caller: a `Sink` or a `Delete` named here is
+    /// fired, and fired successfully only if the rule is broken. The trace says where
+    /// the refusal came from ([`RefusedBy`]), printed as an `enforced under:` line; a
+    /// refusal by the kernel's floor means the probe's caller lacks a declared scope,
+    /// so the module's rule was not reached, and [`Check::Declarations`] reports the
+    /// probe.
+    ///
+    /// ```
+    /// use ikigai_conformance::{Check, Checks, Fixture, Suite};
+    /// use ikigai_core::{
+    ///     ArgSpec, Capability, Description, EndpointSpace, Error, Exact, FnEndpoint, Invocation,
+    ///     Kernel, ReprType, Representation, Verb,
+    /// };
+    /// use std::sync::Arc;
+    ///
+    /// // A per-host rule that LOSES the type: it refuses with `Error::Endpoint`.
+    /// let fetch = FnEndpoint::new("fetch", |inv: &Invocation<'_>| {
+    ///     let host = inv.inline_str("host")?;
+    ///     if !inv.capability.allows(&format!("urn:cap:net:{host}")) {
+    ///         return Err(Error::Endpoint(format!("could not fetch from {host}")));
+    ///     }
+    ///     Ok(Representation::new(ReprType::new("text/plain"), b"ok".to_vec()))
+    /// })
+    /// .with_description(
+    ///     Description::new("fetch")
+    ///         .verb(Verb::Source)
+    ///         .input(ArgSpec::new("host").class("http://www.w3.org/2001/XMLSchema#string"))
+    ///         .output("text/plain")
+    ///         .requires("urn:cap:net:*"),
+    /// );
+    /// let space = EndpointSpace::new().bind(Exact::new("urn:example:fetch"), fetch);
+    /// let report = Suite::new()
+    ///     .checks(Checks::ENFORCED)
+    ///     .enforced_under(
+    ///         Fixture::new("fetch", Verb::Source)
+    ///             .arg("host", "127.0.0.1")
+    ///             .capability(Capability::scoped(["urn:cap:net:example.com"])),
+    ///     )
+    ///     .run_blocking(&Kernel::new(Arc::new(space)));
+    /// // The no-grants probe alone is clean: the kernel's floor refused it, typed.
+    /// let finding = report.of(Check::Enforced).next().expect("the module's rule is probed");
+    /// assert!(finding.detail.contains("got `endpoint`"), "{report}");
+    /// ```
+    pub fn enforced_under(mut self, probe: Fixture) -> Self {
+        self.enforced_under.push(probe);
         self
     }
 
@@ -1584,6 +1670,25 @@ impl Suite {
                     continue;
                 }
                 coverage.record_invoked(&description.id, spec.verb);
+                let mut under: Vec<UnderProbe<'_>> = Vec::new();
+                for (index, probe) in self.enforced_under.iter().enumerate() {
+                    if probe.id != description.id || probe.verb != spec.verb {
+                        continue;
+                    }
+                    if probe.capability.is_none() {
+                        continue;
+                    }
+                    match self.target_with(&entry, &description, Some(&probe.bindings)) {
+                        Ok(target) => under.push(UnderProbe {
+                            index,
+                            probe,
+                            target,
+                        }),
+                        Err(why) => {
+                            coverage.under_untargeted.entry(index).or_insert(why);
+                        }
+                    }
+                }
                 let mut action = Action {
                     suite: self,
                     kernel,
@@ -1594,6 +1699,10 @@ impl Suite {
                     minimal: None,
                     fired: None,
                     no_grants: None,
+                    repeated: None,
+                    under,
+                    under_ran: Vec::new(),
+                    under_floor: Vec::new(),
                     failure_reported: false,
                     caller: self
                         .fixture_for(&description.id, spec.verb)
@@ -1613,16 +1722,25 @@ impl Suite {
                 // After PIPELINE, so a mutating action's baseline is the one firing
                 // the pipeline probe already made.
                 action.required(&mut report).await;
-                // Last: it reads what the checks above already resolved and fires
+                // Last of the answer-judging checks: it reads what the checks above resolved and fires
                 // nothing new for a mutating verb, so the walk's footprint stays
                 // "Source once or twice, Sink once, Delete never".
                 action.outputs(&mut report).await;
+                // After CACHEABLE, because it cuts and CACHEABLE reads the cache as its
+                // own two resolutions left it; and after every check that reads the
+                // minimal resolution, so a failed one is still reported as needed by
+                // the check that always needed it.
+                action.recompute(&mut report).await;
                 // Positive evidence for a face the RDF checks do not cover: what
                 // this action actually served, whatever its media type. Fires
                 // nothing of its own — it reads what the checks above resolved.
                 action.record_probe(&mut report);
                 if action.caller_used {
                     coverage.record_caller_used(&description.id, spec.verb);
+                }
+                coverage.under_ran.extend(action.under_ran.iter().copied());
+                for (index, lacking) in std::mem::take(&mut action.under_floor) {
+                    coverage.under_floor.entry(index).or_insert(lacking);
                 }
                 // Last of all, once the walk proper is done with the action: every
                 // check WAIVED for it runs again with its findings set aside, so the
@@ -1904,7 +2022,73 @@ impl Suite {
         self.namespace_declarations(coverage, report);
         self.space_declarations(report);
         self.fixture_declarations(coverage, report);
+        self.enforced_under_declarations(coverage, report);
         self.opt_out_declarations(coverage, report);
+    }
+
+    /// An [`enforced_under`](Suite::enforced_under) probe that never ran, or ran and
+    /// never reached the module's rule, tested nothing it says it did.
+    fn enforced_under_declarations(&self, coverage: &Coverage, report: &mut Report) {
+        for (index, probe) in self.enforced_under.iter().enumerate() {
+            let id = &probe.id;
+            let shown = Fixture {
+                capability: None,
+                ..probe.clone()
+            };
+            if probe.capability.is_none() {
+                self.inert(
+                    report,
+                    id,
+                    format!(
+                        "`Suite::enforced_under` probe `{shown}` names no caller \
+                         (`Fixture::capability`): it would run as root, which holds every \
+                         grant and can be refused by nothing, so it did not run. Give it a \
+                         caller holding some grant under the declared prefix, but not the one \
+                         for this target"
+                    ),
+                );
+                continue;
+            }
+            if let Some(lacking) = coverage.under_floor.get(&index) {
+                self.inert(
+                    report,
+                    id,
+                    format!(
+                        "`Suite::enforced_under` probe `{shown}` was refused by the kernel's \
+                         floor before the endpoint ran (its caller lacks `{}`), so the \
+                         module's own rule was never reached and the probe tested only what \
+                         ENFORCED's no-grants probe already does. Its caller must satisfy \
+                         every scope the action declares (some grant under a `…:*` prefix) \
+                         and still not hold the one for this target",
+                        crate::report::visible(lacking)
+                    ),
+                );
+                continue;
+            }
+            if coverage.under_ran.contains(&index) {
+                continue;
+            }
+            let why = if let Some(why) = coverage.under_untargeted.get(&index) {
+                format!("its bindings formed no IRI: {why}")
+            } else if let Some(why) = self.unreachable_check(id, Check::Enforced, coverage, true) {
+                why
+            } else if !coverage.declares(id, probe.verb) {
+                format!(
+                    "`{id}` declares no {} action ({})",
+                    crate::report::verb_name(probe.verb),
+                    verb_list(&coverage.verbs_of(id))
+                )
+            } else if coverage.is_opted_out(id, Some(probe.verb)) {
+                "the action is excluded by `Suite::opt_out`".to_string()
+            } else {
+                "no binding of the action was invoked".to_string()
+            };
+            self.inert(
+                report,
+                id,
+                format!("`Suite::enforced_under` probe `{shown}` never ran: {why}"),
+            );
+        }
     }
 
     /// Why `CACHEABLE` never ran for `id` — in the order a reader would ask.
@@ -1973,9 +2157,11 @@ impl Suite {
             );
         }
         match check {
-            Check::Cacheable if !coverage.verbs_of(id).iter().any(|v| v.is_cacheable()) => {
+            Check::Cacheable | Check::Recompute
+                if !coverage.verbs_of(id).iter().any(|v| v.is_cacheable()) =>
+            {
                 Some(format!(
-                    "it declares no cacheable verb ({}), and CACHEABLE returns early on a \
+                    "it declares no cacheable verb ({}), and {check} returns early on a \
                      mutating one",
                     verb_list(&coverage.verbs_of(id))
                 ))
@@ -2472,6 +2658,17 @@ impl Suite {
     /// IRI, else the template expanded with fixture bindings or values derived
     /// from the declared binding inputs.
     fn target_for(&self, entry: &SpaceEntry, description: &Description) -> Result<Iri, String> {
+        self.target_with(entry, description, None)
+    }
+
+    /// [`target_for`](Self::target_for), with `first` (an `enforced_under` probe's
+    /// bindings) read ahead of every fixture's.
+    fn target_with(
+        &self,
+        entry: &SpaceEntry,
+        description: &Description,
+        first: Option<&BTreeMap<String, String>>,
+    ) -> Result<Iri, String> {
         if let Ok(iri) = Iri::parse(&entry.pattern) {
             return Ok(iri);
         }
@@ -2483,11 +2680,12 @@ impl Suite {
         })?;
         let mut bindings = ikigai_core::Bindings::new();
         for var in template.variables() {
-            let from_fixture = self
-                .fixtures
-                .iter()
-                .filter(|f| f.id == description.id)
-                .find_map(|f| f.bindings.get(var).cloned());
+            let from_fixture = first.and_then(|b| b.get(var).cloned()).or_else(|| {
+                self.fixtures
+                    .iter()
+                    .filter(|f| f.id == description.id)
+                    .find_map(|f| f.bindings.get(var).cloned())
+            });
             let value = from_fixture.unwrap_or_else(|| {
                 binding_input(description, var)
                     .map(sample_value)
@@ -3008,6 +3206,14 @@ impl Tracer for Collector {
     }
 }
 
+/// One [`Suite::enforced_under`] probe for the action at hand: which declaration it
+/// is, and the IRI its bindings formed at this binding.
+struct UnderProbe<'a> {
+    index: usize,
+    probe: &'a Fixture,
+    target: Iri,
+}
+
 /// One action under examination: the memoized minimal resolution under root,
 /// what the pipeline probe got back when it fired the action, and whether the
 /// minimal resolution's failure has already been reported (once, under the first
@@ -3026,6 +3232,16 @@ struct Action<'a> {
     /// What the action did under a capability holding no grants. ENFORCED and
     /// AUTHORITY read the same one resolution: two probes would fire a Sink twice.
     no_grants: Option<Result<Representation, Error>>,
+    /// Whether CACHEABLE's second resolution repeated the first's bytes; `None` when it
+    /// made none. RECOMPUTE stands down on `Some(false)`: the finding is already made.
+    repeated: Option<bool>,
+    /// The [`Suite::enforced_under`] probes for this action, each with its target.
+    under: Vec<UnderProbe<'a>>,
+    /// The probes that ran (by index), for DECLARATIONS.
+    under_ran: Vec<usize>,
+    /// The probes the kernel's floor refused before the endpoint ran, with the scope
+    /// the caller lacked.
+    under_floor: Vec<(usize, String)>,
     failure_reported: bool,
     /// Who every answer-judging probe resolves as: root, or the capability a
     /// [`Fixture::capability`] named for this action. Never the no-grants probe's.
@@ -3098,6 +3314,7 @@ impl<'a> Action<'a> {
                 self.rdf_faces(&mut scratch, &mut coverage).await
             }
             Check::Cacheable => self.cacheable(&mut scratch, &mut coverage).await,
+            Check::Recompute => self.recompute(&mut scratch).await,
             Check::Pipeline => self.pipeline(&mut scratch).await,
             Check::Required => self.required(&mut scratch).await,
             Check::Outputs => self.outputs(&mut scratch).await,
@@ -3372,6 +3589,93 @@ impl<'a> Action<'a> {
                 ),
             ));
         }
+        for i in 0..self.under.len() {
+            self.enforced_under(i, report).await;
+        }
+    }
+
+    /// Fire one [`Suite::enforced_under`] probe and judge what it got: a typed
+    /// `Denied` on the module's path, or a finding. Where the refusal came from is
+    /// read from the trace: a `denied` note on the ROOT event is the kernel's floor
+    /// (the endpoint never ran), a `failed` one is the endpoint's own refusal, and a
+    /// refusal on a deeper event is a sub-request's.
+    async fn enforced_under(&mut self, i: usize, report: &mut Report) {
+        if !self.may_fire() {
+            return;
+        }
+        let (index, probe, target) = {
+            let u = &self.under[i];
+            (u.index, u.probe, u.target.clone())
+        };
+        let Some(caller) = probe.capability.clone() else {
+            return;
+        };
+        let mut args = self.suite.args_for(self.id, self.spec);
+        for (name, value) in &probe.args {
+            args.insert(name.clone(), value.clone());
+        }
+        let collector = Arc::new(Collector::default());
+        let tracer: Arc<dyn Tracer> = collector.clone();
+        let result = self
+            .kernel
+            .issue_traced(
+                build_request(self.spec.verb, &target, &args),
+                &caller,
+                tracer,
+            )
+            .await;
+        let events = std::mem::take(&mut *collector.0.lock().expect("collector lock"));
+        self.under_ran.push(index);
+        let shown = Fixture {
+            capability: None,
+            ..probe.clone()
+        }
+        .to_string();
+        let holding: Vec<String> = caller
+            .scopes()
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+        let (refusal, refused_by) = match &result {
+            Ok(_) => (None, None),
+            Err(Error::Denied(_)) => (Some("denied".to_string()), Some(refused_by(&events))),
+            Err(other) => (Some(other.kind().to_string()), None),
+        };
+        match (&result, &refused_by) {
+            (Ok(_), _) => report.findings.push(self.finding(
+                Check::Enforced,
+                format!(
+                    "resolved under the `enforced_under` caller holding {} (`{shown}`): \
+                     that caller should be refused by the module's own rule, and it was let \
+                     through. Declared is not enforced for this target",
+                    shown_scopes(&holding)
+                ),
+            )),
+            (Err(Error::Denied(_)), Some(RefusedBy::Floor { lacking })) => {
+                self.under_floor.push((index, lacking.clone()));
+            }
+            (Err(Error::Denied(_)), _) => {}
+            (Err(other), _) => report.findings.push(self.finding(
+                Check::Enforced,
+                format!(
+                    "under the `enforced_under` caller holding {} (`{shown}`) expected a typed \
+                     `Denied` from the module's own rule, got `{}`: {other}. A refusal that \
+                     is not typed `Denied` (an `Error::Endpoint`, a refusal wrapped into a \
+                     message) reads to a caller and to an agent as a failure, not as \
+                     \"you may not\"; return `Error::Denied`, and pass a sub-request's \
+                     `Denied` through unchanged",
+                    shown_scopes(&holding),
+                    other.kind()
+                ),
+            )),
+        }
+        report.declared.evidence.enforced_under.push(EnforcedUnder {
+            endpoint: self.id.to_string(),
+            verb: self.spec.verb,
+            probe: shown,
+            holding,
+            refusal,
+            refused_by,
+        });
     }
 
     // ----- AUTHORITY ----------------------------------------------------------
@@ -3677,7 +3981,8 @@ impl<'a> Action<'a> {
                 return;
             }
         };
-        if second.bytes != first.bytes {
+        let repeated = second.bytes == first.bytes;
+        if !repeated {
             report.findings.push(self.finding(
                 Check::Cacheable,
                 "marked cacheable but two identical resolutions returned different bytes: \
@@ -3749,6 +4054,203 @@ impl<'a> Action<'a> {
                  endpoint declares no `Sink` or `Delete`. `Suite::pure(id)` if it is a pure \
                  function of its inputs; otherwise `depends_on` the thread of the state it reads",
             ));
+        }
+        // RECOMPUTE reads this: when the second resolution came back different, the
+        // finding is made here and a forced recomputation would only repeat it.
+        self.repeated = Some(repeated);
+    }
+
+    // ----- RECOMPUTE ----------------------------------------------------------
+
+    /// The forced-recomputation witness's entry (ledger #330): an `Expiry::Never`
+    /// answer the cache holds, recomputed after a cut. Late in the walk, after
+    /// CACHEABLE, because it cuts: CACHEABLE reads the cache as its two resolutions
+    /// left it.
+    async fn recompute(&mut self, report: &mut Report) {
+        if !self.runs(Check::Recompute) || !self.spec.verb.is_cacheable() {
+            return;
+        }
+        if self.repeated == Some(false) {
+            return;
+        }
+        let (first, first_events) = match self.resolve_minimal(false).await {
+            Ok(first) => first,
+            Err(err) => {
+                let args = self.suite.args_for(self.id, self.spec);
+                self.report_failure(Check::Recompute, &err, &args, report);
+                return;
+            }
+        };
+        if first.expiry != Expiry::Never {
+            return;
+        }
+        let args = self.suite.args_for(self.id, self.spec);
+        if !self.kernel.is_cached(&self.request(&args), &self.caller) {
+            // Never stored (a volatile dependency, a cache policy): every read already
+            // recomputes, and CACHEABLE names why.
+            return;
+        }
+        // Its own name, listed or canonical (the root trace event names the canonical
+        // target), and the name of everything it read.
+        let mut own: BTreeSet<Thread> = BTreeSet::from([Thread::from(self.target.as_str())]);
+        own.extend(
+            first_events
+                .iter()
+                .filter(|e| e.parent.is_none())
+                .map(|e| Thread::from(e.target.as_str())),
+        );
+        let read: BTreeSet<Thread> = first_events
+            .iter()
+            .map(|e| Thread::from(e.target.as_str()))
+            .chain(own.iter().cloned())
+            .collect();
+        self.forced_recomputation(&first, &own, &read, report).await;
+    }
+
+    /// The forced-recomputation witness (ledger #330): cut every thread of the first
+    /// result, and resolve again.
+    ///
+    /// The cacheable-twice probe cannot see a wrong `.cacheable()` on its own: its
+    /// second resolution IS the cache hit, so "byte-identical" compares the first
+    /// computation with a copy of itself. `ikigai-encrypt` shipped `.cacheable()` on
+    /// age ciphertext (a fresh ephemeral key per call, so two sealings differ) and the
+    /// walk reported nothing. Cutting every thread the answer carries, its own name
+    /// included (the kernel hangs every cacheable read on it, so a pure result has a
+    /// thread to cut too), and the name of everything it read, takes the answer and
+    /// what it was built from out of the cache: the third resolution is a genuinely
+    /// independent computation, and its bytes must be the first one's.
+    ///
+    /// Only an `Expiry::Never` answer is held to it. An `Expiry::At` answer is a
+    /// function of its inputs AND the time (a clock reading cacheable to the minute),
+    /// so a recomputation may differ by design; the cache serves the first one until
+    /// the deadline, which is the bound the endpoint chose.
+    ///
+    /// Then the narrower half, in the same machinery: every thread the answer carries
+    /// that is neither its own name nor the name of something it read is one some
+    /// endpoint DECLARED (`depends_on`): each is cut alone, and the recomputation must
+    /// repeat the first computation's bytes too. One extra resolution each. An answer
+    /// still cached right after a cut is not observed ([`Action::still_cached`]).
+    ///
+    /// Cutting is not a write: nothing is fired, and the module's state is untouched.
+    /// It does wake a cut listener a host registered on the kernel under test, as any
+    /// write through the cut thread would.
+    async fn forced_recomputation(
+        &mut self,
+        first: &Representation,
+        own: &BTreeSet<Thread>,
+        read: &BTreeSet<Thread>,
+        report: &mut Report,
+    ) {
+        let args = self.suite.args_for(self.id, self.spec);
+        let request = self.request(&args);
+        let every: BTreeSet<Thread> = first.threads().union(read).cloned().collect();
+        for thread in &every {
+            self.kernel.cut(thread.clone());
+        }
+        if self.kernel.is_cached(&request, &self.caller) {
+            self.still_cached(&every, report);
+            return;
+        }
+        if !self
+            .recomputes_identically(&request, first, &every, report)
+            .await
+        {
+            return;
+        }
+        // The narrower half: each DECLARED thread alone.
+        let declared: Vec<&Thread> = first
+            .threads()
+            .iter()
+            .filter(|t| !read.contains(*t) && !own.contains(*t))
+            .collect();
+        let n_declared = declared.len();
+        for thread in declared {
+            if !self.kernel.is_cached(&request, &self.caller) {
+                // The recomputation was not stored: there is nothing left to cut.
+                return;
+            }
+            self.kernel.cut(thread.clone());
+            let only = BTreeSet::from([thread.clone()]);
+            if self.kernel.is_cached(&request, &self.caller) {
+                self.still_cached(&only, report);
+                return;
+            }
+            if !self
+                .recomputes_identically(&request, first, &only, report)
+                .await
+            {
+                return;
+            }
+        }
+        report.declared.evidence.recomputed.push(Recomputed {
+            endpoint: self.id.to_string(),
+            verb: self.spec.verb,
+            cut: every.len(),
+            declared: n_declared,
+        });
+    }
+
+    /// The answer was in the cache right after a cut of `cut`. With the kernel this
+    /// crate admits that is not the module's doing: core files every cacheable answer
+    /// under the threads it carries, and a cut drops it. What can refill it between the
+    /// cut and the look is a cut listener the host registered on the kernel under test,
+    /// which may re-issue an invalidated read on another thread (the recompute-before-
+    /// the-first-reader pattern). So it is reported as not observed, never as a finding:
+    /// the witness cannot tell a refill from a cut that did not land.
+    fn still_cached(&self, cut: &BTreeSet<Thread>, report: &mut Report) {
+        self.unprobed(
+            report,
+            Check::Recompute,
+            format!(
+                "the answer was still cached right after a cut of {}: a cut listener on this \
+                 kernel may have refilled it, or the cut did not reach it, so whether a second \
+                 computation repeats the first was not observed",
+                shown_threads(cut)
+            ),
+        );
+    }
+
+    /// Resolve `request` again after `cut` was cut, and hold the bytes to `first`'s.
+    /// `false` when it reported something (or could not observe), so the caller stops.
+    async fn recomputes_identically(
+        &mut self,
+        request: &Request,
+        first: &Representation,
+        cut: &BTreeSet<Thread>,
+        report: &mut Report,
+    ) -> bool {
+        match self.kernel.issue(request.clone(), &self.caller).await {
+            Ok(again) if again.bytes == first.bytes => true,
+            Ok(again) => {
+                report.findings.push(self.finding(
+                    Check::Recompute,
+                    format!(
+                        "marked cacheable but a forced recomputation returned different bytes: \
+                         not a function of its inputs. The second resolution was the cache hit, \
+                         so it could only repeat the first; after a cut of {} the kernel \
+                         computed it again and got {} byte(s) where the first computation \
+                         served {}. A result that differs per computation (a fresh nonce or \
+                         key, a timestamp, a random id, `HashMap` order) is not cacheable: \
+                         every reader is served whichever computation the cache kept",
+                        shown_threads(cut),
+                        again.bytes.len(),
+                        first.bytes.len()
+                    ),
+                ));
+                false
+            }
+            Err(err) => {
+                self.unprobed(
+                    report,
+                    Check::Recompute,
+                    format!(
+                        "cacheable, but after a cut of {} its recomputation failed ({err}), so \
+                         whether a second computation repeats the first was not observed",
+                        shown_threads(cut)
+                    ),
+                );
+                false
+            }
         }
     }
 
@@ -4116,6 +4618,69 @@ impl<'a> Action<'a> {
             check,
             reason: reason.into(),
         });
+    }
+}
+
+/// Where a traced `Denied` came from (see [`RefusedBy`]).
+fn refused_by(events: &[TraceEvent]) -> RefusedBy {
+    let denied_note = |e: &TraceEvent| {
+        e.notes
+            .iter()
+            .find(|(k, _)| k == DENIED_NOTE)
+            .map(|(_, v)| v.clone())
+    };
+    let failed_denied = |e: &TraceEvent| {
+        e.notes
+            .iter()
+            .any(|(k, v)| k == FAILED_NOTE && v == "denied")
+    };
+    let Some(root) = events.iter().find(|e| e.parent.is_none()) else {
+        return RefusedBy::Untraced;
+    };
+    if let Some(lacking) = denied_note(root) {
+        return RefusedBy::Floor { lacking };
+    }
+    // The first refusal recorded below the root: an event is recorded when it
+    // finishes, so the deepest refusal finishes first.
+    if let Some(sub) = events
+        .iter()
+        .find(|e| e.parent.is_some() && (denied_note(e).is_some() || failed_denied(e)))
+    {
+        return RefusedBy::SubRequest {
+            target: sub.target.clone(),
+        };
+    }
+    RefusedBy::Module
+}
+
+/// A caller's scopes as a finding names them.
+fn shown_scopes(scopes: &[String]) -> String {
+    if scopes.is_empty() {
+        return "nothing".to_string();
+    }
+    scopes
+        .iter()
+        .map(|s| format!("`{}`", crate::report::visible(s)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A set of threads as a finding names them: `` `a`, `b` ``, the first five, then how
+/// many more.
+fn shown_threads(threads: &BTreeSet<Thread>) -> String {
+    const SHOWN_THREADS: usize = 5;
+    let mut shown: Vec<String> = threads
+        .iter()
+        .take(SHOWN_THREADS)
+        .map(|t| format!("`{}`", t.as_str()))
+        .collect();
+    if threads.len() > SHOWN_THREADS {
+        shown.push(format!("and {} more", threads.len() - SHOWN_THREADS));
+    }
+    match shown.len() {
+        0 => "no thread".to_string(),
+        1 => format!("the thread {}", shown[0]),
+        _ => format!("the threads {}", shown.join(", ")),
     }
 }
 
