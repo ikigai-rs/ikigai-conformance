@@ -863,8 +863,45 @@ anyone memoizes by id.
 
 ## Status
 
-0.8.3. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.8.4. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.8.3 → 0.8.4: `RESOLVES`, walks through a mount, an all-optional `Sink`, report ergonomics
+
+From the ledger's conformance backlog (ledger #334, #335, #338, #339, #341, #354, #362,
+#432, #1054).
+
+**What is new.**
+
+- **`RESOLVES`** (ledger #338): a failed minimal resolution is reported once per action
+  under its own label, with the refusal's kind, the check that needed it, and an
+  untyped input the walk had to invent a value for. It used to be reported under
+  whichever check reached it first, so it read as a caching finding on an endpoint whose
+  caching was fine. A selection that does not name it (any written before 0.8.4) reports
+  the failure where it always did.
+- **Through a mount** (ledger #335, #334): a peer's kernel operations are skipped under
+  any alias, and a peer that cannot answer `Meta` is one loud finding naming the missing
+  renderer instead of one small endpoint. See [Through a mount](#through-a-mount).
+- **`PIPELINE`** (ledger #339): a `Sink` whose by-value inputs are all optional is held to
+  declaring `content` too. A `Delete` keeps the old rule.
+- **`ENFORCED`** (ledger #362): the undeclared-`Denied` finding names a capability or a
+  state gate, and the fix for each.
+- **Ergonomics** (ledger #354, #341): `Report::keys()`, `Report::assert_clean_with(&Expected)`,
+  `Suite::label(..)`, `Finding::owner()`.
+
+**Will it turn a green suite red?** Run against 44 adopter conformance targets in 41 repos
+before release, it turned two red, and both on an assertion that pins the defect fixed
+here. ikigai-throttle's zero-budget test expects its refusals as `CACHEABLE` and `OUTPUTS`
+findings; they are now five `RESOLVES` findings. ikigai-web's alias-mount test pins the
+fourteen core findings that leaked through the alias; none leak now. Each is a one-line
+change to the test. Elsewhere: a `Sink` whose inputs are all optional and none is
+`content`, a mounted peer with no Meta renderer, and a module walked through an alias are
+the shapes that can change a report.
+
+**Source changes for a consumer:** none required. `Check` is `#[non_exhaustive]`, so
+the new variant breaks no match.
+
+Adopters pinned at `"0.8.0"` get 0.8.4 at their next lock update with no pin move.
 
 ### 0.8.2 → 0.8.3: `Suite::pure` is checked, not taken on trust (ledger #1508)
 
