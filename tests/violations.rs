@@ -208,6 +208,35 @@ fn enforced_catches_an_undeclared_denial_and_passes_a_declared_one() {
     );
 }
 
+/// A typed `Denied` from an action declaring nothing may be a STATE gate rather than an
+/// undeclared capability (`urn:passkey:register` refuses until an enrollment window is
+/// open), and the two have different fixes. The finding names both, so it no longer
+/// sends a reader hunting for a capability that does not exist (ledger #362).
+#[test]
+fn enforced_names_both_an_undeclared_capability_and_a_state_gate() {
+    let window = FnEndpoint::new("register", |_inv: &Invocation<'_>| {
+        Err(Error::Denied("no enrollment window is open".into()))
+    })
+    .with_description(
+        Description::new("register")
+            .verb(Verb::Source)
+            .output("text/plain"),
+    );
+    let report = report_of(EndpointSpace::new().bind(Exact::new("urn:example:register"), window));
+    let enforced = only(&report, Check::Enforced);
+    assert_eq!(enforced.len(), 1, "{report}");
+    for needle in [
+        "declares no capability but refused with `Denied` under no grants (no enrollment window is open)",
+        "The gate is a capability or a state, and the fixes differ",
+        "a capability it enforces is declared (`.requires(\"urn:cap:…\")` on the action)",
+        "a state no capability expresses",
+        "`Suite::opt_out_check(id, Check::Enforced, …)`",
+    ] {
+        assert!(enforced[0].contains(needle), "{needle:?}:\n{report}");
+    }
+    assert!(!enforced[0].contains("an enforced scope"), "{report}");
+}
+
 /// A description whose `requires` the kernel cannot enforce because the endpoint
 /// is reached without it: the description says Source needs a cap, but the
 /// endpoint's explicit Sink action declares none and the description-level
@@ -1700,7 +1729,7 @@ fn a_failed_resolution_does_not_also_report_the_declaration_as_inert() {
     let report = Suite::new().pure("json-keys").run_blocking(&kernel(space));
     assert_caught(
         &report,
-        Check::Cacheable,
+        Check::Resolves,
         "did not resolve with the minimal inputs",
     );
     assert!(
@@ -1954,6 +1983,56 @@ fn pipeline_catches_a_sink_without_content_and_a_content_nobody_reads() {
     );
 }
 
+/// A Sink whose by-value inputs are ALL optional and none is `content`: the shape
+/// `urn:log:write` shipped with, reading the piped `content` as an undeclared fallback
+/// for its optional `msg` (ledger #339).
+fn all_optional_sink() -> FnEndpoint {
+    FnEndpoint::new("log-write", |inv: &Invocation<'_>| {
+        let msg = inv
+            .inline_str("msg")
+            .or_else(|_| inv.inline_str("content"))?;
+        Ok(text(msg.to_string()))
+    })
+    .with_description(
+        Description::new("log-write")
+            .verb(Verb::Sink)
+            .input(ArgSpec::new("msg").class(XSD_STRING).optional())
+            .input(ArgSpec::new("level").class(XSD_STRING).optional())
+            .output("text/plain"),
+    )
+}
+
+#[test]
+fn pipeline_catches_an_all_optional_sink_without_content() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:log-write"), all_optional_sink());
+    let report = report_of(space);
+    assert_caught(
+        &report,
+        Check::Pipeline,
+        "declares by-value inputs (`msg`, `level`) but none named `content`",
+    );
+    assert_caught(
+        &report,
+        Check::Pipeline,
+        "Every one of them is optional, so a pipe alone is the likeliest way a caller drives it",
+    );
+    // Waivable per endpoint, for a Sink that genuinely takes no body.
+    let waived = Suite::new()
+        .opt_out_check("log-write", Check::Pipeline, "takes no body: a trigger")
+        .run_blocking(&kernel(
+            EndpointSpace::new().bind(Exact::new("urn:example:log-write"), all_optional_sink()),
+        ));
+    assert!(waived.of(Check::Pipeline).next().is_none(), "{waived}");
+    // A Sink with no by-value input at all is not reported: nothing names its body.
+    let bare = FnEndpoint::new("tick", |_inv: &Invocation<'_>| Ok(text("ok"))).with_description(
+        Description::new("tick")
+            .verb(Verb::Sink)
+            .output("text/plain"),
+    );
+    let report = report_of(EndpointSpace::new().bind(Exact::new("urn:example:tick"), bare));
+    assert!(report.of(Check::Pipeline).next().is_none(), "{report}");
+}
+
 /// A Sink whose `content` has a grammar (a TOML layer, say), with `content` OPTIONAL —
 /// the shape `urn:log:config` took (ledger #1071). Only the pipeline probe puts a
 /// `content` in the request, and the suite's generic sample is not a document.
@@ -1983,30 +2062,32 @@ fn a_refused_generic_content_sample_is_named_as_the_cause() {
         }),
     );
     let report = report_of(space);
-    // The finding stays where it was (OUTPUTS, the first check that needed the
-    // firing), and now says the sample was the cause and what fixes it.
+    // The finding is RESOLVES's (0.8.4; OUTPUTS before it, the first check that needed
+    // the firing, which it names), and says the sample was the cause and what fixes it.
     assert_caught(
         &report,
-        Check::Outputs,
+        Check::Resolves,
         "did not resolve with the minimal inputs",
     );
     assert_caught(
         &report,
-        Check::Outputs,
+        Check::Resolves,
         "it refused `content`, and the `content` it was sent is the suite's generic sample \
          `x`, not a value from a Fixture",
     );
     assert_caught(
         &report,
-        Check::Outputs,
+        Check::Resolves,
         "`Fixture::new(\"toml-config\", Verb::Sink).arg(\"content\", …)`",
     );
     // A byte input is fixtured with `arg_bytes` (0.8.1), and the hint says so.
     assert_caught(
         &report,
-        Check::Outputs,
+        Check::Resolves,
         "(`.arg_bytes(\"content\", …)` for a byte input)",
     );
+    assert_caught(&report, Check::Resolves, "Needed by OUTPUTS");
+    assert!(report.of(Check::Outputs).next().is_none(), "{report}");
 }
 
 #[test]
@@ -2020,19 +2101,19 @@ fn an_untyped_refusal_of_a_generic_content_sample_names_it_as_the_likely_cause()
     let report = report_of(space);
     assert_caught(
         &report,
-        Check::Outputs,
+        Check::Resolves,
         "the `content` it was sent is the suite's generic sample `x`, not a value from a \
          Fixture; if it parses `content`, that sample is the likely cause",
     );
     assert_caught(
         &report,
-        Check::Outputs,
+        Check::Resolves,
         "`Fixture::new(\"toml-config\", Verb::Sink).arg(\"content\", …)`",
     );
     // A byte input is fixtured with `arg_bytes` (0.8.1), and the hint says so.
     assert_caught(
         &report,
-        Check::Outputs,
+        Check::Resolves,
         "(`.arg_bytes(\"content\", …)` for a byte input)",
     );
 }
@@ -2053,7 +2134,7 @@ fn a_fixture_supplied_content_is_not_blamed_on_the_sample() {
         .run_blocking(&kernel(space));
     assert_caught(
         &report,
-        Check::Outputs,
+        Check::Resolves,
         "did not resolve with the minimal inputs",
     );
     assert!(
@@ -2075,6 +2156,7 @@ fn a_fixed_content_sample_clears_the_finding() {
         .fixture(Fixture::new("toml-config", Verb::Sink).arg("content", "level = \"info\""))
         .run_blocking(&kernel(space));
     assert!(report.of(Check::Outputs).next().is_none(), "{report}");
+    assert!(report.of(Check::Resolves).next().is_none(), "{report}");
 }
 
 // ----- NAMES ------------------------------------------------------------------
@@ -2357,10 +2439,12 @@ fn a_fixture_supplies_inputs_the_spec_cannot_derive() {
     let report = report_of(space);
     assert_caught(
         &report,
-        Check::SkolemRdf,
+        Check::Resolves,
         "did not resolve with the minimal inputs",
     );
-    // Reported once, under the first check that needed it — not once per check.
+    // Reported once, under RESOLVES, naming the first check that needed it — not once
+    // per check.
+    assert_caught(&report, Check::Resolves, "Needed by SKOLEM-RDF");
     assert_eq!(
         report
             .findings

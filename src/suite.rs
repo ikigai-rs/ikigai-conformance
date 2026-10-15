@@ -658,6 +658,7 @@ pub struct Suite {
     required_on_mutating: bool,
     own: Vec<String>,
     inherit: Vec<Inherited>,
+    label: Option<String>,
 }
 
 impl Default for Suite {
@@ -684,6 +685,7 @@ impl Suite {
             required_on_mutating: false,
             own: Vec::new(),
             inherit: Vec::new(),
+            label: None,
         }
     }
 
@@ -1051,6 +1053,12 @@ impl Suite {
     /// Walk the kernel's own `urn:kernel:*` operations too. They are core's
     /// endpoints, not the module's — off by default so a module's report is about
     /// the module.
+    ///
+    /// Off, a MOUNTED peer's operations are skipped too, whatever an alias renamed
+    /// them to (ledger #335): a mounted binding whose description id is one this
+    /// kernel's own operations use (`kernel-catalog`), whose pattern is one of theirs
+    /// re-prefixed (`urn:edge:kernel:catalog`), or whose id is `kernel-…` under a
+    /// `:kernel:` segment. On, those are walked with the rest.
     pub fn include_kernel_ops(mut self) -> Self {
         self.kernel_ops = true;
         self
@@ -1260,6 +1268,29 @@ impl Suite {
             .map(String::as_str)
     }
 
+    /// Name this RUN, for a host that walks one suite over two or more kernels
+    /// (in-process and mounted, inline and served shapes): the report's first line is
+    /// `run: <label>`, and [`Report::label`](crate::Report::label) returns it (ledger
+    /// #354). Six adopters printed a header line of their own per walk, because the
+    /// declarations and fixtures a report echoes are the same in both and the two
+    /// reports could be told apart only by reading them.
+    ///
+    /// ```
+    /// use ikigai_conformance::{Checks, Suite};
+    /// use ikigai_core::{builtins, EndpointSpace, Exact, Kernel};
+    /// use std::sync::Arc;
+    ///
+    /// let space = || EndpointSpace::new().bind(Exact::new("urn:example:echo"), builtins::echo());
+    /// let suite = Suite::new().checks(Checks::NAMES);
+    /// let local = suite.clone().label("in-process").run_blocking(&Kernel::new(Arc::new(space())));
+    /// assert_eq!(local.label(), Some("in-process"));
+    /// assert!(local.to_string().starts_with("run: in-process\n"), "{local}");
+    /// ```
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
     /// Hold `Sink` and `Delete` actions to [`Check::Required`] too.
     ///
     /// Off by default because every required input dropped is one more FIRING of a
@@ -1340,6 +1371,7 @@ impl Suite {
                     .collect(),
                 evidence: Evidence {
                     inherited_because: self.inherit.clone(),
+                    label: self.label.clone(),
                     ..Evidence::default()
                 },
             }),
@@ -1381,11 +1413,20 @@ impl Suite {
         let mut own_matched: BTreeSet<&str> = BTreeSet::new();
         // Every id the kernel listed, owned or not: what an empty match prints.
         let mut listed: Vec<String> = Vec::new();
+        // The kernel's own operations by what they are called HERE, so a mount that
+        // renamed a peer's can still be told apart (ledger #335).
+        let ops = KernelOps::of(kernel, &entries);
+        // Mounted bindings that describe with no action: a peer that did not answer
+        // with a contract, reported once per mount after the walk (ledger #334).
+        let mut contractless: Vec<Contractless> = Vec::new();
         for entry in entries {
             if entry.pattern.starts_with(KERNEL_NS) && !self.kernel_ops {
                 continue;
             }
             let description = kernel.describe_pattern(&entry.pattern);
+            if !self.kernel_ops && ops.renamed(&entry, description.as_ref()) {
+                continue;
+            }
             let id = description
                 .as_ref()
                 .map_or(entry.endpoint.as_str(), |d| d.id.as_str());
@@ -1423,6 +1464,17 @@ impl Suite {
                 }
                 continue;
             };
+            if let Some(origin) = &entry.origin {
+                if description.action_specs().is_empty() {
+                    contractless.push(Contractless {
+                        origin: origin.clone(),
+                        pattern: entry.pattern.clone(),
+                        id: description.id.clone(),
+                        summary: description.summary.clone(),
+                    });
+                    continue;
+                }
+            }
             let first_time = seen.insert(description.id.clone());
             if first_time {
                 report.endpoints += 1;
@@ -1551,6 +1603,7 @@ impl Suite {
                     caller_used: false,
                     shadow: None,
                     shadow_blocked: false,
+                    shadow_unresolved: false,
                 };
                 action.enforced(&mut report).await;
                 action.authority(&mut report).await;
@@ -1582,6 +1635,7 @@ impl Suite {
         }
         report.walked = walk_order.into_boxed_slice();
         report.declared.inherited = inherited;
+        contractless_findings(&contractless, &mut report);
         // A scope that matches nothing makes the suite a no-op that passes, so this
         // finding is not subject to selection or waiver (ledger #328).
         for pattern in &self.own {
@@ -2493,6 +2547,144 @@ fn unwalked(id: &str, coverage: &Coverage) -> String {
     }
 }
 
+/// The kernel's own operations, as this kernel lists them: what lets the walk tell a
+/// peer's operations from a module's when a mount has RENAMED them (ledger #335).
+///
+/// An alias mount re-prefixes a peer's whole catalog (`urn:kernel:catalog` arrives as
+/// `urn:edge:kernel:catalog`), so a prefix test on `urn:kernel:` does not see them, and
+/// a module walked through one had core's findings reported as its own. A mounted
+/// binding (its entry carries an `origin`) is one of core's operations when its
+/// description id is one this kernel's own operations use (`kernel-catalog`), or when
+/// its pattern is one of theirs re-prefixed (`…:kernel:catalog` for
+/// `urn:kernel:catalog`), or, for an operation a newer peer has and this kernel does
+/// not, when its id is `kernel-…` and its pattern holds a `:kernel:` segment.
+struct KernelOps {
+    /// The description ids of this kernel's `urn:kernel:*` operations.
+    ids: BTreeSet<String>,
+    /// Their patterns without the leading `urn:` (`kernel:catalog`), the part an
+    /// alias keeps.
+    names: BTreeSet<String>,
+}
+
+impl KernelOps {
+    fn of(kernel: &Kernel, entries: &[SpaceEntry]) -> Self {
+        let mut ops = KernelOps {
+            ids: BTreeSet::new(),
+            names: BTreeSet::new(),
+        };
+        for entry in entries
+            .iter()
+            .filter(|e| e.origin.is_none() && e.pattern.starts_with(KERNEL_NS))
+        {
+            if let Some(name) = entry.pattern.strip_prefix("urn:") {
+                ops.names.insert(name.to_string());
+            }
+            if let Some(description) = kernel.describe_pattern(&entry.pattern) {
+                ops.ids.insert(description.id);
+            }
+        }
+        ops
+    }
+
+    /// Whether a MOUNTED binding is one of core's operations under another name.
+    fn renamed(&self, entry: &SpaceEntry, description: Option<&Description>) -> bool {
+        if entry.origin.is_none() {
+            return false;
+        }
+        let id = description.map(|d| d.id.as_str());
+        if id.is_some_and(|id| self.ids.contains(id)) {
+            return true;
+        }
+        let re_prefixed = self.names.iter().any(|name| {
+            entry
+                .pattern
+                .strip_suffix(name.as_str())
+                .is_some_and(|prefix| prefix.ends_with(':'))
+        });
+        re_prefixed
+            || (id.is_some_and(|id| id.starts_with("kernel-"))
+                && entry.pattern.contains(":kernel:"))
+    }
+}
+
+/// A mounted binding that describes with no action (ledger #334).
+struct Contractless {
+    origin: String,
+    pattern: String,
+    id: String,
+    summary: String,
+}
+
+/// One finding per mount (origin and id) whose bindings described with no action.
+///
+/// A peer that cannot answer `Meta` (built with `Kernel::new`, no Meta renderer) gives
+/// every endpoint it serves the same anonymous, action-less placeholder description
+/// (`remote`, from `ikigai-resolve`), and the walk used to count them as ONE endpoint
+/// with one "declares no action" line: a whole federated kernel read as small rather
+/// than broken. These bindings are not walked (there is no action to walk), and the
+/// finding is not subject to selection or waiver, like an `own` pattern that matched
+/// nothing: a mount whose contract the walk could not read turns the walk of that mount
+/// into a no-op that passes.
+fn contractless_findings(contractless: &[Contractless], report: &mut Report) {
+    let mut groups: Vec<(&str, &str, Vec<&Contractless>)> = Vec::new();
+    for c in contractless {
+        match groups
+            .iter_mut()
+            .find(|(origin, id, _)| *origin == c.origin && *id == c.id)
+        {
+            Some((_, _, members)) => members.push(c),
+            None => groups.push((&c.origin, &c.id, vec![c])),
+        }
+    }
+    for (origin, id, members) in groups {
+        let patterns = members
+            .iter()
+            .take(SHOWN_PATTERNS)
+            .map(|c| format!("`{}`", c.pattern))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = members.len().saturating_sub(SHOWN_PATTERNS);
+        let said = members
+            .iter()
+            .map(|c| c.summary.trim())
+            .find(|s| !s.is_empty())
+            .map(|s| {
+                let stop = if s.ends_with(['.', '!', '?']) {
+                    ""
+                } else {
+                    "."
+                };
+                format!(" The mount says: {s}{stop}")
+            })
+            .unwrap_or_default();
+        report.findings.push(Finding::new(
+            id,
+            None,
+            Check::ArgSpecs,
+            format!(
+                "{} binding(s) mounted from `{origin}` describe as `{id}` with no action, so \
+                 none of them was walked: {patterns}{}. A peer that cannot answer `Meta` gives \
+                 every endpoint it serves this one anonymous, action-less placeholder, and the \
+                 usual cause is a peer kernel built with `Kernel::new`, which has NO Meta \
+                 renderer: build it with `Kernel::with_meta_renderer` and \
+                 `ikigai_vocab::TurtleRenderer`, which serves the JSON face a mount reads. A peer endpoint that really \
+                 declares no action is an ARGSPECS finding on the peer's own walk.{said} This \
+                 finding cannot be unselected or waived: a mount the walk cannot read is a \
+                 walk of nothing that passes",
+                members.len(),
+                if more > 0 {
+                    format!(" and {more} more")
+                } else {
+                    String::new()
+                }
+            ),
+        ));
+    }
+}
+
+/// How many patterns a mount finding lists before it counts the rest.
+const SHOWN_PATTERNS: usize = 5;
+
 /// The inputs [`Check::Required`] drops one at a time: declared required, by value,
 /// with no default. A default beside `required` is already an ARGSPECS finding, and a
 /// call missing it succeeds on the default by design, so it is not reported twice.
@@ -2761,9 +2953,14 @@ fn pipeline_static(description: &Description, report: &mut Report) {
             .iter()
             .filter(|i| i.source == InputSource::Argument)
             .collect();
-        let has_required = by_value.iter().any(|i| i.required);
+        // ANY by-value input, required or not (ledger #339). The rule used to fire only
+        // when one was required, which is inverted from the risk: an action whose
+        // inputs are all optional is the one a caller most often drives with a pipe
+        // alone, and `urn:log:write` shipped reading the piped `content` as an
+        // undeclared fallback for its optional `msg` with this check clean.
         let has_content = by_value.iter().any(|i| i.name == "content");
-        if has_required && !has_content {
+        if !by_value.is_empty() && !has_content {
+            let all_optional = by_value.iter().all(|i| !i.required);
             report.findings.push(Finding::new(
                 &description.id,
                 Some(spec.verb),
@@ -2771,12 +2968,20 @@ fn pipeline_static(description: &Description, report: &mut Report) {
                 format!(
                     "declares by-value inputs ({}) but none named `content`: a pipeline's \
                      upstream value and a top-level `sink`'s body both arrive as `content`, \
-                     so this action cannot receive either",
+                     so this action cannot receive either{}",
                     by_value
                         .iter()
                         .map(|i| format!("`{}`", i.name))
                         .collect::<Vec<_>>()
-                        .join(", ")
+                        .join(", "),
+                    if all_optional {
+                        ". Every one of them is optional, so a pipe alone is the likeliest \
+                         way a caller drives it, and its value lands in an input this action \
+                         does not declare. Declare `content`, or waive PIPELINE with the \
+                         reason it takes no body"
+                    } else {
+                        ""
+                    }
                 ),
             ));
         }
@@ -2827,6 +3032,11 @@ struct Action<'a> {
     /// Set when a set-aside run needed a firing of a `Sink` or a `Delete` and was
     /// refused it ([`Action::may_fire`]): that waiver could not be judged.
     shadow_blocked: bool,
+    /// Set when a set-aside run of a waived check needed the minimal resolution and
+    /// it failed: the check could observe nothing, so that waiver could not be judged
+    /// either. (The failure itself is `RESOLVES`'s, or was reported under the needing
+    /// check on the walk proper.)
+    shadow_unresolved: bool,
 }
 
 impl<'a> Action<'a> {
@@ -2871,6 +3081,7 @@ impl<'a> Action<'a> {
         let (caller_used, failure_reported) = (self.caller_used, self.failure_reported);
         self.shadow = Some(check);
         self.shadow_blocked = false;
+        self.shadow_unresolved = false;
         self.failure_reported = false;
         match check {
             Check::Enforced => self.enforced(&mut scratch).await,
@@ -2882,12 +3093,16 @@ impl<'a> Action<'a> {
             Check::Pipeline => self.pipeline(&mut scratch).await,
             Check::Required => self.required(&mut scratch).await,
             Check::Outputs => self.outputs(&mut scratch).await,
+            Check::Resolves => self.resolves(&mut scratch).await,
             _ => {}
         }
         self.shadow = None;
         self.caller_used = caller_used;
         self.failure_reported = failure_reported;
-        if self.shadow_blocked || scratch.unprobed.iter().any(|u| u.check == check) {
+        if self.shadow_blocked
+            || self.shadow_unresolved
+            || scratch.unprobed.iter().any(|u| u.check == check)
+        {
             return None;
         }
         Some(scratch.findings.len())
@@ -2924,21 +3139,48 @@ impl<'a> Action<'a> {
         result
     }
 
-    /// Report a minimal-resolution failure under `check`, once per action. `args` are
-    /// the by-value arguments of the request that failed, so the finding can say when
-    /// the `content` in it was the suite's generic sample rather than a fixture's.
-    fn report_failure(&mut self, check: Check, err: &Error, args: &Args, report: &mut Report) {
+    /// Report a minimal-resolution failure, once per action, under
+    /// [`Check::Resolves`] when it is selected and under `needing` (the check that
+    /// needed the resolution) when it is not (ledger #338). `args` are the by-value
+    /// arguments of the request that failed, so the finding can say when the `content`
+    /// in it was the suite's generic sample rather than a fixture's, and which value
+    /// the walk had to invent for an input that declares no class.
+    ///
+    /// A set-aside run of a waived check that needed the resolution reports nothing and
+    /// marks itself unable to judge the waiver; one of a waived `RESOLVES` reports the
+    /// failure, which is what that waiver set aside.
+    fn report_failure(&mut self, needing: Check, err: &Error, args: &Args, report: &mut Report) {
+        match self.shadow {
+            Some(Check::Resolves) => {}
+            Some(_) => {
+                self.shadow_unresolved = true;
+                return;
+            }
+            None => {}
+        }
         if self.failure_reported {
             return;
         }
         self.failure_reported = true;
+        let label = if !self.suite.checks.contains(Check::Resolves) {
+            needing
+        } else if self.shadow.is_none() && self.suite.waived(self.id, Check::Resolves) {
+            return;
+        } else {
+            Check::Resolves
+        };
         let (id, verb) = (self.id, self.spec.verb);
-        let detail = match self.sampled_content(args) {
+        // The refusal's KIND beside its text: a reader telling a missing fixture
+        // (`invalid-argument`) from a missing principal (`denied`) or a target this kernel
+        // does not bind (`not-found`) should not have to parse prose for it.
+        let refused = format!("refused as `{}`: {err}", err.kind());
+        let sampled = self.sampled_content(args);
+        let mut detail = match sampled {
             // The endpoint named `content` as what it refused: the sample was the cause.
             Some(sample) if matches!(err, Error::InvalidArgument { name, .. } if name == "content") =>
             {
                 format!(
-                    "did not resolve with the minimal inputs its ArgSpecs allow ({err}): it \
+                    "did not resolve with the minimal inputs its ArgSpecs allow ({refused}): it \
                      refused `content`, and the `content` it was sent is the suite's generic \
                      sample `{sample}`, not a value from a Fixture. Supply one it accepts with \
                      `Fixture::new(\"{id}\", Verb::{verb:?}).arg(\"content\", …)` \
@@ -2948,7 +3190,7 @@ impl<'a> Action<'a> {
             // Refused some other way, which may or may not be the sample: say so, since
             // a parser's error rarely names the argument it was reading.
             Some(sample) => format!(
-                "did not resolve with the minimal inputs its ArgSpecs allow ({err}); the \
+                "did not resolve with the minimal inputs its ArgSpecs allow ({refused}); the \
                  `content` it was sent is the suite's generic sample `{sample}`, not a value \
                  from a Fixture; if it parses `content`, that sample is the likely cause: \
                  supply `Fixture::new(\"{id}\", Verb::{verb:?}).arg(\"content\", …)` \
@@ -2958,19 +3200,72 @@ impl<'a> Action<'a> {
             // Refused under root, which holds every principal and names none: an
             // endpoint about its caller refuses exactly this, so name the caller.
             None if matches!(err, Error::Denied(_)) && self.caller.is_root() => format!(
-                "did not resolve with the minimal inputs its ArgSpecs allow ({err}); it was \
+                "did not resolve with the minimal inputs its ArgSpecs allow ({refused}); it was \
                  probed under root, which names no principal. If it answers about its \
                  caller, name one with `Fixture::new(\"{id}\", Verb::{verb:?}).capability(…)` \
                  (the scopes the caller holds plus `urn:cap:principal:<iri>`); otherwise \
                  supply inputs that work, or opt out with a reason"
             ),
             None => format!(
-                "did not resolve with the minimal inputs its ArgSpecs allow ({err}); supply a \
+                "did not resolve with the minimal inputs its ArgSpecs allow ({refused}); supply a \
                  `Fixture::new(\"{id}\", Verb::{verb:?})` with inputs that work, or opt out \
                  with a reason"
             ),
         };
-        report.findings.push(self.finding(check, detail));
+        if label == Check::Resolves {
+            // Which check needed it: the one the failure used to be reported under.
+            detail.push_str(&format!(
+                ". Needed by {needing}, and by every check that reads the same resolution"
+            ));
+        }
+        // The BECAUSE edge (ledger #338's second ask): an input with no class is one the
+        // walk can only send a placeholder for, so its ARGSPECS finding is the likely
+        // cause of this one, and fixing it fixes both.
+        let mut invented = self.invented_untyped(args);
+        if sampled.is_some() {
+            // Already named above, with the sample the walk sent.
+            invented.retain(|n| *n != "content");
+        }
+        if !invented.is_empty() {
+            detail.push_str(&format!(
+                ". The walk had no value to send for {}: {} no class, so it sent the \
+                 placeholder `{PLACEHOLDER}` (the ARGSPECS finding on this action). A class \
+                 the walk can sample, or a Fixture, is the likely fix for both",
+                invented
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if invented.len() == 1 {
+                    "it declares"
+                } else {
+                    "they declare"
+                }
+            ));
+        }
+        report.findings.push(self.finding(label, detail));
+    }
+
+    /// The inputs whose value in `args` the walk INVENTED because the input declares
+    /// no class: required, by value, with no default and no `one_of`, and not supplied
+    /// by a fixture. Their `ARGSPECS` finding is the likely cause of a failed
+    /// resolution, so the failure names them.
+    fn invented_untyped(&self, args: &Args) -> Vec<&'a str> {
+        let fixture = self.suite.fixture_for(self.id, self.spec.verb);
+        self.spec
+            .inputs
+            .iter()
+            .filter(|i| {
+                i.required
+                    && i.source == InputSource::Argument
+                    && i.default.is_none()
+                    && i.one_of.is_empty()
+                    && i.class.is_none()
+                    && args.contains_key(&i.name)
+                    && !fixture.is_some_and(|f| f.args.contains_key(&i.name))
+            })
+            .map(|i| i.name.as_str())
+            .collect()
     }
 
     /// The `content` value in `args` when it is the suite's generic sample: the action
@@ -3054,9 +3349,18 @@ impl<'a> Action<'a> {
         } else if let Err(Error::Denied(msg)) = result {
             report.findings.push(self.finding(
                 Check::Enforced,
+                // The axis is not known from here (ledger #362): a typed `Denied` from an
+                // action declaring nothing is a CAPABILITY it does not declare, or a STATE
+                // gate no capability can express (a window another resource opens). Both
+                // over-offer, and their fixes differ, so the finding names both.
                 format!(
                     "declares no capability but refused with `Denied` under no grants ({msg}): \
-                     an enforced scope the manifold does not declare — it over-offers"
+                     an undeclared gate, so the manifold over-offers it. The gate is a \
+                     capability or a state, and the fixes differ: a capability it enforces is \
+                     declared (`.requires(\"urn:cap:…\")` on the action); a state no capability \
+                     expresses (refused until another resource opens it: an enrollment window, \
+                     a session) is documented, and ENFORCED waived with that reason \
+                     (`Suite::opt_out_check(id, Check::Enforced, …)`)"
                 ),
             ));
         }
@@ -3766,6 +4070,35 @@ impl<'a> Action<'a> {
             )
         };
         report.findings.push(self.finding(Check::Outputs, detail));
+    }
+
+    // ----- RESOLVES -----------------------------------------------------------
+
+    /// Judge a WAIVED `RESOLVES` for this action, in a set-aside run: read the
+    /// resolution the needing checks read (the minimal one for a read, the pipeline
+    /// probe's firing for a write) and report its failure. On the walk proper
+    /// `RESOLVES` fires nothing of its own: the needing checks report through
+    /// [`report_failure`](Self::report_failure). A write no probe fired cannot be
+    /// judged without firing it, so that waiver is left unjudged.
+    async fn resolves(&mut self, report: &mut Report) {
+        let mut args = self.suite.args_for(self.id, self.spec);
+        let outcome = if self.spec.verb.is_mutating() {
+            match (&self.fired, self.content_spec()) {
+                (Some(fired), Some(content)) => {
+                    args = self.pipeline_args(content);
+                    Some(fired.clone())
+                }
+                (Some(fired), None) => Some(fired.clone()),
+                (None, _) => self.minimal.clone().map(|r| r.map(|(repr, _)| repr)),
+            }
+        } else {
+            Some(self.resolve_minimal(false).await.map(|(repr, _)| repr))
+        };
+        match outcome {
+            None => self.shadow_blocked = true,
+            Some(Err(err)) => self.report_failure(Check::Resolves, &err, &args, report),
+            Some(Ok(_)) => {}
+        }
     }
 
     fn unprobed(&self, report: &mut Report, check: Check, reason: impl Into<String>) {
