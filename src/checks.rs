@@ -223,19 +223,25 @@ pub enum Check {
     /// age ciphertext (a fresh ephemeral key per call) and the walk said nothing. For an
     /// `Expiry::Never` answer the cache holds, this check cuts every thread the answer
     /// carries and the name of everything it read, so the next resolution is a
-    /// genuinely independent computation, and holds its bytes to the first one's. Then
-    /// it cuts each thread an endpoint DECLARED (`depends_on`) alone, and does the
-    /// same. A fresh nonce, key, timestamp or random id, or a `HashMap` iteration order,
-    /// in a cacheable answer is caught here.
+    /// genuinely independent computation, and holds its bytes to the first one's. It
+    /// does that 24 times, every computation held to the first, because one agrees with
+    /// the first by chance as often as an order over few entries does: a two-entry
+    /// `HashMap` agrees about half the time, so a single recomputation missed it about
+    /// one walk in two (ledger #1573). Then it cuts each thread an endpoint DECLARED
+    /// (`depends_on`) alone, and does the same once. A fresh nonce, key, timestamp or
+    /// random id, or a `HashMap` iteration order, in a cacheable answer is caught here.
+    /// An order is only caught if the fixture gives it something to order: a map with
+    /// one entry serializes the same way every time, so a fixture should have enough
+    /// entries (nodes, statements, keys) for order to matter, and three or more beat two.
     ///
     /// An `Expiry::At` answer is not held to it: a deadline makes the answer a function
     /// of its inputs AND the time, so a recomputation may differ by design. An answer
     /// still cached right after a cut (a host's cut listener can refill it) is listed
-    /// as unprobed, never a finding. Each recomputation that repeated the first is a
-    /// `recomputed:` line.
+    /// as unprobed, never a finding. An answer whose recomputations all repeated the
+    /// first is a `recomputed:` line.
     ///
-    /// It costs one resolution per cacheable answer, plus one per declared thread, and
-    /// a cut re-reads what the answer was built from: a test that pins how often a
+    /// It costs 24 resolutions per cacheable answer, plus one per declared thread, and
+    /// each cut re-reads what the answer was built from: a test that pins how often a
     /// fixture is READ counts those too. Subtract it suite-wide
     /// (`Checks::all() - Checks::RECOMPUTE`) for a pinned footprint, or waive it per
     /// endpoint with the reason an answer differs by design

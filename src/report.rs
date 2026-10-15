@@ -506,7 +506,9 @@ pub struct Evidence {
 /// The cacheable-twice probe's second resolution is the cache hit, so it can only
 /// repeat the first. The witness cuts every thread of the first result, its own name
 /// included, and everything it read, resolves again, and holds the bytes to the
-/// first's; then cuts each thread an endpoint DECLARED alone, and does the same.
+/// first's, several times over (one recomputation agrees with the first by chance as
+/// often as a two-entry `HashMap`'s order does); then cuts each thread an endpoint
+/// DECLARED alone, and does the same once.
 ///
 /// ```
 /// use ikigai_conformance::{Checks, Suite};
@@ -530,8 +532,9 @@ pub struct Evidence {
 ///     .run_blocking(&Kernel::new(Arc::new(space)));
 /// report.assert_clean();
 /// assert_eq!(report.recomputed()[0].cut, 1); // its own name
+/// assert_eq!(report.recomputed()[0].recomputations, 24);
 /// assert!(report.to_string().contains(
-///     "recomputed: upper source after a cut of 1 thread(s): identical\n"
+///     "recomputed: upper source 24 times after a cut of 1 thread(s): identical\n"
 /// ), "{report}");
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -541,6 +544,9 @@ pub struct Recomputed {
     pub endpoint: String,
     /// The action's verb.
     pub verb: Verb,
+    /// How many times the answer was recomputed after the full cut, every
+    /// computation byte-identical to the first.
+    pub recomputations: usize,
     /// How many threads the forced recomputation cut: every thread of the first
     /// result and the name of everything it read.
     pub cut: usize,
@@ -1123,9 +1129,10 @@ impl fmt::Display for Report {
             for r in &declared.evidence.recomputed {
                 write!(
                     f,
-                    "recomputed: {} {} after a cut of {} thread(s)",
+                    "recomputed: {} {} {} times after a cut of {} thread(s)",
                     visible(&r.endpoint),
                     verb_name(r.verb),
+                    r.recomputations,
                     r.cut
                 )?;
                 if r.declared > 0 {

@@ -43,6 +43,22 @@ const SHOWN: usize = 48;
 /// How many leading bytes a report line shows of a fixture value that is not UTF-8.
 const SHOWN_BYTES: usize = 16;
 
+/// How many times [`Check::Recompute`] cuts a cached answer's threads and recomputes
+/// it, holding every computation to the first one's bytes (ledger #1573).
+///
+/// One recomputation caught a `HashMap`-order defect only by luck: a new map gets a
+/// fresh `RandomState`, so two computations over a two-entry map agree on the order
+/// about half the time (0.508 measured over four million pairs), and ikigai-jsonld's
+/// two-node fixture was caught in 5 runs of 12. A miss now needs every recomputation
+/// to agree with the first: for that worst case, the smallest map whose order can
+/// differ, 24 agree about 6 times in 10 million (111 in 200 million, measured; more
+/// than 0.508^24, because the order is not a fair coin: a two-entry map iterates in
+/// insertion order 56% of the time, and 0.563^25 is the same 6 in 10 million). A cut and a resolution re-randomize the order already:
+/// each computation builds its own map, so no fresh kernel is needed (and a suite is
+/// handed its kernel, it cannot build one). A clean answer costs all 24; a defect
+/// stops at the first that differs.
+const RECOMPUTATIONS: usize = 24;
+
 /// The by-value arguments of one request, by name. Bytes, because that is what the
 /// wire carries (`ArgRef::Inline`): a gzip stream or a PNG is a fixture value too
 /// ([`Fixture::arg_bytes`]).
@@ -4118,7 +4134,10 @@ impl<'a> Action<'a> {
     /// included (the kernel hangs every cacheable read on it, so a pure result has a
     /// thread to cut too), and the name of everything it read, takes the answer and
     /// what it was built from out of the cache: the third resolution is a genuinely
-    /// independent computation, and its bytes must be the first one's.
+    /// independent computation, and its bytes must be the first one's. It is done
+    /// [`RECOMPUTATIONS`] times, every computation held to the first, because a single
+    /// one agrees with the first by chance whenever the defect is an order over few
+    /// entries.
     ///
     /// Only an `Expiry::Never` answer is held to it. An `Expiry::At` answer is a
     /// function of its inputs AND the time (a clock reading cacheable to the minute),
@@ -4128,7 +4147,9 @@ impl<'a> Action<'a> {
     /// Then the narrower half, in the same machinery: every thread the answer carries
     /// that is neither its own name nor the name of something it read is one some
     /// endpoint DECLARED (`depends_on`): each is cut alone, and the recomputation must
-    /// repeat the first computation's bytes too. One extra resolution each. An answer
+    /// repeat the first computation's bytes too. One extra resolution each: that half
+    /// asks whether the declared thread's cut REACHES the answer, and whether a
+    /// computation repeats the first is already settled above. An answer
     /// still cached right after a cut is not observed ([`Action::still_cached`]).
     ///
     /// Cutting is not a write: nothing is fired, and the module's state is untouched.
@@ -4144,18 +4165,22 @@ impl<'a> Action<'a> {
         let args = self.suite.args_for(self.id, self.spec);
         let request = self.request(&args);
         let every: BTreeSet<Thread> = first.threads().union(read).cloned().collect();
-        for thread in &every {
-            self.kernel.cut(thread.clone());
-        }
-        if self.kernel.is_cached(&request, &self.caller) {
-            self.still_cached(&every, report);
-            return;
-        }
-        if !self
-            .recomputes_identically(&request, first, &every, report)
-            .await
-        {
-            return;
+        // Several independent computations, each held to the first: one agrees with
+        // the first by chance as often as a small map's order does ([`RECOMPUTATIONS`]).
+        for nth in 1..=RECOMPUTATIONS {
+            for thread in &every {
+                self.kernel.cut(thread.clone());
+            }
+            if self.kernel.is_cached(&request, &self.caller) {
+                self.still_cached(&every, report);
+                return;
+            }
+            if !self
+                .recomputes_identically(&request, first, &every, Some(nth), report)
+                .await
+            {
+                return;
+            }
         }
         // The narrower half: each DECLARED thread alone.
         let declared: Vec<&Thread> = first
@@ -4176,7 +4201,7 @@ impl<'a> Action<'a> {
                 return;
             }
             if !self
-                .recomputes_identically(&request, first, &only, report)
+                .recomputes_identically(&request, first, &only, None, report)
                 .await
             {
                 return;
@@ -4185,6 +4210,7 @@ impl<'a> Action<'a> {
         report.declared.evidence.recomputed.push(Recomputed {
             endpoint: self.id.to_string(),
             verb: self.spec.verb,
+            recomputations: RECOMPUTATIONS,
             cut: every.len(),
             declared: n_declared,
         });
@@ -4211,27 +4237,40 @@ impl<'a> Action<'a> {
     }
 
     /// Resolve `request` again after `cut` was cut, and hold the bytes to `first`'s.
-    /// `false` when it reported something (or could not observe), so the caller stops.
+    /// `nth` is which of the [`RECOMPUTATIONS`] after the full cut this is (`None` for
+    /// a declared thread's). `false` when it reported something (or could not
+    /// observe), so the caller stops.
     async fn recomputes_identically(
         &mut self,
         request: &Request,
         first: &Representation,
         cut: &BTreeSet<Thread>,
+        nth: Option<usize>,
         report: &mut Report,
     ) -> bool {
         match self.kernel.issue(request.clone(), &self.caller).await {
             Ok(again) if again.bytes == first.bytes => true,
             Ok(again) => {
+                // Which computation differed: a late one says the earlier ones agreed
+                // with the first by chance, the signature of an order over few entries.
+                let which = match nth {
+                    Some(1) | None => String::new(),
+                    Some(n) => format!(
+                        " (recomputation {n} of {RECOMPUTATIONS}; the {} before it repeated \
+                         the first by chance)",
+                        n - 1
+                    ),
+                };
                 report.findings.push(self.finding(
                     Check::Recompute,
                     format!(
                         "marked cacheable but a forced recomputation returned different bytes: \
                          not a function of its inputs. The second resolution was the cache hit, \
                          so it could only repeat the first; after a cut of {} the kernel \
-                         computed it again and got {} byte(s) where the first computation \
-                         served {}. A result that differs per computation (a fresh nonce or \
-                         key, a timestamp, a random id, `HashMap` order) is not cacheable: \
-                         every reader is served whichever computation the cache kept",
+                         computed it again{which} and got {} byte(s) where the first \
+                         computation served {}. A result that differs per computation (a fresh \
+                         nonce or key, a timestamp, a random id, `HashMap` order) is not \
+                         cacheable: every reader is served whichever computation the cache kept",
                         shown_threads(cut),
                         again.bytes.len(),
                         first.bytes.len()
