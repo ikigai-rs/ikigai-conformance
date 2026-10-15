@@ -49,6 +49,13 @@ pub enum Check {
     /// finding names both things it can be, since the fixes differ (0.8.4, ledger
     /// #362): a capability the action enforces (declare it), or a STATE no capability
     /// expresses, such as a window another resource opens (document it and waive).
+    ///
+    /// The no-grants probe proves the KERNEL's floor: a declared `urn:cap:net:*` with
+    /// no grant under the prefix is refused before the endpoint runs. A module's own
+    /// rule (per host, per name, per prefix) is reached only by a caller holding some
+    /// grant under the prefix but not this target's, which a module names with
+    /// [`Suite::enforced_under`](crate::Suite::enforced_under) (opt-in, ledger #331); the
+    /// action must refuse it with a typed `Denied`.
     Enforced,
     /// **A mutation no authority gated.** The fourth cell of the same 2x2
     /// [`Enforced`](Check::Enforced) walks: a `Sink` or a `Delete` that declares no
@@ -100,6 +107,10 @@ pub enum Check {
     /// And a [`Suite::pure`](crate::Suite::pure) is held to its claim: a cacheable
     /// result of an endpoint declared pure carries no thread but its own name and
     /// what it read (the name, and the threads, of each resource it resolved).
+    ///
+    /// Its second resolution is the cache hit, so "byte-identical" compares the first
+    /// computation with a copy of itself; [`Recompute`](Check::Recompute) is the
+    /// witness that compares two computations.
     Cacheable,
     /// **Pipeline citizenship.** A mutating action with by-value inputs declares
     /// `content` (where a pipe's value arrives), and an action declaring `content`
@@ -206,6 +217,31 @@ pub enum Check {
     /// written before 0.8.4 never names it), the failure is reported under the check
     /// that needed it, exactly as before.
     Resolves,
+    /// **A cacheable answer is a function of its inputs, by a forced recomputation**
+    /// (ledger #330). [`Cacheable`](Check::Cacheable)'s second resolution is the cache
+    /// hit, so it can only repeat the first: `ikigai-encrypt` shipped `.cacheable()` on
+    /// age ciphertext (a fresh ephemeral key per call) and the walk said nothing. For an
+    /// `Expiry::Never` answer the cache holds, this check cuts every thread the answer
+    /// carries and the name of everything it read, so the next resolution is a
+    /// genuinely independent computation, and holds its bytes to the first one's. Then
+    /// it cuts each thread an endpoint DECLARED (`depends_on`) alone, and does the
+    /// same. A fresh nonce, key, timestamp or random id, or a `HashMap` iteration order,
+    /// in a cacheable answer is caught here.
+    ///
+    /// An `Expiry::At` answer is not held to it: a deadline makes the answer a function
+    /// of its inputs AND the time, so a recomputation may differ by design. An answer
+    /// still cached right after a cut (a host's cut listener can refill it) is listed
+    /// as unprobed, never a finding. Each recomputation that repeated the first is a
+    /// `recomputed:` line.
+    ///
+    /// It costs one resolution per cacheable answer, plus one per declared thread, and
+    /// a cut re-reads what the answer was built from: a test that pins how often a
+    /// fixture is READ counts those too. Subtract it suite-wide
+    /// (`Checks::all() - Checks::RECOMPUTE`) for a pinned footprint, or waive it per
+    /// endpoint with the reason an answer differs by design
+    /// ([`Suite::opt_out_check`](crate::Suite::opt_out_check)). A selection that does not
+    /// name it (any written before it existed) does not run it.
+    Recompute,
 }
 }
 
@@ -228,6 +264,7 @@ impl Check {
             Check::SpaceName => "SPACE-NAME",
             Check::Declarations => "DECLARATIONS",
             Check::Resolves => "RESOLVES",
+            Check::Recompute => "RECOMPUTE",
         }
     }
 
@@ -246,6 +283,7 @@ impl Check {
                 | Check::Pipeline
                 | Check::Required
                 | Check::Resolves
+                | Check::Recompute
         )
     }
 
@@ -312,6 +350,9 @@ impl Checks {
     pub const DECLARATIONS: Checks = Checks(1 << (Check::Declarations as u16));
     /// [`Check::Resolves`].
     pub const RESOLVES: Checks = Checks(1 << (Check::Resolves as u16));
+    /// [`Check::Recompute`]. Sixteen checks fill the `u16` this set is: the next one
+    /// widens it (a private field, so no consumer sees the change).
+    pub const RECOMPUTE: Checks = Checks(1 << (Check::Recompute as u16));
     /// Both RDF-face checks: [`Check::SkolemRdf`] and [`Check::Vocabulary`] — the
     /// pair a module without a graph face subtracts.
     pub const RDF: Checks = Checks(Checks::SKOLEM_RDF.0 | Checks::VOCABULARY.0);
