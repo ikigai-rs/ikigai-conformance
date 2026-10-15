@@ -1,6 +1,7 @@
 //! The report: every finding at once, one line each, endpoint id first — so a
 //! failure is a checklist, not the first miss.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use ikigai_core::Verb;
@@ -53,6 +54,44 @@ impl Finding {
     /// ```
     pub fn is_suite_wide(&self) -> bool {
         self.endpoint == Self::SUITE_WIDE
+    }
+
+    /// Who fixes this finding: `Some(endpoint)` for a finding about what an endpoint
+    /// does or declares, `None` for one whose fix is in the SUITE's own configuration
+    /// (ledger #341): every [`Check::Declarations`] finding, and every
+    /// [suite-wide](Self::is_suite_wide) one.
+    ///
+    /// A `DECLARATIONS` finding still names the endpoint its declaration was about (a
+    /// fixture for `cell`, a waiver for `upper`), because that says WHICH declaration;
+    /// but the endpoint is not the owner. A composing host that partitions findings by
+    /// owner (its own, inherited, the module's) and keys on `endpoint` files the suite
+    /// author's mistake under the module's name, and a module that is blameless reads as
+    /// the problem. Partition on this instead. (`(kernel)`, a root space that cannot be
+    /// enumerated, is `Some`: the fix is in the kernel the test built.)
+    ///
+    /// ```
+    /// use ikigai_conformance::{Check, Fixture, Suite};
+    /// use ikigai_core::{builtins, EndpointSpace, Exact, Kernel, Verb};
+    /// use std::sync::Arc;
+    ///
+    /// let space = EndpointSpace::new().bind(Exact::new("urn:example:echo"), builtins::echo());
+    /// let report = Suite::new()
+    ///     // A fixture for an action `echo` does not declare: the suite's mistake.
+    ///     .fixture(Fixture::new("echo", Verb::Sink).arg("content", "x"))
+    ///     .run_blocking(&Kernel::new(Arc::new(space)));
+    /// let declaration = report.of(Check::Declarations).next().unwrap();
+    /// assert_eq!(declaration.endpoint, "echo"); // printed: it names WHICH declaration
+    /// assert_eq!(declaration.owner(), None); // but the suite owns the fix
+    /// // The builtin predates the recipe (an untyped input): that one is `echo`'s.
+    /// let argspecs = report.of(Check::ArgSpecs).next().unwrap();
+    /// assert_eq!(argspecs.owner(), Some("echo"));
+    /// ```
+    pub fn owner(&self) -> Option<&str> {
+        if self.check == Check::Declarations || self.is_suite_wide() {
+            None
+        } else {
+            Some(&self.endpoint)
+        }
     }
 
     pub(crate) fn new(
@@ -156,7 +195,26 @@ pub enum SpaceNaming {
 ///
 /// The declaration half (`label`, `naming`, `constructor`) is what the module
 /// said; `doors` and `opaque` are what the run compared, so a clean `space:` line
-/// says how much the "same doors" claim was actually checked over.
+/// says how much the "same doors" claim was actually checked over. A report holds
+/// them as `report.declared.spaces`, in declaration order:
+///
+/// ```
+/// use ikigai_conformance::{Checks, SpaceNaming, Suite};
+/// use ikigai_core::{builtins, space_iri, EndpointSpace, Exact, Kernel};
+/// use std::sync::Arc;
+///
+/// fn space() -> EndpointSpace {
+///     EndpointSpace::new()
+///         .bind(Exact::new("urn:example:echo"), builtins::echo())
+///         .named(space_iri("example"))
+/// }
+/// let report = Suite::new()
+///     .checks(Checks::SPACE_NAME)
+///     .self_named_space("example", space)
+///     .run_blocking(&Kernel::new(Arc::new(space())));
+/// assert_eq!(report.declared.spaces[0].naming, SpaceNaming::SelfNamed);
+/// assert_eq!(report.declared.spaces[0].doors, Some(1));
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DeclaredSpace {
@@ -331,6 +389,11 @@ pub struct Evidence {
     /// kept here so it is a field on this `#[non_exhaustive]` struct and not one more
     /// on [`Declarations`]; read it through [`Report::inherited_because`].
     pub inherited_because: Vec<Inherited>,
+    /// Which run produced this report, as [`Suite::label`](crate::Suite::label) named
+    /// it (`run:`, the report's first line). A declaration, kept here for the reason
+    /// [`inherited_because`](Self::inherited_because) is; read it through
+    /// [`Report::label`].
+    pub label: Option<String>,
 }
 
 /// What one run of the suite found.
@@ -585,6 +648,129 @@ impl Report {
         &self.declared.evidence.inherited_because
     }
 
+    /// Which run produced this report: the [`Suite::label`](crate::Suite::label), or
+    /// `None` when the suite named none.
+    pub fn label(&self) -> Option<&str> {
+        self.declared.evidence.label.as_deref()
+    }
+
+    /// Every finding's `(endpoint, check)` pair, as a set: the key a test pins when it
+    /// asserts WHICH findings a walk reports rather than how many (ledger #354). Four
+    /// composing adopters wrote it by hand, each spelling the check its own way;
+    /// `Check` is `Ord`, so the pairs compare and sort as they are.
+    ///
+    /// ```
+    /// use std::collections::BTreeSet;
+    /// use ikigai_conformance::{Check, Checks, Suite};
+    /// use ikigai_core::{builtins, EndpointSpace, Exact, Kernel};
+    /// use std::sync::Arc;
+    ///
+    /// let space = EndpointSpace::new().bind(Exact::new("urn:example:toUpper"), builtins::to_upper());
+    /// let report = Suite::new()
+    ///     .checks(Checks::ARGSPECS | Checks::NAMES)
+    ///     .run_blocking(&Kernel::new(Arc::new(space)));
+    /// assert_eq!(
+    ///     report.keys(),
+    ///     BTreeSet::from([("toUpper", Check::ArgSpecs), ("toUpper", Check::Names)])
+    /// );
+    /// ```
+    pub fn keys(&self) -> BTreeSet<(&str, Check)> {
+        self.findings
+            .iter()
+            .map(|f| (f.endpoint.as_str(), f.check))
+            .collect()
+    }
+
+    /// [`assert_clean`](Self::assert_clean), and the shape of the walk too: panic with
+    /// every way the report differs from `expected`, then the whole report, when it is
+    /// not clean or any expectation fails (ledger #354).
+    ///
+    /// A clean report says nothing was FOUND; these say what was walked, so a module
+    /// whose endpoint stops being bound, or a host that quietly gained an opt-out,
+    /// turns the test red instead of cleaner. Every adopter wrote these by hand.
+    ///
+    /// ```
+    /// use ikigai_conformance::{Expected, Suite};
+    /// use ikigai_core::{ArgSpec, Description, EndpointSpace, Exact, FnEndpoint, Invocation};
+    /// use ikigai_core::{Kernel, ReprType, Representation, Verb};
+    /// use std::sync::Arc;
+    ///
+    /// let upper = FnEndpoint::new("upper", |inv: &Invocation<'_>| {
+    ///     Ok(Representation::new(ReprType::new("text/plain"),
+    ///         inv.inline_str("in")?.to_uppercase().into_bytes()).cacheable())
+    /// })
+    /// .with_description(Description::new("upper").verb(Verb::Source)
+    ///     .input(ArgSpec::new("in").class("http://www.w3.org/2001/XMLSchema#string"))
+    ///     .output("text/plain"));
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(Exact::new("urn:example:upper"), upper)));
+    /// Suite::new().pure("upper").run_blocking(&kernel).assert_clean_with(
+    ///     &Expected::new()
+    ///         .endpoints(1)
+    ///         .actions(1)
+    ///         .walked(["upper"])
+    ///         .no_opt_outs()
+    ///         .nothing_unprobed(),
+    /// );
+    /// ```
+    #[track_caller]
+    pub fn assert_clean_with(&self, expected: &Expected) {
+        let mut missed: Vec<String> = Vec::new();
+        if !self.is_clean() {
+            missed.push(format!("{} finding(s)", self.findings.len()));
+        }
+        if let Some(n) = expected.endpoints {
+            if self.endpoints != n {
+                missed.push(format!(
+                    "endpoints: expected {n}, walked {}",
+                    self.endpoints
+                ));
+            }
+        }
+        if let Some(n) = expected.actions {
+            if self.actions != n {
+                missed.push(format!("actions: expected {n}, examined {}", self.actions));
+            }
+        }
+        if let Some(ids) = &expected.walked {
+            let want: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+            let got: BTreeSet<&str> = self.walked.iter().map(String::as_str).collect();
+            if want != got {
+                let absent: Vec<&str> = want.difference(&got).copied().collect();
+                let extra: Vec<&str> = got.difference(&want).copied().collect();
+                missed.push(format!(
+                    "walked: expected exactly {}; not walked: {}; walked but not expected: {}",
+                    joined(&want.iter().collect::<Vec<_>>()),
+                    if absent.is_empty() {
+                        "none".to_string()
+                    } else {
+                        joined(&absent)
+                    },
+                    if extra.is_empty() {
+                        "none".to_string()
+                    } else {
+                        joined(&extra)
+                    },
+                ));
+            }
+        }
+        if expected.no_opt_outs {
+            let d = &self.declared;
+            let n = d.opted_out.len() + d.opted_out_at.len() + d.opted_out_checks.len();
+            if n > 0 {
+                missed.push(format!(
+                    "opt-outs: expected none, the suite declares {n} (see `opted out:`)"
+                ));
+            }
+        }
+        if expected.nothing_unprobed && !self.unprobed.is_empty() {
+            missed.push(format!(
+                "unprobed: expected none, {} (see `unprobed:`)",
+                self.unprobed.len()
+            ));
+        }
+        assert!(missed.is_empty(), "{}\n{self}", missed.join("\n"));
+    }
+
     /// An empty report over `checks`, for a probe whose findings are set aside.
     pub(crate) fn scratch(checks: Checks) -> Report {
         Report {
@@ -612,6 +798,11 @@ impl fmt::Debug for Report {
 
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Which run this is, first: a host that walks one suite over two kernels
+        // prints two reports that are otherwise told apart only by reading them.
+        if let Some(label) = &self.declared.evidence.label {
+            writeln!(f, "run: {}", visible(label))?;
+        }
         for finding in &self.findings {
             writeln!(f, "{finding}")?;
         }
@@ -960,6 +1151,64 @@ pub(crate) fn verb_name(verb: Verb) -> &'static str {
     }
 }
 
+/// What [`Report::assert_clean_with`] holds a clean report to, beyond cleanliness:
+/// the shape of the walk. Every expectation is off until set.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Expected {
+    /// [`Report::endpoints`], exactly.
+    pub endpoints: Option<usize>,
+    /// [`Report::actions`], exactly.
+    pub actions: Option<usize>,
+    /// [`Report::walked`], as a set (walk order is catalog order, so it is not compared).
+    pub walked: Option<Vec<String>>,
+    /// No `opt_out`, `opt_out_at` or `opt_out_check` at all.
+    pub no_opt_outs: bool,
+    /// No `unprobed:` line: every check observed every action it applies to.
+    pub nothing_unprobed: bool,
+}
+
+impl Expected {
+    /// Nothing expected beyond a clean report.
+    pub fn new() -> Self {
+        Expected::default()
+    }
+
+    /// Exactly `n` endpoints walked ([`Report::endpoints`]).
+    pub fn endpoints(mut self, n: usize) -> Self {
+        self.endpoints = Some(n);
+        self
+    }
+
+    /// Exactly `n` actions examined ([`Report::actions`]).
+    pub fn actions(mut self, n: usize) -> Self {
+        self.actions = Some(n);
+        self
+    }
+
+    /// Exactly these description ids walked, in any order ([`Report::walked`]).
+    pub fn walked<I>(mut self, ids: I) -> Self
+    where
+        I: IntoIterator,
+        I::Item: AsRef<str>,
+    {
+        self.walked = Some(ids.into_iter().map(|id| id.as_ref().to_string()).collect());
+        self
+    }
+
+    /// No opt-out of any kind (`opt_out`, `opt_out_at`, `opt_out_check`).
+    pub fn no_opt_outs(mut self) -> Self {
+        self.no_opt_outs = true;
+        self
+    }
+
+    /// No action left unprobed by any check.
+    pub fn nothing_unprobed(mut self) -> Self {
+        self.nothing_unprobed = true;
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1025,6 +1274,7 @@ mod tests {
                 fixtures: vec![Fixture::new(id, Verb::Source)],
                 spaces: vec![],
                 evidence: Evidence {
+                    label: None,
                     required: vec![RequiredProbe {
                         endpoint: id.into(),
                         verb: Verb::Source,
@@ -1145,6 +1395,7 @@ mod tests {
                     },
                 ],
                 evidence: Evidence {
+                    label: None,
                     required: vec![
                         RequiredProbe {
                             endpoint: "cms-graph".into(),

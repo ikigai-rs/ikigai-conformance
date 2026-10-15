@@ -46,24 +46,25 @@
 //! |---|---|---|
 //! | [`ArgSpecs`](Check::ArgSpecs) | ArgSpecs from day one | ≥1 action per description; every input has an IRI `class`; a `default` ∈ `one_of` when both exist; input names unique per action; every template variable is a declared binding input |
 //! | [`RequiresVerb`](Check::RequiresVerb) | declared = enforced | a `requires` with no verb — enforced on every verb since core 0.1.85, but the catalog cannot say which actions it gates |
-//! | [`Enforced`](Check::Enforced) | declared = enforced | under a capability holding no grants, an action with `requires` is refused with a typed `Denied`; an action declaring nothing is not |
+//! | [`Enforced`](Check::Enforced) | declared = enforced | under a capability holding no grants, an action with `requires` is refused with a typed `Denied`; an action declaring nothing is not (an undeclared gate: a capability to declare, or a state to document and waive) |
 //! | [`Authority`](Check::Authority) | declared = enforced | the fourth cell of the same probe: a `Sink` or a `Delete` that declares no `requires` and **mutated anyway** under a capability holding no grants — no scope to withhold, so no caller can be given read without write. A `Source` is not in scope; a mutating action refused for some other reason is unprobed, never a finding |
 //! | [`Outputs`](Check::Outputs) | faces are declared | the bare media type the action serves with its minimal inputs (parameters stripped) is one of its declared `outputs` — a wrong declaration hides a face from every consumer that reads outputs, the two RDF checks included |
 //! | [`SkolemRdf`](Check::SkolemRdf) | skolemize; no blank nodes | every declared RDF face ([`rdf::RDF_FACES`]) resolves with minimal inputs, parses, and has no blank node |
 //! | [`Vocabulary`](Check::Vocabulary) | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known ([`rdf::WELL_KNOWN_NAMESPACES`]) or module-registered namespace |
 //! | [`Cacheable`](Check::Cacheable) | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and — if it never expires (`Expiry::Never`; an `Expiry::At` deadline is a bound) — carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; an endpoint declared pure carries no thread but its own name and what it read; a result declared live ([`Suite::live`]) is `Expiry::Always` |
-//! | [`Pipeline`](Check::Pipeline) | pipeline citizenship | a mutating action with by-value inputs declares `content` (where the pipe's value arrives); an action declaring `content` reads it |
+//! | [`Pipeline`](Check::Pipeline) | pipeline citizenship | a mutating action with by-value inputs (on a `Sink`, required or not) declares `content` (where the pipe's value arrives); an action declaring `content` reads it |
 //! | [`Required`](Check::Required) | ArgSpecs from day one | each input declared required, by value and with no default, dropped from the call the walk resolved, is refused with a typed `MissingArgument` or `InvalidArgument`; a call that succeeds without it is "declared required, actually optional". `Source` and `Exists` by default, `Sink` and `Delete` only under [`Suite::required_on_mutating`] |
 //! | [`Names`](Check::Names) | naming convention | the id is a kebab-case noun (the convention `ikigai-core`'s crate docs state) |
 //! | [`Validate`](Check::Validate) | a name is spelled into IRIs | `Description::validate()` accepts the description: no id, input name, `class` or `requires` holds a character an `IRIREF` cannot carry, and no name holds a code point no IRI carries (core 0.1.99). Core's emitters encode a name and degrade a bad authored IRI to a literal (core 0.1.100), so the documents parse; this is the strict check on top. `bind` does not validate, so this is where a bad name is caught |
 //! | [`SpaceName`](Check::SpaceName) | a name is a claim: same name, same doors | a space declared self-named ([`Suite::self_named_space`]) claims [`space_iri`](ikigai_core::space_iri)`(module)` under [`SPACE_PREFIX`](ikigai_core::SPACE_PREFIX), on its topology root too, and two calls hold the same doors; a space declared host-named ([`Suite::host_named_space`]) claims nothing |
 //! | [`Declarations`](Check::Declarations) | — | every declaration the module made ([`Suite::live`], [`Suite::cacheable`], [`Suite::pure`], [`Suite::namespace`], [`Suite::required_on_mutating`], a [`Fixture`], an [`opt_out`](Suite::opt_out), an [`opt_out_at`](Suite::opt_out_at), an [`opt_out_check`](Suite::opt_out_check), a declared space) reached the check that would honor it |
+//! | [`Resolves`](Check::Resolves) | — | the resolution another check needed resolved; a failure is reported once per action, with the refusal's kind, the check that needed it, and an untyped input the walk had to invent a value for |
 //!
-//! Both RDF checks resolve and **parse** the face, so an unresolvable, mislabeled
-//! or malformed graph is reported whichever of the two is selected — under
+//! Both RDF checks resolve and **parse** the face, so a mislabeled or malformed
+//! graph is reported whichever of the two is selected — under
 //! [`SkolemRdf`](Check::SkolemRdf) when it runs, under [`Vocabulary`](Check::Vocabulary)
 //! otherwise. A module can rely on `VOCABULARY` alone to prove a new `@prefix` line
-//! is well-formed.
+//! is well-formed. A face that does not resolve at all is [`Resolves`](Check::Resolves)'s.
 //!
 //! # What the walk did NOT do
 //!
@@ -274,7 +275,10 @@
 //!
 //! The kernel's own `urn:kernel:*` operations are listed by [`Kernel::entries`] but
 //! are core's, not the module's; the walk skips them unless
-//! [`Suite::include_kernel_ops`] says otherwise.
+//! [`Suite::include_kernel_ops`] says otherwise, and a MOUNTED peer's too, under
+//! whatever name an alias gave them (`urn:edge:kernel:catalog`). A mounted binding
+//! that describes with no action (a peer that cannot answer `Meta`) is not walked, and
+//! one finding per mount says so, naming the missing Meta renderer.
 #![forbid(unsafe_code)]
 
 mod checks;
@@ -284,8 +288,8 @@ mod suite;
 
 pub use checks::{Check, Checks};
 pub use report::{
-    Collapsed, Declarations, DeclaredSpace, Evidence, Finding, Inherited, OptedOut, OptedOutAt,
-    OptedOutCheck, Probed, Report, RequiredProbe, SpaceNaming, Unprobed,
+    Collapsed, Declarations, DeclaredSpace, Evidence, Expected, Finding, Inherited, OptedOut,
+    OptedOutAt, OptedOutCheck, Probed, Report, RequiredProbe, SpaceNaming, Unprobed,
 };
 pub use suite::{Fixture, Suite};
 

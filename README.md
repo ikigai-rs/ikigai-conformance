@@ -23,7 +23,7 @@ cms-graph  VOCABULARY  source: the `text/turtle` face uses `https://ikigai-rs.de
 sparql-construct  OUTPUTS  source: served `text/turtle` with its minimal inputs but declares only `application/sparql-results+json`: a face the manifold does not announce and the RDF checks never saw — declare it (`.output("text/turtle")`) or serve what is declared
 link-remove  DECLARATIONS  declared live (`Suite::live`) but nothing held it to it: it declares no cacheable verb (it declares delete), and CACHEABLE returns early on a mutating one. The report prints `declared live: link-remove`, which reads as a check that ran
 7 finding(s) across 4 endpoint(s), 4 action(s)
-checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE DECLARATIONS
+checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES
 probed 3 face(s) across 3 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
 probed: ik-context source `application/ld+json`: 0 triple(s) — nothing was checked
@@ -58,18 +58,19 @@ pointing at the check.
 |---|---|---|
 | `ARGSPECS` | ArgSpecs from day one | at least one action per description; every input has an IRI `class`; a `default` is one of the `one_of` values when both exist; input names unique per action; every template variable (`urn:file:{path}`) is a declared `.binding()` input |
 | `REQUIRES-VERB` | declared = enforced | a `requires` with no verb — enforced on every verb since core 0.1.85 (it was silently inert before), but the catalog cannot say which actions it gates |
-| `ENFORCED` | declared = enforced | under a capability holding no grants, every action with a `requires` is refused with a typed `Denied`; an action declaring nothing is not (an undeclared enforced scope makes the manifold over-offer) |
+| `ENFORCED` | declared = enforced | under a capability holding no grants, every action with a `requires` is refused with a typed `Denied`; an action declaring nothing is not. An undeclared gate makes the manifold over-offer, and the finding names both readings, since their fixes differ: a CAPABILITY it enforces is declared (`.requires(…)`), a STATE no capability expresses (refused until another resource opens a window) is documented and `ENFORCED` waived with that reason |
 | `AUTHORITY` | declared = enforced | the fourth cell of `ENFORCED`'s own probe: a `Sink` or a `Delete` that declares no `requires` and **mutated anyway** under a capability holding no grants. Nothing gates the write, so nothing can be withheld — a party that should read and report cannot be given read alone, because read is all there is. A `Source` is not in scope (a public read is a decision a module makes); a mutating action refused for some *other* reason is recorded as `unprobed`, never as a finding, because what an ungranted caller could do through it was not observed |
 | `OUTPUTS` | faces are declared | the bare media type the action serves with its minimal inputs (`;charset=` and other parameters stripped, no `as=`) is one of its declared `outputs`. A wrong declaration hides a face from every consumer that reads outputs — `SKOLEM-RDF` and `VOCABULARY` included, which filter the declaration for RDF faces before probing; linkeddata's `sparql-construct` declared only `application/sparql-results+json` over Turtle for its whole life and the RDF checks saw nothing. What the check cannot observe (a mutating action never fired under root, a failed minimal resolution, a caller's `as=` label) is printed as `unprobed`, never as a finding |
 | `SKOLEM-RDF` | skolemize; no blank nodes | every declared RDF face (`text/turtle`, `application/ld+json`, `application/rdf+xml`, N-Triples, N-Quads, TriG) resolves with the smallest inputs its ArgSpecs allow, parses, and has no blank node |
-| `VOCABULARY` | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known namespace (rdf, rdfs, xsd, owl, dcterms, Dublin Core Elements 1.1, foaf, schema, prov, ical, skos, sh, and the W3C Web Annotation `oa:`) or one the module registers. Because it parses, it also reports an unresolvable, mislabeled or malformed face — under its own name when `SKOLEM-RDF` is not selected, so `VOCABULARY` alone proves a hand-written `@prefix` line is well-formed |
+| `VOCABULARY` | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known namespace (rdf, rdfs, xsd, owl, dcterms, Dublin Core Elements 1.1, foaf, schema, prov, ical, skos, sh, and the W3C Web Annotation `oa:`) or one the module registers. Because it parses, it also reports a mislabeled or malformed face — under its own name when `SKOLEM-RDF` is not selected, so `VOCABULARY` alone proves a hand-written `@prefix` line is well-formed (a face that does not resolve at all is `RESOLVES`'s) |
 | `CACHEABLE` | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and — if it never expires (`Expiry::Never`; an `Expiry::At` deadline is a bound) — carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; an endpoint declared pure carries no thread but its own name and what it read; a result declared live (`Suite::live`) is `Expiry::Always` |
-| `PIPELINE` | pipeline citizenship | a mutating action with by-value inputs declares `content` (where a pipe's value and a `sink`'s body arrive); an action declaring `content` reads it |
+| `PIPELINE` | pipeline citizenship | a mutating action with by-value inputs declares `content` (where a pipe's value and a `sink`'s body arrive), and on a `Sink` whether or not any of them is required: a Sink whose inputs are all optional is the one a pipe alone most often drives (0.8.4; a `Delete` with only optional inputs, a `reason`, is not held to it); an action declaring `content` reads it |
 | `REQUIRED` | ArgSpecs from day one | each input an action declares **required**, by value and with no default, is dropped from the call the walk resolved, one at a time, and the call must then be refused with a typed `MissingArgument` or `InvalidArgument`. A call that **succeeds** without it is "declared required, actually optional": a false negative in the selection funnel, because `urn:kernel:validate` and an MCP tool schema both refuse a valid call that omits it. Five adopters wrote this check by hand (http, runbook, cms, secret, sexpr shipped the defect). A refusal of another kind is a finding too (an agent cannot tell its own omission from a failure of the endpoint), unless it is transient. `Source` and `Exists` by default; `Sink` and `Delete` only under `Suite::required_on_mutating()`, because each drop is a firing and a wrongly accepted one has mutated. A call that did not resolve in the first place is listed as `unprobed` |
 | `NAMES` | naming convention | the description id is a kebab-case noun (`tag-suggest`, `kernel-catalog`) — the MCP projection derives an agent's tool name from it |
 | `VALIDATE` | a name is spelled into IRIs | `Description::validate()` accepts the description: no id, input name, input `class` or `requires` holds a character an RDF `IRIREF` cannot carry (``<>"{}\|^`\``, a space, a control character), and no id or input name holds a code point no IRI carries (DEL, a C1 control, private use, a noncharacter; core 0.1.99). Since core 0.1.100 the emitters encode a name and degrade an authored IRI that is not one to a literal, so the endpoint's Meta Turtle and contract IRIs still parse, but not as written: this is the strict check on an authoring mistake, on top of that encoding. See [Why `VALIDATE` is here and not in `bind`](#why-validate-is-here-and-not-in-bind) |
 | `SPACE-NAME` | a name is a claim: same name, same doors | a space the module declares **self-named** claims `space_iri("<module>")` (`urn:iki:space:<module>`), on its topology root too, and two calls of its constructor claim the same name over the same doors; a space it declares **host-named** claims nothing. See [A space's name](#a-spaces-name-space-name) |
 | `DECLARATIONS` | — | every declaration the module made (`live`, `cacheable`, `pure`, `namespace`, `required_on_mutating`, a `Fixture`, an `opt_out`, an `opt_out_check`, a declared space) reached the check that would honor it. A `live` on a `Sink` reached nothing and the report printed `declared live:` anyway |
+| `RESOLVES` | — | the resolution another check needed (the minimal one that `OUTPUTS`, `SKOLEM-RDF`, `VOCABULARY` and `CACHEABLE` read; the pipeline probe's firing of a `Sink`) resolved. A failure is reported ONCE per action under this label, with the refusal's kind, the check that needed it and, where the walk had to invent a value for an input that declares no class, that input by name: fixing it fixes both findings. It fires nothing of its own. Not selected (a selection written before 0.8.4), the failure is reported under the check that needed it, as before |
 
 ### Why `VALIDATE` is here and not in `bind`
 
@@ -160,6 +161,14 @@ let report = Suite::new()
     .run_blocking(&kernel);
 report.assert_clean();
 assert_eq!(ikigai_core::space_iri("text").as_str(), ikigai_text::SPACE_ID);
+```
+
+What the check saw is data too. The field is `report.declared` (a `Box<Declarations>`),
+and its `spaces` holds one `DeclaredSpace` per declaration, in declaration order, with
+the kind and how many doors were compared. To assert the kind in one line:
+
+```rust
+assert_eq!(report.declared.spaces[0].naming, ikigai_conformance::SpaceNaming::SelfNamed);
 ```
 
 **An instance-built constructor** is declared host-named, by value. Build it once
@@ -314,6 +323,26 @@ Suite::new()
 `into_result().unwrap()` prints the same text, because `Report`'s `Debug`
 delegates to its `Display`.
 
+Three more things every adopter used to write by hand (0.8.4, ledger #354):
+
+```rust
+use ikigai_conformance::{Check, Expected, Suite};
+
+let report = Suite::new()
+    .label("mounted")                  // the report's first line: `run: mounted`
+    .run_blocking(&my_kernel());
+report.assert_clean_with(              // clean, AND the walk had this shape
+    &Expected::new().endpoints(3).actions(4).walked(["upper", "wc", "catalog"]).no_opt_outs(),
+);
+let keys = report.keys();              // BTreeSet<(&str, Check)>: pin WHICH findings
+```
+
+`assert_clean_with` panics listing every expectation the report missed, then the report.
+A host that walks one suite over two kernels labels each run, because the declarations a
+report echoes are the same in both. And a host that partitions findings by owner keys on
+`Finding::owner()`, not `endpoint` (ledger #341): a `DECLARATIONS` finding names the
+endpoint its declaration was about, but its fix is in the suite, so its owner is `None`.
+
 **Both cacheability polarities are declarations.** `Suite::cacheable` exists
 because the kernel hands back the **effective** expiry — the least cacheable of a
 result and its dependencies — so an endpoint that marked its result cacheable over
@@ -411,6 +440,19 @@ you:
 **Fixture bindings are per entry, not per verb.** Every action of an entry
 resolves the same IRI, so the verb on a binding-only fixture is ignored (the first
 fixture for the id that binds the variable wins); arguments are per `(id, verb)`.
+
+**A state-dependent endpoint's fixture sets the STATE, not only the inputs** (ledger
+#432). A `Fixture` supplies arguments, bindings and a caller; it cannot put the process
+in a state. An endpoint whose answer reads state the host builds (what the process
+composed at startup, a seeded store, an open enrollment window) is probed as the kernel
+stands when the walk starts. With that state unset it answers about nothing, a
+placeholder graph or an empty list, and every check passes over it. `urn:host:posture`
+did exactly that on its first walk: green, over a two-triple placeholder with one
+undefined term. The suite cannot tell a rich answer from a placeholder, so the test sets
+the state on the kernel it passes, before the walk: record the posture, seed the store,
+open the window. Then read that endpoint's `probed:` line, whose triple or byte count is
+the evidence the walk saw the state you set; a count that matches the empty answer is
+the tell.
 
 ### A composing host scopes the walk to its own endpoints (`Suite::own`)
 
@@ -550,6 +592,29 @@ value; declare `xsd:string` — the type the wire carries — and say so in a co
 The kernel's own `urn:kernel:*` operations are core's, not the module's: the walk
 skips them unless `Suite::include_kernel_ops()` asks.
 
+### Through a mount
+
+A mounted binding carries an `origin` (the mount's alias or connection), and two things
+about a walk through one are worth knowing (0.8.4):
+
+- **A peer's kernel operations are skipped under any name** (ledger #335). An alias
+  mount re-prefixes the peer's whole catalog, so `urn:kernel:catalog` arrives as
+  `urn:edge:kernel:catalog`, and a prefix test does not see it. The walk recognizes a
+  mounted binding as one of core's operations by its description id (`kernel-catalog`,
+  an id this kernel's own operations use), by its pattern (one of theirs re-prefixed),
+  or, for an operation a newer peer has, by a `kernel-…` id under a `:kernel:` segment.
+  Before 0.8.4 a module walked through an alias had core's findings reported as its
+  own: thirteen of them on one adoption.
+- **A peer with no contract fails, loudly** (ledger #334). A peer that cannot answer
+  `Meta`, usually because it was built with `Kernel::new` and has no Meta renderer,
+  gives every endpoint it serves the same anonymous, action-less placeholder
+  (`remote`). The walk used to count that as ONE endpoint with one "declares no
+  action" line, so a whole federated kernel read as small rather than broken. Now
+  those bindings are not walked, and one `ARGSPECS` finding per mount counts them,
+  names them, carries the mount's own reason and names the fix
+  (`Kernel::with_meta_renderer` with `ikigai_vocab::TurtleRenderer`). Like an `own`
+  pattern that matched nothing, it is not removed by any selection or waiver.
+
 ## What the walk did NOT do
 
 A clean report is worth exactly what it covered, so the report says what it did
@@ -557,7 +622,7 @@ not reach as loudly as what it found.
 
 ```
 0 finding(s) across 6 endpoint(s), 9 action(s)
-checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS* SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE DECLARATIONS
+checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS* SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES
 * OUTPUTS ran on 1 of 6 endpoint(s); waived on the rest (see `opted out:`)
 probed 7 face(s) across 5 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)

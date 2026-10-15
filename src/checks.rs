@@ -45,7 +45,10 @@ pub enum Check {
     RequiresVerb,
     /// **Declared = enforced, the half a test can see.** Every action with a `requires`
     /// is refused with a typed `Denied` under a capability holding no grants; an
-    /// action declaring nothing is not.
+    /// action declaring nothing is not. That refusal is an undeclared gate, and the
+    /// finding names both things it can be, since the fixes differ (0.8.4, ledger
+    /// #362): a capability the action enforces (declare it), or a STATE no capability
+    /// expresses, such as a window another resource opens (document it and waive).
     Enforced,
     /// **A mutation no authority gated.** The fourth cell of the same 2x2
     /// [`Enforced`](Check::Enforced) walks: a `Sink` or a `Delete` that declares no
@@ -75,9 +78,10 @@ pub enum Check {
     /// in `ikigai-vocab`, or lives under a well-known or module-registered namespace.
     ///
     /// It **parses the face** to see them
-    /// ([`rdf::parse`](crate::rdf::parse)), so it also reports a face that does not
-    /// resolve, is served as something other than what it declared, or is malformed
-    /// — under its own name when [`SkolemRdf`](Check::SkolemRdf) is not selected. A
+    /// ([`rdf::parse`](crate::rdf::parse)), so it also reports a face that is served
+    /// as something other than what it declared, or is malformed — under its own name
+    /// when [`SkolemRdf`](Check::SkolemRdf) is not selected. (A face that does not
+    /// resolve at all is [`Resolves`](Check::Resolves)'s, when that is selected.) A
     /// module can therefore rely on `VOCABULARY` alone to prove a hand-written
     /// `@prefix` line is well-formed. The oracle is `ikigai_vocab::VOCABULARY` at
     /// the version cargo resolves for the whole graph: a term this crate's pin is
@@ -99,7 +103,10 @@ pub enum Check {
     Cacheable,
     /// **Pipeline citizenship.** A mutating action with by-value inputs declares
     /// `content` (where a pipe's value arrives), and an action declaring `content`
-    /// reads it.
+    /// reads it. On a `Sink`, any by-value input counts, required or not (0.8.4, ledger
+    /// #339): a Sink whose inputs are all optional is the one a pipe alone most often
+    /// drives, and before 0.8.4 it was the one the rule skipped. A `Delete` is held to
+    /// it only when an input is required: its optional inputs (a `reason`) are metadata.
     Pipeline,
     /// **Required is required.** Each input an action declares required, by value and
     /// with no default, is dropped from the call the walk resolved, one at a time, and
@@ -175,6 +182,30 @@ pub enum Check {
     /// standing declarations on purpose — a `live` an endpoint will earn next
     /// release, say — and say why in the same place you would say it to a reviewer.
     Declarations,
+    /// **The resolution a check needed did not resolve** (0.8.4, ledger #338). The
+    /// invoking checks that judge an answer (`OUTPUTS`, `SKOLEM-RDF`, `VOCABULARY`,
+    /// `CACHEABLE`) all read one resolution of the action with its minimal inputs (a
+    /// declared RDF face's own `as=` resolution, for a description with several faces;
+    /// the pipeline probe's firing, for a `Sink`). When it is refused, nothing else can
+    /// be judged, and the refusal is reported ONCE per action under this label, with
+    /// the refusal's kind, its text, the check that needed it, and, where the walk had
+    /// to invent a value for an input that declares no `class`, that input by name:
+    ///
+    /// ```text
+    /// sparql  RESOLVES  source: did not resolve with the minimal inputs its ArgSpecs allow (refused as `invalid-argument`: …); supply a … Needed by SKOLEM-RDF, and by every check that reads the same resolution. The walk had no value to send for `query`: it declares no class, so it sent the placeholder `x` (the ARGSPECS finding on this action). …
+    /// ```
+    ///
+    /// Before 0.8.4 the same failure was reported under whichever of those checks
+    /// reached it first, so it read as a caching finding on an endpoint whose caching
+    /// was fine, and two adopters describing one defect named different checks.
+    ///
+    /// It fires nothing of its own: it reports a resolution another selected check
+    /// needed, so it reports nothing for an action no such check runs on (waive
+    /// `OUTPUTS` on a `Sink` whose target this kernel does not bind, and nothing is
+    /// said). Waive it per endpoint like any check. **Not selected** (a selection
+    /// written before 0.8.4 never names it), the failure is reported under the check
+    /// that needed it, exactly as before.
+    Resolves,
 }
 }
 
@@ -196,6 +227,7 @@ impl Check {
             Check::Validate => "VALIDATE",
             Check::SpaceName => "SPACE-NAME",
             Check::Declarations => "DECLARATIONS",
+            Check::Resolves => "RESOLVES",
         }
     }
 
@@ -213,6 +245,7 @@ impl Check {
                 | Check::Cacheable
                 | Check::Pipeline
                 | Check::Required
+                | Check::Resolves
         )
     }
 
@@ -277,6 +310,8 @@ impl Checks {
     pub const SPACE_NAME: Checks = Checks(1 << (Check::SpaceName as u16));
     /// [`Check::Declarations`].
     pub const DECLARATIONS: Checks = Checks(1 << (Check::Declarations as u16));
+    /// [`Check::Resolves`].
+    pub const RESOLVES: Checks = Checks(1 << (Check::Resolves as u16));
     /// Both RDF-face checks: [`Check::SkolemRdf`] and [`Check::Vocabulary`] — the
     /// pair a module without a graph face subtracts.
     pub const RDF: Checks = Checks(Checks::SKOLEM_RDF.0 | Checks::VOCABULARY.0);

@@ -111,12 +111,19 @@ fn under_root_an_endpoint_about_its_caller_can_only_be_waived() {
             .iter()
             .any(|d| d.contains("did not resolve") && d.contains("names none"))
     };
-    // The minimal resolution's failure is reported once, under the first check that
-    // needed it; OUTPUTS then says it saw nothing.
-    assert!(refused(Check::SkolemRdf), "{report}");
+    // The minimal resolution's failure is reported once, under RESOLVES, naming the
+    // first check that needed it; OUTPUTS then says it saw nothing.
+    assert!(refused(Check::Resolves), "{report}");
+    assert!(!refused(Check::SkolemRdf), "{report}");
+    assert!(
+        details(&report, Check::Resolves)
+            .iter()
+            .any(|d| d.contains("Needed by SKOLEM-RDF")),
+        "{report}"
+    );
     // ...and the refusal under root names the way out.
     assert!(
-        details(&report, Check::SkolemRdf).iter().any(|d| d
+        details(&report, Check::Resolves).iter().any(|d| d
             .contains("probed under root, which names no principal")
             && d.contains(r#"Fixture::new("me", Verb::Source).capability(…)"#)),
         "{report}"
@@ -245,7 +252,7 @@ fn a_fixture_without_a_capability_still_probes_under_root() {
         .fixture(fixture)
         .run_blocking(&kernel(me(Shape::default())));
     assert!(
-        details(&report, Check::SkolemRdf)
+        details(&report, Check::Resolves)
             .iter()
             .any(|d| d.contains("probed under root")),
         "{report}"
