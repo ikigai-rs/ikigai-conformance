@@ -93,6 +93,9 @@ pub enum Check {
     /// Both polarities are declarations the module makes: [`Suite::cacheable`](crate::Suite::cacheable)
     /// holds an endpoint to being cacheable, [`Suite::live`](crate::Suite::live) to
     /// being `Expiry::Always`. An endpoint declaring neither is held to neither.
+    /// And a [`Suite::pure`](crate::Suite::pure) is held to its claim: a cacheable
+    /// result of an endpoint declared pure carries no thread but its own name and
+    /// what it read (the name, and the threads, of each resource it resolved).
     Cacheable,
     /// **Pipeline citizenship.** A mutating action with by-value inputs declares
     /// `content` (where a pipe's value arrives), and an action declaring `content`

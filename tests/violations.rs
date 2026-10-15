@@ -786,6 +786,172 @@ fn cacheable_passes_a_read_written_through_its_own_name() {
     assert!(report.of(Check::Cacheable).next().is_none(), "{report}");
 }
 
+/// Cacheable and hung from a piece of state no request names: the thread a
+/// stateful read SHOULD carry, which makes a `pure` declaration on it false.
+fn lookup() -> FnEndpoint {
+    FnEndpoint::new("lookup", |_inv: &Invocation<'_>| {
+        Ok(text("row 7").cacheable().depends_on("urn:example:db"))
+    })
+    .with_description(
+        Description::new("lookup")
+            .verb(Verb::Source)
+            .output("text/plain"),
+    )
+}
+
+#[test]
+fn pure_with_a_foreign_thread_is_reported() {
+    // Ledger #1508: `pure` used to be taken on trust. A foreign thread is exactly
+    // what silences the rule `pure` exempts from, so a false declaration passed.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:lookup"), lookup());
+    let report = Suite::new().pure("lookup").run_blocking(&kernel(space));
+    let found = only(&report, Check::Cacheable);
+    assert_eq!(found.len(), 1, "{report}");
+    assert!(
+        found[0].contains(
+            "declared pure (`Suite::pure`) but carries a foreign thread `urn:example:db`"
+        ),
+        "{report}"
+    );
+    // The declaration WAS consulted — the claim was checked — so DECLARATIONS does
+    // not also call it inert.
+    assert!(report.of(Check::Declarations).next().is_none(), "{report}");
+
+    // Additive: the same endpoint, undeclared, is the threaded stateful read the
+    // rule asks for and stays clean.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:lookup"), lookup());
+    assert!(report_of(space).is_clean());
+}
+
+#[test]
+fn pure_names_every_foreign_thread_in_one_finding() {
+    let two = FnEndpoint::new("join", |_inv: &Invocation<'_>| {
+        Ok(text("x")
+            .cacheable()
+            .depends_on("urn:example:db")
+            .depends_on("urn:example:cache"))
+    })
+    .with_description(
+        Description::new("join")
+            .verb(Verb::Source)
+            .output("text/plain"),
+    );
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:join"), two);
+    let report = Suite::new().pure("join").run_blocking(&kernel(space));
+    assert_eq!(
+        only(&report, Check::Cacheable),
+        [
+            "declared pure (`Suite::pure`) but carries foreign threads `urn:example:cache`, \
+          `urn:example:db`: neither its own name nor anything it read, so the answer hangs \
+          from state that is not one of its inputs, and a pure function reads none. Drop the \
+          `pure` declaration (the thread already answers \"what cuts this?\"), or drop the \
+          dependency if the endpoint really is a function of its inputs"
+        ],
+        "{report}"
+    );
+}
+
+/// A pure composite: it reads `source` (a resource another endpoint serves) and
+/// transforms it. The kernel folds what it read into its answer — the input's
+/// own-name thread and every thread the input carries — and those threads are the
+/// input's, not state of the composite's.
+fn shout(source: &'static str, extra: Option<&'static str>) -> ikigai_core::AsyncFnEndpoint {
+    ikigai_core::AsyncFnEndpoint::new("shout", move |inv| {
+        Box::pin(async move {
+            let read = inv.source(&Iri::parse(source).unwrap()).await?;
+            let out = text(String::from_utf8_lossy(&read.bytes).to_uppercase()).cacheable();
+            Ok(match extra {
+                Some(thread) => out.depends_on(thread),
+                None => out,
+            })
+        })
+    })
+    .with_description(
+        Description::new("shout")
+            .verb(Verb::Source)
+            .output("text/plain"),
+    )
+}
+
+#[test]
+fn pure_accepts_the_threads_of_what_it_read() {
+    let space = || {
+        EndpointSpace::new()
+            .bind(
+                Exact::new("urn:example:shout"),
+                shout("urn:example:lookup", None),
+            )
+            .bind(Exact::new("urn:example:lookup"), lookup())
+    };
+    // The premise, pinned: the composite's answer carries its input's own-name
+    // thread AND the thread its input hangs from, neither of them its own.
+    let read = Request::new(Verb::Source, Iri::parse("urn:example:shout").unwrap());
+    let premise = kernel(space());
+    let answer = futures::executor::block_on(premise.issue(read, &Capability::root())).unwrap();
+    for thread in ["urn:example:lookup", "urn:example:db"] {
+        assert!(
+            answer.threads().contains(&Thread::new(thread)),
+            "{:?}",
+            answer.threads()
+        );
+    }
+    let report = Suite::new().pure("shout").run_blocking(&kernel(space()));
+    assert!(report.of(Check::Cacheable).next().is_none(), "{report}");
+}
+
+#[test]
+fn pure_accepts_the_bindings_thread_of_a_kernel_face_it_read() {
+    // A kernel face (the topology, the catalog) rendered another way is a function of
+    // what is bound: it hangs from `urn:kernel:bindings`, which is the kernel face's
+    // thread, not state of the composite's (ikigai-web-demo's `catalog-rdf`).
+    let space = || {
+        EndpointSpace::new().bind(
+            Exact::new("urn:example:shout"),
+            shout("urn:kernel:topology", None),
+        )
+    };
+    let read = Request::new(Verb::Source, Iri::parse("urn:example:shout").unwrap());
+    let premise = kernel(space());
+    let answer = futures::executor::block_on(premise.issue(read, &Capability::root())).unwrap();
+    assert!(
+        answer
+            .threads()
+            .contains(&Thread::new(ikigai_core::BINDINGS_THREAD)),
+        "{:?}",
+        answer.threads()
+    );
+    let report = Suite::new().pure("shout").run_blocking(&kernel(space()));
+    assert!(report.of(Check::Cacheable).next().is_none(), "{report}");
+}
+
+#[test]
+fn pure_reports_a_foreign_thread_beside_the_threads_of_what_it_read() {
+    // What it read accounts for its input's threads and nothing else: a thread the
+    // composite names itself is still foreign.
+    let space = EndpointSpace::new()
+        .bind(
+            Exact::new("urn:example:shout"),
+            shout("urn:example:config", Some("urn:example:session")),
+        )
+        .bind(Exact::new("urn:example:config"), threadless());
+    let report = Suite::new()
+        .pure("shout")
+        .pure("config")
+        .run_blocking(&kernel(space));
+    let found: Vec<_> = report
+        .against("shout")
+        .filter(|f| f.check == Check::Cacheable)
+        .collect();
+    assert_eq!(found.len(), 1, "{report}");
+    assert!(
+        found[0]
+            .detail
+            .contains("carries a foreign thread `urn:example:session`:"),
+        "{report}"
+    );
+    assert!(report.against("config").next().is_none(), "{report}");
+}
+
 #[test]
 fn cacheable_reads_a_thread_named_for_the_endpoint_as_none() {
     // Source only, so nothing writes through `urn:example:notes`: the one thread it

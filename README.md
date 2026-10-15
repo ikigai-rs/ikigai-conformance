@@ -63,7 +63,7 @@ pointing at the check.
 | `OUTPUTS` | faces are declared | the bare media type the action serves with its minimal inputs (`;charset=` and other parameters stripped, no `as=`) is one of its declared `outputs`. A wrong declaration hides a face from every consumer that reads outputs — `SKOLEM-RDF` and `VOCABULARY` included, which filter the declaration for RDF faces before probing; linkeddata's `sparql-construct` declared only `application/sparql-results+json` over Turtle for its whole life and the RDF checks saw nothing. What the check cannot observe (a mutating action never fired under root, a failed minimal resolution, a caller's `as=` label) is printed as `unprobed`, never as a finding |
 | `SKOLEM-RDF` | skolemize; no blank nodes | every declared RDF face (`text/turtle`, `application/ld+json`, `application/rdf+xml`, N-Triples, N-Quads, TriG) resolves with the smallest inputs its ArgSpecs allow, parses, and has no blank node |
 | `VOCABULARY` | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known namespace (rdf, rdfs, xsd, owl, dcterms, Dublin Core Elements 1.1, foaf, schema, prov, ical, skos, sh, and the W3C Web Annotation `oa:`) or one the module registers. Because it parses, it also reports an unresolvable, mislabeled or malformed face — under its own name when `SKOLEM-RDF` is not selected, so `VOCABULARY` alone proves a hand-written `@prefix` line is well-formed |
-| `CACHEABLE` | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and — if it never expires (`Expiry::Never`; an `Expiry::At` deadline is a bound) — carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; a result declared live (`Suite::live`) is `Expiry::Always` |
+| `CACHEABLE` | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and — if it never expires (`Expiry::Never`; an `Expiry::At` deadline is a bound) — carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; an endpoint declared pure carries no thread but its own name and what it read; a result declared live (`Suite::live`) is `Expiry::Always` |
 | `PIPELINE` | pipeline citizenship | a mutating action with by-value inputs declares `content` (where a pipe's value and a `sink`'s body arrive); an action declaring `content` reads it |
 | `REQUIRED` | ArgSpecs from day one | each input an action declares **required**, by value and with no default, is dropped from the call the walk resolved, one at a time, and the call must then be refused with a typed `MissingArgument` or `InvalidArgument`. A call that **succeeds** without it is "declared required, actually optional": a false negative in the selection funnel, because `urn:kernel:validate` and an MCP tool schema both refuse a valid call that omits it. Five adopters wrote this check by hand (http, runbook, cms, secret, sexpr shipped the defect). A refusal of another kind is a finding too (an agent cannot tell its own omission from a failure of the endpoint), unless it is transient. `Source` and `Exists` by default; `Sink` and `Delete` only under `Suite::required_on_mutating()`, because each drop is a firing and a wrongly accepted one has mutated. A call that did not resolve in the first place is listed as `unprobed` |
 | `NAMES` | naming convention | the description id is a kebab-case noun (`tag-suggest`, `kernel-catalog`) — the MCP projection derives an agent's tool name from it |
@@ -670,7 +670,12 @@ Honest residue — what no check here can see:
 - **Whether a result should be cacheable**, and whether it is pure. The probe checks
   a cacheable result behaves like one; purity, "marks cacheable" and "live on
   purpose" are declarations the module makes (`pure`, `cacheable`, `live`). An
-  endpoint declaring none of them is held to none of them.
+  endpoint declaring none of them is held to none of them. A `pure` is checked
+  from one side only: an answer that hangs from a thread nothing it read accounts
+  for is a finding (0.8.3), but a "pure" endpoint that reads state it names no
+  thread for at all (a global, a file read around the kernel) looks exactly like
+  a pure function, and a thread the walk cannot attribute to what it read is
+  never reported.
 - **`Source` pipeline routing.** The engine routes a piped value into the sole
   unnamed required input by contract; nothing an endpoint does makes that right or
   wrong. Newline-separated list output (the `..` map convention) is a shape no
@@ -738,6 +743,15 @@ the whole point. `tests/builtins.rs` runs the suite against
 and pins the exact findings: three untyped inputs, two pre-convention ids, three
 cacheable pure functions nobody declared pure — and nothing else.
 
+A `pure` declaration is falsified with an endpoint that hangs from
+`urn:example:db` and reads nothing (caught; the same endpoint undeclared stays
+clean), one naming two such threads (one finding naming both), and a composite that
+reads a resource and names a thread of its own (caught, for that thread alone). Its
+silences are proved the same way: a pure composite over a STATEFUL input (whose
+answer carries the input's name and the input's own `depends_on`) and one over a
+kernel face (`urn:kernel:bindings`) stay clean, and both tests fail the moment the
+check stops reading back the threads of what the endpoint read.
+
 `REQUIRED` is falsified with the runbook's shape (`name` declared required,
 `unwrap_or("friend")` in the body), which every other check passes, and with an
 untyped refusal; it stays silent on a required input carrying a default (ARGSPECS's
@@ -784,8 +798,46 @@ anyone memoizes by id.
 
 ## Status
 
-0.8.2. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.8.3. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.8.2 → 0.8.3: `Suite::pure` is checked, not taken on trust (ledger #1508)
+
+Found by the ikigai-throttle triage (ledger #1498): a mutation that hung every overlay
+result from `urn:foreign` left the suite clean although `upper` is declared pure; only
+the repo's own hand test caught it. `pure` exempts a cacheable result from the
+no-thread-but-its-own-name finding, and a foreign thread is exactly what silences that
+finding, so a false `pure` could never be seen.
+
+**What is new.** Under `CACHEABLE`, an endpoint declared pure whose cacheable answer
+carries a thread that is neither its own name nor the name or a thread of a resource it
+read is a finding:
+
+```text
+lookup  CACHEABLE  source: declared pure (`Suite::pure`) but carries a foreign thread `urn:example:db`: neither its own name nor anything it read, so the answer hangs from state that is not one of its inputs, and a pure function reads none. Drop the `pure` declaration (the thread already answers "what cuts this?"), or drop the dependency if the endpoint really is a function of its inputs
+```
+
+What counts as read: every resource the first minimal resolution's trace names (a
+sub-request, a by-reference argument, a kernel face such as the catalog), and every
+thread each of those carries, read back from the cache. So a pure transform over a
+stateful input is not blamed for the input's thread. The check reuses the trace
+`CACHEABLE` already recorded; its only reads are of what the endpoint read, only when a
+thread is left over, and only when the cache already holds it under a plain `Source` of
+its name (a cache hit that computes nothing). A thread it cannot attribute (the first
+resolution was itself a cache hit, or a resource it read is not in the cache that way)
+is never reported. It is on by default with `CACHEABLE`, and it applies only to ids
+declared pure.
+
+**Will it turn a green suite red?** Only where a `pure` declaration is false. Run
+against 24 adopters' `tests/conformance.rs` before release, it turned one red:
+ikigai-script declares `script-version` and `script-run` pure while both hang from the
+script's state (`urn:script:{name}`, `urn:script:{name}:runs`, added for ledger #1076 and
+#1079 after the declarations were written). Dropping the two declarations is the whole
+fix: the threads already satisfy the rule they exempted from.
+
+**Source changes for a consumer:** none.
+
+Adopters pinned at `"0.8.0"` get 0.8.3 at their next lock update with no pin move.
 
 ### 0.8.1 → 0.8.2: `Suite::inherit`, `Suite::own_all`, `Finding::is_suite_wide` (ledger #1497)
 
