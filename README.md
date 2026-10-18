@@ -988,8 +988,58 @@ anyone memoizes by id.
 
 ## Status
 
-0.9.1. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.10.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.9.1 → 0.10.0: `FAILURES` and `Suite::fails_under`, opt-in (ledger #1546)
+
+Core 0.1.108 gives every error a failure class (`Error::class()`) and lets an action state
+the classes it can produce (`.fails(FailureClass::…)`). This release holds the statement
+to what the walk sees ([A module's failure classes](#a-modules-failure-classes-failures-suitefails_under)):
+
+- **`FAILURES`**, a seventeenth check: every failure observed from an action that states
+  its classes must be one core's `ActionSpec::admits_failure` admits. An action that states
+  nothing is listed on a `failures:` line, never a finding.
+- **`Suite::fails_under(Fixture, FailureClass)`**: an input that must fail with a stated
+  class, held to exactly that class (`fails under:` lines).
+- **`Suite::check_failures()`** opts into both. `Report::failures_seen()` and
+  `Report::fails_under_probes()` carry the evidence (`FailuresSeen`, `FailsUnder`).
+- The `ikigai-core` and `ikigai-vocab` floors move to `0.1.108`.
+
+**Will it turn a green suite red?** No, not in 0.10: the check is off unless a suite asks
+for it. What changes without asking is the report TEXT. `FAILURES` is printed on the
+`skipped:` line, and where nothing was skipped before, that is a new `skipped: FAILURES`
+line. A test that pins a whole report, or asserts there is no `skipped:` line, sees it.
+Findings and firings are unchanged: `Suite::new()` reports exactly what
+`checks(Checks::all() - Checks::FAILURES)` does. Source changes for a consumer: none,
+unless it built an `Evidence` by struct literal (it is `#[non_exhaustive]`, so only this
+crate can).
+
+**0.11.0 makes `FAILURES` the default.** No adopter states failure classes yet, so turning
+it on judges nothing until one does; the declarations ride the next adoption wave. To keep
+it off in 0.11, subtract `Checks::FAILURES`.
+
+**The re-pin wave this implies.** A `"0.8.x"` pin is `<0.9.0` under Cargo's 0.x rules, and
+a `"0.9.1"` pin is `<0.10.0`, so **no adopter receives 0.10.0 without a deliberate
+re-pin**, and none sees 0.9.0's contract-shape checks either unless it moved to 0.9. As
+pinned on 2026-10-18 (the checkouts on disk):
+
+- `"0.8.0"`: ikigai-a11y, ikigai-browse, ikigai-cms, ikigai-cms-web, ikigai-compress,
+  ikigai-core (`ikigai-vocab`'s dev-dependency), ikigai-diagram, ikigai-encrypt,
+  ikigai-fn, ikigai-fs, ikigai-gonk, ikigai-http, ikigai-jsonld, ikigai-layers,
+  ikigai-ledger, ikigai-linkeddata (`ikigai-rdf`, `ikigai-sniff`, `ikigai-sparql`),
+  ikigai-llm, ikigai-log, ikigai-markdown, ikigai-meeting, ikigai-module, ikigai-name,
+  ikigai-nl, ikigai-org, ikigai-repo, ikigai-runbook, ikigai-script, ikigai-secret,
+  ikigai-sexpr, ikigai-shacl, ikigai-sign, ikigai-store, ikigai-text, ikigai-xslt;
+- `"0.8.1"`: ikigai-lisp;
+- `"0.8.2"`: ikigai-bayes, ikigai-web-demo;
+- `"0.8.4"`: ikigai-throttle, ikigai-web;
+- `"0.9.1"`: ikigai-cli (`ikigai-embedded`, `ikigai-engine`, `ikigai-tz`).
+
+Re-pinning one of the 0.8 adopters to `"0.10.0"` also brings in 0.9.0's checks (the
+contract shape, `REQUIRED`'s input groups, `RECOMPUTE`), which CAN turn a suite red; that
+is the real cost of the wave, not `FAILURES`. Each re-pin also lifts the adopter's core to
+0.1.108 through this crate's floor.
 
 ### 0.9.0 → 0.9.1: an optional binding may carry a default (ledger #1882)
 
