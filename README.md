@@ -933,10 +933,10 @@ anyone memoizes by id.
 
 ## Status
 
-0.8.4. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.9.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
 
-### 0.8.4 → next (unreleased): core 0.1.105's contract shape (ledger #1547)
+### 0.8.4 → 0.9.0: core 0.1.105's contract shape (ledger #1547)
 
 Core 0.1.105 is the one release that changed what a contract can say: input groups
 (exactly one, at least one, at most one of, with the member a pipe fills), `needs`
@@ -993,7 +993,13 @@ one checker (`ActionSpec::check`) behind `urn:kernel:validate`. The suite reads 
 `#[non_exhaustive]`, and `NamedOnly` is new. The core floor is 0.1.105, and a `"0.8"`
 pin is a ceiling below this release.
 
-### 0.8.4 → next (unreleased): `RECOMPUTE`, `Suite::enforced_under` (ledger #330, #331)
+**A minor bump, so a re-pin.** Under Cargo's 0.x caret rules an adopter pinned at
+`"0.8.0"` is held below 0.9.0 and keeps reporting green against the 0.8 definition of
+"done". Raise the pin to `ikigai-conformance = "0.9.0"` in the same PR that raises
+`ikigai-core` and `ikigai-vocab` to `"0.1.105"`: this crate lifts the core a module's
+tests resolve to 0.1.105 anyway, so the pins should say so.
+
+### 0.8.4 → 0.9.0: `RECOMPUTE`, `Suite::enforced_under` (ledger #330, #331)
 
 **What is new.**
 
