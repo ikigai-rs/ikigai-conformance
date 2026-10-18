@@ -77,6 +77,11 @@ pub enum Check {
     /// RDF faces before probing. What the check could not observe (a mutating
     /// action never fired under root, a failed minimal resolution, a caller's `as=`
     /// label) is listed in the report as unprobed, never as a finding.
+    ///
+    /// A pass-through (ikigai-core 0.1.105's `output_from`) reads `outputs` as "at least
+    /// these": `OutputFrom::Input(name)` holds the served type to the type of the
+    /// resource `name` names (the walk resolves it), and `OutputFrom::Origin` is listed
+    /// as a declared pass-through, unprobed.
     Outputs,
     /// **Skolemize; no blank nodes.** Every declared RDF face resolves, parses, and
     /// carries no blank node.
@@ -134,6 +139,12 @@ pub enum Check {
     /// each drop is one more firing of a mutating action and one that SUCCEEDS has
     /// mutated. When the call it drops from does not resolve, nothing is observed and
     /// the action is listed as unprobed.
+    ///
+    /// Each input group (ikigai-core 0.1.105) is probed too: every member dropped, each
+    /// other member alone, and a pair where the group allows at most one. Core's one
+    /// checker (`ActionSpec::check`) says whether the contract refuses each call, and the
+    /// endpoint must agree: a refused call gets a typed refusal, and an accepted one is
+    /// not refused as missing an argument (the pre-flight's false green, ledger #15).
     Required,
     /// **Naming convention.** A description id is a short noun in `kebab-case`
     /// (the convention `ikigai-core`'s crate docs state).
@@ -154,6 +165,12 @@ pub enum Check {
     /// this one is a mistake core refuses, not a matter of style. It reports the refusal,
     /// never its error variant, and `validate` stops at the first refusal, so a
     /// description with two bad names shows the second once the first is fixed.
+    ///
+    /// Since ikigai-core 0.1.105 `validate` also refuses a relation the contract cannot
+    /// honor (an input group, `needs`, a value note, an envelope, an example or an
+    /// `output_from` naming what is not declared) and a default on a binding, on a
+    /// required input, or one the contract's own checker refuses: the kernel injects a
+    /// declared default now, so that default is what every caller who omits it gets.
     Validate,
     /// **A name is a claim: same name, same doors.** A module states what kind of
     /// space its constructor builds, and the check holds it to that

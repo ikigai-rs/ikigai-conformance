@@ -60,14 +60,14 @@ pointing at the check.
 | `REQUIRES-VERB` | declared = enforced | a `requires` with no verb — enforced on every verb since core 0.1.85 (it was silently inert before), but the catalog cannot say which actions it gates |
 | `ENFORCED` | declared = enforced | under a capability holding no grants, every action with a `requires` is refused with a typed `Denied`; an action declaring nothing is not. An undeclared gate makes the manifold over-offer, and the finding names both readings, since their fixes differ: a CAPABILITY it enforces is declared (`.requires(…)`), a STATE no capability expresses (refused until another resource opens a window) is documented and `ENFORCED` waived with that reason. And, opt-in, the module's OWN rule: a caller a `Suite::enforced_under` probe names (some grant under the declared prefix, not the one for this target) is refused with a typed `Denied` on the module's path |
 | `AUTHORITY` | declared = enforced | the fourth cell of `ENFORCED`'s own probe: a `Sink` or a `Delete` that declares no `requires` and **mutated anyway** under a capability holding no grants. Nothing gates the write, so nothing can be withheld — a party that should read and report cannot be given read alone, because read is all there is. A `Source` is not in scope (a public read is a decision a module makes); a mutating action refused for some *other* reason is recorded as `unprobed`, never as a finding, because what an ungranted caller could do through it was not observed |
-| `OUTPUTS` | faces are declared | the bare media type the action serves with its minimal inputs (`;charset=` and other parameters stripped, no `as=`) is one of its declared `outputs`. A wrong declaration hides a face from every consumer that reads outputs — `SKOLEM-RDF` and `VOCABULARY` included, which filter the declaration for RDF faces before probing; linkeddata's `sparql-construct` declared only `application/sparql-results+json` over Turtle for its whole life and the RDF checks saw nothing. What the check cannot observe (a mutating action never fired under root, a failed minimal resolution, a caller's `as=` label) is printed as `unprobed`, never as a finding |
+| `OUTPUTS` | faces are declared | the bare media type the action serves with its minimal inputs (`;charset=` and other parameters stripped, no `as=`) is one of its declared `outputs`. A wrong declaration hides a face from every consumer that reads outputs — `SKOLEM-RDF` and `VOCABULARY` included, which filter the declaration for RDF faces before probing; linkeddata's `sparql-construct` declared only `application/sparql-results+json` over Turtle for its whole life and the RDF checks saw nothing. What the check cannot observe (a mutating action never fired under root, a failed minimal resolution, a caller's `as=` label) is printed as `unprobed`, never as a finding. A **pass-through** (core 0.1.105's `output_from`, ledger #45/#301) reads `outputs` as "at least these": `output_from(Input("src"))` holds the served type to the type `src`'s resource serves (the walk resolves it), and `output_from(Origin)` (a type decided outside the kernel, an HTTP origin's) is printed as a declared pass-through, never a finding. Delete the `Check::Outputs` waiver a pass-through used to need |
 | `SKOLEM-RDF` | skolemize; no blank nodes | every declared RDF face (`text/turtle`, `application/ld+json`, `application/rdf+xml`, N-Triples, N-Quads, TriG) resolves with the smallest inputs its ArgSpecs allow, parses, and has no blank node |
 | `VOCABULARY` | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known namespace (rdf, rdfs, xsd, owl, dcterms, Dublin Core Elements 1.1, foaf, schema, prov, ical, skos, sh, and the W3C Web Annotation `oa:`) or one the module registers. Because it parses, it also reports a mislabeled or malformed face — under its own name when `SKOLEM-RDF` is not selected, so `VOCABULARY` alone proves a hand-written `@prefix` line is well-formed (a face that does not resolve at all is `RESOLVES`'s) |
 | `CACHEABLE` | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and — if it never expires (`Expiry::Never`; an `Expiry::At` deadline is a bound) — carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; an endpoint declared pure carries no thread but its own name and what it read; a result declared live (`Suite::live`) is `Expiry::Always` |
-| `PIPELINE` | pipeline citizenship | a mutating action with by-value inputs declares `content` (where a pipe's value and a `sink`'s body arrive), and on a `Sink` whether or not any of them is required: a Sink whose inputs are all optional is the one a pipe alone most often drives (0.8.4; a `Delete` with only optional inputs, a `reason`, is not held to it); an action declaring `content` reads it |
-| `REQUIRED` | ArgSpecs from day one | each input an action declares **required**, by value and with no default, is dropped from the call the walk resolved, one at a time, and the call must then be refused with a typed `MissingArgument` or `InvalidArgument`. A call that **succeeds** without it is "declared required, actually optional": a false negative in the selection funnel, because `urn:kernel:validate` and an MCP tool schema both refuse a valid call that omits it. Five adopters wrote this check by hand (http, runbook, cms, secret, sexpr shipped the defect). A refusal of another kind is a finding too (an agent cannot tell its own omission from a failure of the endpoint), unless it is transient. `Source` and `Exists` by default; `Sink` and `Delete` only under `Suite::required_on_mutating()`, because each drop is a firing and a wrongly accepted one has mutated. A call that did not resolve in the first place is listed as `unprobed` |
+| `PIPELINE` | pipeline citizenship | a mutating action with by-value inputs declares `content` (where a pipe's value and a `sink`'s body arrive), and on a `Sink` whether or not any of them is required: a Sink whose inputs are all optional is the one a pipe alone most often drives (0.8.4; a `Delete` with only optional inputs, a `reason`, is not held to it); an action declaring `content` reads it. A read whose only intake is an input group with no `pipe` member is printed as a `pipeline: … is named-only` line, information rather than a finding: no pipe can reach it (`InputGroup::pipe` names the member a pipe fills). Where `content` is a member of an exactly-one group, the pipeline probe sends it INSTEAD of the named alternative, as the engine routes a pipe |
+| `REQUIRED` | ArgSpecs from day one | each input an action declares **required**, by value and with no default, is dropped from the call the walk resolved, one at a time, and the call must then be refused with a typed `MissingArgument` or `InvalidArgument`. A call that **succeeds** without it is "declared required, actually optional": a false negative in the selection funnel, because `urn:kernel:validate` and an MCP tool schema both refuse a valid call that omits it. Five adopters wrote this check by hand (http, runbook, cms, secret, sexpr shipped the defect). A refusal of another kind is a finding too (an agent cannot tell its own omission from a failure of the endpoint), unless it is transient. `Source` and `Exists` by default; `Sink` and `Delete` only under `Suite::required_on_mutating()`, because each drop is a firing and a wrongly accepted one has mutated. A call that did not resolve in the first place is listed as `unprobed`. Since 0.9.0 (core 0.1.105) it also probes each **input group**: every member dropped, each other member alone, and a second member beside the first where the group allows at most one. Core's one checker (`ActionSpec::check`, the rules behind `urn:kernel:validate`) says whether the contract refuses each call, and the endpoint must agree: a call the contract refuses gets a typed refusal, and a call it accepts is not refused as missing an argument. The second is the false green ledger #15 removed from the pre-flight; the first is a group stricter than the endpoint (`exactly_one` where both together are served: `at_least_one`). The minimal call fills each exactly-one or at-least-one group with its `pipe` member (else its first), and every input a given one `needs` |
 | `NAMES` | naming convention | the description id is a kebab-case noun (`tag-suggest`, `kernel-catalog`) — the MCP projection derives an agent's tool name from it |
-| `VALIDATE` | a name is spelled into IRIs | `Description::validate()` accepts the description: no id, input name, input `class` or `requires` holds a character an RDF `IRIREF` cannot carry (``<>"{}\|^`\``, a space, a control character), and no id or input name holds a code point no IRI carries (DEL, a C1 control, private use, a noncharacter; core 0.1.99). Since core 0.1.100 the emitters encode a name and degrade an authored IRI that is not one to a literal, so the endpoint's Meta Turtle and contract IRIs still parse, but not as written: this is the strict check on an authoring mistake, on top of that encoding. See [Why `VALIDATE` is here and not in `bind`](#why-validate-is-here-and-not-in-bind) |
+| `VALIDATE` | a name is spelled into IRIs | `Description::validate()` accepts the description: no id, input name, input `class` or `requires` holds a character an RDF `IRIREF` cannot carry (``<>"{}\|^`\``, a space, a control character), and no id or input name holds a code point no IRI carries (DEL, a C1 control, private use, a noncharacter; core 0.1.99). Since core 0.1.100 the emitters encode a name and degrade an authored IRI that is not one to a literal, so the endpoint's Meta Turtle and contract IRIs still parse, but not as written: this is the strict check on an authoring mistake, on top of that encoding. Since core 0.1.105 it also refuses a contract whose relations it cannot honor: an input group, a `needs`, a value note, an envelope, an example or an `output_from` that names what the contract does not declare, and a **default** on a binding, on a required input, or one the contract's own checker refuses. A default matters more now: the kernel INJECTS it (ledger #19). See [Why `VALIDATE` is here and not in `bind`](#why-validate-is-here-and-not-in-bind) |
 | `SPACE-NAME` | a name is a claim: same name, same doors | a space the module declares **self-named** claims `space_iri("<module>")` (`urn:iki:space:<module>`), on its topology root too, and two calls of its constructor claim the same name over the same doors; a space it declares **host-named** claims nothing. See [A space's name](#a-spaces-name-space-name) |
 | `DECLARATIONS` | — | every declaration the module made (`live`, `cacheable`, `pure`, `namespace`, `required_on_mutating`, a `Fixture`, an `opt_out`, an `opt_out_check`, a declared space) reached the check that would honor it. A `live` on a `Sink` reached nothing and the report printed `declared live:` anyway |
 | `RESOLVES` | — | the resolution another check needed (the minimal one that `OUTPUTS`, `SKOLEM-RDF`, `VOCABULARY` and `CACHEABLE` read; the pipeline probe's firing of a `Sink`) resolved. A failure is reported ONCE per action under this label, with the refusal's kind, the check that needed it and, where the walk had to invent a value for an input that declares no class, that input by name: fixing it fixes both findings. It fires nothing of its own. Not selected (a selection written before 0.8.4), the failure is reported under the check that needed it, as before |
@@ -716,6 +716,9 @@ unprobed: notes-delete delete OUTPUTS: never fired under root
   `Suite::required_on_mutating`, every candidate opted out or unprobed. Five
   adopters had to break their own code to learn whether a green `REQUIRED` had
   bitten. As data: `Report::required_probes()` and `Report::required_nothing()`.
+  A call about an input group (0.9.0) is one line naming the group, the members it
+  gave and what core's checker says of it: `required: lift source
+  group:exactly-one:content,in given `in` (the contract accepts it): resolved`.
 - **`unprobed:`** — the actions a check could not observe, with the reason.
 - **`note:`** — an `opt_out_check` that suppressed nothing: the waived check ran
   with its findings set aside and found none (`Report::idle_waivers()`). A note,
@@ -817,20 +820,18 @@ Honest residue — what no check here can see:
   the thread set names something besides the endpoint, not that anything cuts it; a module declaring
   `urn:file:` threads over a config home no host watches is clean here. The suite
   cannot see the host.
-- **An optional alternative to a required input.** `REQUIRED` drops a required
-  input from the call the walk made, and that call sends no optional input a fixture
-  did not name. So `content` required beside an optional `in` the endpoint also
-  accepts (a piped-or-named intake, which `ArgSpec` cannot spell as "exactly one of")
-  passes, although a call with only `in` succeeds. Declaring the piped one required
-  is still right: the engine pipes only into a required input, and making both
-  optional removes the endpoint from every pipeline.
+- **An optional alternative to a required input, undeclared.** Core 0.1.105 spells a
+  piped-or-named intake (`InputGroup::exactly_one(["content", "in"]).pipe("content")`,
+  both members optional), and `REQUIRED` probes it. A module that still declares
+  `content` required beside an optional `in` passes, although a call with only `in`
+  succeeds: the suite cannot know `in` was meant as the alternative. Declare the group.
 - **A face built over a bundled graph tests that graph too.** A module that folds
   `ikigai-vocab` into every result is probed OVER it; a blank node in a future
   vocabulary release fails that module's walk first.
-- **A pass-through output.** An action that serves whatever its origin says has no
-  `Description` spelling in core (`outputs` is a closed list), so `OUTPUTS` reports
-  whatever the fixture's origin serves; such a module subtracts `Checks::OUTPUTS`
-  and says why.
+- **A pass-through output through a binding.** `output_from(Input(name))` is held to
+  the type of the resource `name` names when `name` is a by-value IRI the walk can
+  resolve; when it is a binding (browse's raw file face, by `path`), the resource it
+  determines is the endpoint's to find, so the served type is printed as `unprobed`.
 - **Whether two DIFFERENT requests reach the same state.** Firing identity is the
   request, and that is exactly as much as the walk can know: the state behind an
   endpoint is not observable from the space at all. Two bindings of one endpoint over
@@ -872,9 +873,10 @@ nothing binds, a binding naming no template variable, a waiver for a check that
 could not run, a namespace covering nothing — each asserting the silence is gone,
 and the `live`-on-a-`Sink` test asserts `CACHEABLE` still says nothing, which is
 the whole point. `tests/builtins.rs` runs the suite against
-`ikigai-core`'s own `toUpper` / `reverseList` / `echo` (which predate the recipe)
-and pins the exact findings: three untyped inputs, two pre-convention ids, three
-cacheable pure functions nobody declared pure — and nothing else.
+`ikigai-core`'s own `to-upper` / `reverse-list` / `echo` (which predate the recipe)
+and pins the exact findings: three untyped inputs and three cacheable pure functions
+nobody declared pure — and nothing else (core 0.1.105 renamed the two pre-convention
+ids, ikigai-rs/ikigai-core#217, so `NAMES` has nothing to say about them).
 
 A `pure` declaration is falsified with an endpoint that hangs from
 `urn:example:db` and reads nothing (caught; the same endpoint undeclared stays
@@ -933,6 +935,63 @@ anyone memoizes by id.
 
 0.8.4. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.8.4 → next (unreleased): core 0.1.105's contract shape (ledger #1547)
+
+Core 0.1.105 is the one release that changed what a contract can say: input groups
+(exactly one, at least one, at most one of, with the member a pipe fills), `needs`
+between inputs and on a value, list arguments, open and envelope argument sets,
+`"one_of": []`, examples, `output_from`, the kernel injecting a declared default, and
+one checker (`ActionSpec::check`) behind `urn:kernel:validate`. The suite reads all of it.
+
+**What is new.**
+
+- **`REQUIRED` probes input groups** through core's checker: every member dropped, each
+  other member alone, a pair where the group allows at most one. A call the contract
+  refuses must get a typed refusal; a call it accepts must not be refused as missing an
+  argument. A `required:` line per call says which group, which members, what the
+  contract says and what the endpoint did; `RequiredProbe` gains `group`, `given` and
+  `contract_refuses`.
+- **The minimal call reads the relations.** It fills each exactly-one or at-least-one
+  group with its `pipe` member (else its first), adds every input a given input or a
+  given value `needs`, sends only an envelope's carrier (unless a fixture proposes
+  fields), and takes an input's first declared **example** before guessing from its
+  class. A fixture that only supplied a well-formed value can go.
+- **`OUTPUTS` honors `output_from`.** `Input("src")`: the served type must be `src`'s
+  resource's type (or a declared output). `Origin`: a declared pass-through, printed as
+  `unprobed`, never a finding. Delete the `Check::Outputs` waivers pass-throughs carried.
+- **`PIPELINE`** prints `pipeline: … is named-only` for a read whose only intake is a
+  group with no `pipe` member (`Report::named_only()`, `NamedOnly`), and its probe sends
+  `content` instead of an exactly-one group's named alternative.
+- **An open argument set** (`open_arguments`) lets a fixture name any argument: the
+  DECLARATIONS finding for an undeclared fixture argument applies to closed sets only.
+- **An action whose required input declares an empty enumeration** accepts no value, so
+  nothing is invoked and one `unprobed:` line says why.
+- **`VALIDATE` explains the new refusals**: a default it refuses says the kernel injects
+  it now, and that a binding is never defaulted; a relation it refuses says the
+  pre-flight trusts it as written.
+- **The builtins renamed**: `to-upper` and `reverse-list` (core's rename,
+  ikigai-rs/ikigai-core#217), so the tests that used them follow.
+
+**Will it turn a green suite red?** It can, three ways.
+
+1. **`VALIDATE` refuses a default on a binding.** At core 0.1.105's own `validate`, a
+   `.binding()` input with `.default_value(…)` is refused ("a binding is part of the name,
+   always present, never defaulted"). Found by reading every `describe()` in the
+   ecosystem: `ikigai-ledger` (`ledger_arg`, the optional `{ledger}` segment, on about 20
+   endpoints), `ikigai-gonk` (`web.rs`: the `ledger` segment of three page families, the
+   passkey `op` and the asset `name`), and `ikigai-org` (`org-agenda`'s `period`). Each
+   goes red at its next lock update unless the default is dropped (the binding's summary
+   already says what the shorter name means) or `VALIDATE` is waived with that reason.
+2. **`REQUIRED` holds a group to the endpoint.** Nothing outside core declares a group
+   yet; a module that adopts one (sexpr's `content`/`in`, encrypt's `in`/`content`) is
+   held to it from its first walk.
+3. **A default is injected.** A test that asserted `MissingArgument` for an omitted
+   DEFAULTED input now sees the default. None was found in the ecosystem.
+
+**Source changes for a consumer:** none required; `RequiredProbe` and `Evidence` are
+`#[non_exhaustive]`, and `NamedOnly` is new. The core floor is 0.1.105, and a `"0.8"`
+pin is a ceiling below this release.
 
 ### 0.8.4 → next (unreleased): `RECOMPUTE`, `Suite::enforced_under` (ledger #330, #331)
 

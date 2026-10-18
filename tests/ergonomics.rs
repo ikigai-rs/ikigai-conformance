@@ -49,13 +49,19 @@ fn keys_are_the_endpoint_check_pairs_as_a_set() {
     let space = EndpointSpace::new()
         .bind(Exact::new("urn:example:toUpper"), builtins::to_upper())
         .bind(Exact::new("urn:example:upper"), upper());
+    // `to-upper` has an untyped input and is a pure function nobody declared pure:
+    // two checks against one endpoint, so two keys.
     let report = Suite::new()
-        .checks(Checks::ARGSPECS | Checks::NAMES)
+        .checks(Checks::ARGSPECS | Checks::CACHEABLE)
+        .pure("upper")
         .run_blocking(&Kernel::new(Arc::new(space)));
     let keys: BTreeSet<(&str, Check)> = report.keys();
     assert_eq!(
         keys,
-        BTreeSet::from([("toUpper", Check::ArgSpecs), ("toUpper", Check::Names)]),
+        BTreeSet::from([
+            ("to-upper", Check::ArgSpecs),
+            ("to-upper", Check::Cacheable)
+        ]),
         "{report}"
     );
 }

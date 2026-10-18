@@ -1,4 +1,4 @@
-//! The suite against `ikigai-core`'s own builtins (`toUpper`, `reverseList`,
+//! The suite against `ikigai-core`'s own builtins (`to-upper`, `reverse-list`,
 //! `echo`) and, separately, the kernel's `urn:kernel:*` operations. These predate
 //! the recipe, so the expected result is a specific set of findings — the
 //! demonstration that each check sees a real endpoint, pinned so a change in
@@ -37,12 +37,10 @@ fn the_builtins_report_exactly_the_findings_their_age_predicts() {
     assert_eq!(untyped.len(), 3, "{report}");
     assert!(untyped.iter().all(|f| f.detail.contains("has no class")));
 
-    // NAMES: the two lowerCamelCase ids the crate docs name as the known exception.
-    let names: Vec<_> = report
-        .of(Check::Names)
-        .map(|f| f.endpoint.as_str())
-        .collect();
-    assert_eq!(names, ["toUpper", "reverseList"], "{report}");
+    // NAMES: none. Core 0.1.105 renamed the two lowerCamelCase builtins to
+    // `to-upper` and `reverse-list` (ikigai-rs/ikigai-core#217), the known exception
+    // this test used to pin.
+    assert!(report.of(Check::Names).next().is_none(), "{report}");
 
     // CACHEABLE: all three are pure functions nobody declared pure, so each
     // cacheable result carries no thread but the one the kernel hangs it on, its
@@ -66,15 +64,15 @@ fn the_builtins_report_exactly_the_findings_their_age_predicts() {
     ] {
         assert!(report.of(check).next().is_none(), "{check}:\n{report}");
     }
-    assert_eq!(report.findings.len(), 8, "{report}");
+    assert_eq!(report.findings.len(), 6, "{report}");
 }
 
 #[test]
-fn the_builtins_are_clean_once_declared_pure_and_typed_names_are_waived() {
+fn the_builtins_are_clean_once_declared_pure_and_untyped_inputs_are_waived() {
     let report = Suite::new()
-        .checks(ikigai_conformance::Checks::all() - Check::Names - Check::ArgSpecs)
-        .pure("toUpper")
-        .pure("reverseList")
+        .checks(ikigai_conformance::Checks::all() - Check::ArgSpecs)
+        .pure("to-upper")
+        .pure("reverse-list")
         .pure("echo")
         .run_blocking(&builtins_kernel());
     assert!(report.is_clean(), "{report}");
@@ -88,8 +86,8 @@ fn the_kernel_operations_reported_for_the_record() {
     let report = Suite::new()
         .include_kernel_ops()
         .checks(ikigai_conformance::Checks::all() - Check::Names)
-        .pure("toUpper")
-        .pure("reverseList")
+        .pure("to-upper")
+        .pure("reverse-list")
         .pure("echo")
         .run_blocking(&builtins_kernel());
     let kernel_findings: Vec<_> = report
