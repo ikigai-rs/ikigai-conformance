@@ -7,17 +7,17 @@ use std::sync::{Arc, Mutex};
 
 use ikigai_core::{
     space_iri, ActionSpec, ArgRef, ArgSpec, Arguments, Capability, Description, Error, Expiry,
-    GroupKind, InputGroup, InputSource, Iri, Kernel, OutputFrom, ProposedArgs, Representation,
-    Request, Space, SpaceEntry, SpaceKind, Thread, Topology, TraceEvent, Tracer, UriTemplate, Verb,
-    DENIED_NOTE, FAILED_NOTE, SPACE_PREFIX,
+    FailureClass, GroupKind, InputGroup, InputSource, Iri, Kernel, OutputFrom, ProposedArgs,
+    Representation, Request, Space, SpaceEntry, SpaceKind, Thread, Topology, TraceEvent, Tracer,
+    UriTemplate, Verb, DENIED_NOTE, FAILED_NOTE, SPACE_PREFIX,
 };
 
 use crate::checks::{Check, Checks};
 use crate::rdf;
 use crate::report::{
-    Collapsed, Declarations, DeclaredSpace, EnforcedUnder, Evidence, Finding, Inherited, NamedOnly,
-    OptedOut, OptedOutAt, OptedOutCheck, Probed, Recomputed, RefusedBy, Report, RequiredProbe,
-    SpaceNaming, Unprobed,
+    Collapsed, Declarations, DeclaredSpace, EnforcedUnder, Evidence, FailsUnder, FailuresSeen,
+    Finding, Inherited, NamedOnly, OptedOut, OptedOutAt, OptedOutCheck, Probed, Recomputed,
+    RefusedBy, Report, RequiredProbe, SpaceNaming, Unprobed,
 };
 
 /// The kernel's own operations are listed by [`Kernel::entries`] ahead of the root
@@ -507,6 +507,10 @@ struct Coverage {
     under_floor: BTreeMap<usize, String>,
     /// The probes whose bindings formed no IRI at some binding, with why.
     under_untargeted: BTreeMap<usize, String>,
+    /// The [`Suite::fails_under`] probes (by index) that ran at some binding.
+    fails_ran: BTreeSet<usize>,
+    /// The `fails_under` probes whose bindings formed no IRI at some binding, with why.
+    fails_untargeted: BTreeMap<usize, String>,
 }
 
 /// The input names one action declares: by value (what a fixture argument may
@@ -673,9 +677,15 @@ struct OptOutCheck {
 /// ```
 #[derive(Clone, Debug)]
 pub struct Suite {
+    /// What runs: [`selected`](Self::selected), less [`Check::Failures`] until
+    /// [`Suite::check_failures`] opts into it.
     checks: Checks,
+    /// What [`Suite::checks`] selected.
+    selected: Checks,
+    check_failures: bool,
     fixtures: Vec<Fixture>,
     enforced_under: Vec<Fixture>,
+    fails_under: Vec<(Fixture, FailureClass)>,
     opt_outs: Vec<OptOut>,
     opt_outs_at: Vec<OptOutAt>,
     opt_out_checks: Vec<OptOutCheck>,
@@ -698,12 +708,17 @@ impl Default for Suite {
 }
 
 impl Suite {
-    /// Every check, no fixtures, no opt-outs, kernel operations skipped.
+    /// Every check, no fixtures, no opt-outs, kernel operations skipped. Every check
+    /// RUNS but [`Check::Failures`], which is opt-in in 0.10
+    /// ([`check_failures`](Self::check_failures)) and printed as skipped until then.
     pub fn new() -> Self {
         Suite {
-            checks: Checks::all(),
+            checks: Checks::all() - Checks::FAILURES,
+            selected: Checks::all(),
+            check_failures: false,
             fixtures: Vec::new(),
             enforced_under: Vec::new(),
+            fails_under: Vec::new(),
             opt_outs: Vec::new(),
             opt_outs_at: Vec::new(),
             opt_out_checks: Vec::new(),
@@ -720,9 +735,130 @@ impl Suite {
         }
     }
 
-    /// Select the checks to run; the rest are reported as skipped.
+    /// Select the checks to run; the rest are reported as skipped. [`Check::Failures`]
+    /// runs only when selected AND opted into ([`check_failures`](Self::check_failures)),
+    /// in 0.10.
     pub fn checks(mut self, checks: Checks) -> Self {
-        self.checks = checks;
+        self.selected = checks;
+        self.checks = self.effective();
+        self
+    }
+
+    /// Opt into [`Check::Failures`]: hold every action that states its failure classes
+    /// (ikigai-core 0.1.108's `ActionSpec::fails` / `Description::fails`) to them, and run
+    /// the [`fails_under`](Self::fails_under) probes (ledger #1546).
+    ///
+    /// Opt-in for one minor: 0.10 adds the check off, so a module that re-pins changes
+    /// nothing until it asks, and **0.11.0 makes it the default** (subtract
+    /// [`Checks::FAILURES`] then to keep it off). It runs where the other invoking checks
+    /// run, and fires nothing a walk does not already fire, but one minimal resolution of a
+    /// read no other selected check resolved.
+    ///
+    /// A declaration that reached nothing (FAILURES not selected) is reported by
+    /// [`Check::Declarations`].
+    ///
+    /// ```
+    /// use ikigai_conformance::{Check, Checks, Suite};
+    /// use ikigai_core::{
+    ///     ArgSpec, Description, EndpointSpace, Error, Exact, FailureClass, FnEndpoint,
+    ///     Invocation, Kernel, Verb,
+    /// };
+    /// use std::sync::Arc;
+    ///
+    /// // It says it can be rate-limited, and fails as an opaque `Endpoint` error instead.
+    /// let fetch = FnEndpoint::new("fetch", |_: &Invocation<'_>| {
+    ///     Err(Error::Endpoint("upstream answered 500".into()))
+    /// })
+    /// .with_description(
+    ///     Description::new("fetch")
+    ///         .verb(Verb::Source)
+    ///         .input(ArgSpec::new("url").class("http://www.w3.org/2001/XMLSchema#anyURI"))
+    ///         .output("text/plain")
+    ///         .fails(FailureClass::RetryAfter),
+    /// );
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(Exact::new("urn:example:fetch"), fetch)));
+    ///
+    /// // Off by default: printed as skipped, and nothing is judged.
+    /// let off = Suite::new().checks(Checks::FAILURES).run_blocking(&kernel);
+    /// assert!(off.is_clean(), "{off}");
+    /// assert!(off.to_string().lines().any(|l| l.starts_with("skipped:") && l.ends_with(" FAILURES")), "{off}");
+    ///
+    /// let on = Suite::new().checks(Checks::FAILURES).check_failures().run_blocking(&kernel);
+    /// let finding = on.of(Check::Failures).next().expect("an undeclared class");
+    /// assert!(finding.detail.contains("class `unknown`"), "{on}");
+    /// ```
+    pub fn check_failures(mut self) -> Self {
+        self.check_failures = true;
+        self.checks = self.effective();
+        self
+    }
+
+    /// The checks that run: the selection, less FAILURES until it is opted into.
+    fn effective(&self) -> Checks {
+        if self.check_failures {
+            self.selected
+        } else {
+            self.selected - Checks::FAILURES
+        }
+    }
+
+    /// Hold one action to a stated failure class under an input the module supplies
+    /// (ledger #1546): the probe must FAIL, with an error whose class
+    /// ([`Error::class`](ikigai_core::Error::class)) is `class`. For a class a walk cannot
+    /// provoke with minimal inputs: `over-budget` for an input past the endpoint's bound,
+    /// `retry-after` from a fake origin answering 429, `refused` from one answering 401.
+    ///
+    /// The probe is a [`Fixture`], laid over the walk's minimal inputs for the action (a
+    /// [`Suite::fixture`]'s included) the way an [`enforced_under`](Self::enforced_under)
+    /// probe is; its bindings form the target for this probe alone, and its caller
+    /// ([`Fixture::capability`]) is root, or the action's fixture's caller, when it names
+    /// none. A probe that RESOLVES, or fails with another class, is a
+    /// [`Check::Failures`] finding. Its failure is also an observation like any other, so
+    /// an action that states its classes must admit the one the probe provokes.
+    ///
+    /// It runs where FAILURES runs (opted into with [`check_failures`](Self::check_failures),
+    /// selected, not waived for the id) and fires the action once per probe: a `Sink` or a
+    /// `Delete` named here is fired. A probe that never ran is reported by
+    /// [`Check::Declarations`].
+    ///
+    /// ```
+    /// use ikigai_conformance::{Check, Checks, Fixture, Suite};
+    /// use ikigai_core::{
+    ///     ArgSpec, Description, EndpointSpace, Error, Exact, FailureClass, FnEndpoint,
+    ///     Invocation, Kernel, ReprType, Representation, Verb,
+    /// };
+    /// use std::sync::Arc;
+    ///
+    /// // A bound that refuses, but as `InvalidArgument`: a caller holding a larger
+    /// // bound cannot tell it from a malformed request.
+    /// let unzip = FnEndpoint::new("unzip", |inv: &Invocation<'_>| {
+    ///     let text = inv.inline_str("content")?;
+    ///     if text.len() > 4 {
+    ///         return Err(Error::InvalidArgument { name: "content".into(), detail: "too large".into() });
+    ///     }
+    ///     Ok(Representation::new(ReprType::new("text/plain"), text.as_bytes().to_vec()))
+    /// })
+    /// .with_description(
+    ///     Description::new("unzip")
+    ///         .verb(Verb::Source)
+    ///         .input(ArgSpec::new("content").class("http://www.w3.org/2001/XMLSchema#string"))
+    ///         .output("text/plain")
+    ///         .fails(FailureClass::OverBudget),
+    /// );
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(Exact::new("urn:example:unzip"), unzip)));
+    /// let report = Suite::new()
+    ///     .checks(Checks::FAILURES)
+    ///     .check_failures()
+    ///     .fails_under(
+    ///         Fixture::new("unzip", Verb::Source).arg("content", "a bomb"),
+    ///         FailureClass::OverBudget,
+    ///     )
+    ///     .run_blocking(&kernel);
+    /// let finding = report.of(Check::Failures).next().expect("the wrong class");
+    /// assert!(finding.detail.contains("got `invalid-argument` (class `permanent`)"), "{report}");
+    /// ```
+    pub fn fails_under(mut self, probe: Fixture, class: FailureClass) -> Self {
+        self.fails_under.push((probe, class));
         self
     }
 
@@ -1479,6 +1615,7 @@ impl Suite {
                 evidence: Evidence {
                     inherited_because: self.inherit.clone(),
                     label: self.label.clone(),
+                    check_failures: self.check_failures,
                     ..Evidence::default()
                 },
             }),
@@ -1734,6 +1871,23 @@ impl Suite {
                         }
                     }
                 }
+                let mut fails: Vec<FailsProbe<'_>> = Vec::new();
+                for (index, (probe, class)) in self.fails_under.iter().enumerate() {
+                    if probe.id != description.id || probe.verb != spec.verb {
+                        continue;
+                    }
+                    match self.target_with(&entry, &description, Some(&probe.bindings)) {
+                        Ok(target) => fails.push(FailsProbe {
+                            index,
+                            probe,
+                            class: *class,
+                            target,
+                        }),
+                        Err(why) => {
+                            coverage.fails_untargeted.entry(index).or_insert(why);
+                        }
+                    }
+                }
                 let mut action = Action {
                     suite: self,
                     kernel,
@@ -1758,6 +1912,9 @@ impl Suite {
                     shadow: None,
                     shadow_blocked: false,
                     shadow_unresolved: false,
+                    fails,
+                    fails_ran: Vec::new(),
+                    observed: Vec::new(),
                 };
                 action.enforced(&mut report).await;
                 action.authority(&mut report).await;
@@ -1776,6 +1933,10 @@ impl Suite {
                 // minimal resolution, so a failed one is still reported as needed by
                 // the check that always needed it.
                 action.recompute(&mut report).await;
+                // After every check that resolves the action, so it judges every failure
+                // they observed; it fires only its own `fails_under` probes, and one
+                // minimal resolution of a read nothing above resolved.
+                action.failures(&mut report).await;
                 // Positive evidence for a face the RDF checks do not cover: what
                 // this action actually served, whatever its media type. Fires
                 // nothing of its own — it reads what the checks above resolved.
@@ -1784,6 +1945,7 @@ impl Suite {
                     coverage.record_caller_used(&description.id, spec.verb);
                 }
                 coverage.under_ran.extend(action.under_ran.iter().copied());
+                coverage.fails_ran.extend(action.fails_ran.iter().copied());
                 for (index, lacking) in std::mem::take(&mut action.under_floor) {
                     coverage.under_floor.entry(index).or_insert(lacking);
                 }
@@ -2064,11 +2226,56 @@ impl Suite {
                 );
             }
         }
+        if self.check_failures && !self.selected.contains(Check::Failures) {
+            self.inert(
+                report,
+                SUITE,
+                "`Suite::check_failures` reached nothing: FAILURES is not selected \
+                 (`Suite::checks`). The report would print FAILURES as checked if it were, so \
+                 select it (`Checks::FAILURES`) or drop the declaration"
+                    .to_string(),
+            );
+        }
         self.namespace_declarations(coverage, report);
         self.space_declarations(report);
         self.fixture_declarations(coverage, report);
         self.enforced_under_declarations(coverage, report);
+        self.fails_under_declarations(coverage, report);
         self.opt_out_declarations(coverage, report);
+    }
+
+    /// A [`fails_under`](Suite::fails_under) probe that never ran held its action to
+    /// nothing, and the class it names reads as one the module proved.
+    fn fails_under_declarations(&self, coverage: &Coverage, report: &mut Report) {
+        for (index, (probe, class)) in self.fails_under.iter().enumerate() {
+            if coverage.fails_ran.contains(&index) {
+                continue;
+            }
+            let id = &probe.id;
+            let why = if let Some(why) = coverage.fails_untargeted.get(&index) {
+                format!("its bindings formed no IRI: {why}")
+            } else if let Some(why) = self.unreachable_check(id, Check::Failures, coverage, true) {
+                why
+            } else if !coverage.declares(id, probe.verb) {
+                format!(
+                    "`{id}` declares no {} action ({})",
+                    crate::report::verb_name(probe.verb),
+                    verb_list(&coverage.verbs_of(id))
+                )
+            } else if coverage.is_opted_out(id, Some(probe.verb)) {
+                "the action is excluded by `Suite::opt_out`".to_string()
+            } else {
+                "no binding of the action was invoked".to_string()
+            };
+            self.inert(
+                report,
+                id,
+                format!(
+                    "`Suite::fails_under` probe `{probe}` expecting `{}` never ran: {why}",
+                    class.word()
+                ),
+            );
+        }
     }
 
     /// An [`enforced_under`](Suite::enforced_under) probe that never ran, or ran and
@@ -2173,6 +2380,13 @@ impl Suite {
         }
         if !coverage.walked.contains(id) {
             return Some(unwalked(id, coverage));
+        }
+        if check == Check::Failures && self.selected.contains(check) && !self.check_failures {
+            return Some(
+                "FAILURES runs only under `Suite::check_failures()` in 0.10 (the default from \
+                 0.11.0), so it is skipped everywhere"
+                    .to_string(),
+            );
         }
         if !self.checks.contains(check) {
             return Some(format!(
@@ -3504,6 +3718,59 @@ struct UnderProbe<'a> {
     target: Iri,
 }
 
+/// One [`Suite::fails_under`] probe for the action at hand: which declaration it is, the
+/// class it states, and the IRI its bindings formed at this binding.
+struct FailsProbe<'a> {
+    index: usize,
+    probe: &'a Fixture,
+    class: FailureClass,
+    target: Iri,
+}
+
+/// Which resolution of an action an observation of [`Check::Failures`] came from: what a
+/// finding names, and what decides which check owns the observation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Probe {
+    /// The minimal resolution under the action's caller (and CACHEABLE's second one).
+    Minimal,
+    /// An extra RDF face's `as=` resolution.
+    Face,
+    /// The pipeline probe's firing of an action declaring `content`.
+    Pipeline,
+    /// REQUIRED's baseline firing of a mutating action.
+    Baseline,
+    /// The no-grants probe ENFORCED and AUTHORITY share.
+    NoGrants,
+    /// An `enforced_under` probe.
+    EnforcedUnder,
+    /// A forced recomputation of RECOMPUTE.
+    Recompute,
+    /// A `fails_under` probe.
+    FailsUnder,
+}
+
+impl Probe {
+    fn described(self) -> &'static str {
+        match self {
+            Probe::Minimal => "the minimal resolution",
+            Probe::Face => "an RDF face's `as=` resolution",
+            Probe::Pipeline => "the pipeline probe's firing",
+            Probe::Baseline => "REQUIRED's baseline firing",
+            Probe::NoGrants => "the no-grants probe",
+            Probe::EnforcedUnder => "an `enforced_under` probe",
+            Probe::Recompute => "a forced recomputation",
+            Probe::FailsUnder => "a `fails_under` probe",
+        }
+    }
+}
+
+/// One resolution of an action, as [`Check::Failures`] judges it: where it came from,
+/// and the error when it failed.
+struct Observed {
+    probe: Probe,
+    error: Option<Error>,
+}
+
 /// One action under examination: the memoized minimal resolution under root,
 /// what the pipeline probe got back when it fired the action, and whether the
 /// minimal resolution's failure has already been reported (once, under the first
@@ -3551,11 +3818,27 @@ struct Action<'a> {
     /// either. (The failure itself is `RESOLVES`'s, or was reported under the needing
     /// check on the walk proper.)
     shadow_unresolved: bool,
+    /// The [`Suite::fails_under`] probes for this action, each with its target.
+    fails: Vec<FailsProbe<'a>>,
+    /// The probes that ran (by index), for DECLARATIONS.
+    fails_ran: Vec<usize>,
+    /// Every resolution of this action the walk issued, answers and failures both, in
+    /// order: what [`Check::Failures`] holds to the declaration.
+    observed: Vec<Observed>,
 }
 
 impl<'a> Action<'a> {
     fn request(&self, args: &Args) -> Request {
         build_request(self.spec.verb, self.target, args)
+    }
+
+    /// Record one resolution this action answered, for [`Check::Failures`]. Called only
+    /// where a request was really issued, never for a memoized answer.
+    fn observe<T>(&mut self, probe: Probe, result: &Result<T, Error>) {
+        self.observed.push(Observed {
+            probe,
+            error: result.as_ref().err().cloned(),
+        });
     }
 
     fn finding(&self, check: Check, detail: impl Into<String>) -> Finding {
@@ -3609,6 +3892,7 @@ impl<'a> Action<'a> {
             Check::Required => self.required(&mut scratch).await,
             Check::Outputs => self.outputs(&mut scratch).await,
             Check::Resolves => self.resolves(&mut scratch).await,
+            Check::Failures => self.failures(&mut scratch).await,
             _ => {}
         }
         self.shadow = None;
@@ -3650,6 +3934,7 @@ impl<'a> Action<'a> {
                 let events = std::mem::take(&mut *collector.0.lock().expect("collector lock"));
                 (repr, events)
             });
+        self.observe(Probe::Minimal, &result);
         self.minimal = Some(result.clone());
         result
     }
@@ -3844,6 +4129,7 @@ impl<'a> Action<'a> {
         let args = self.suite.args_for(self.id, self.spec);
         let none = Capability::scoped(Vec::<String>::new());
         let result = self.kernel.issue(self.request(&args), &none).await;
+        self.observe(Probe::NoGrants, &result);
         self.no_grants = Some(result.clone());
         result
     }
@@ -3927,6 +4213,7 @@ impl<'a> Action<'a> {
             )
             .await;
         let events = std::mem::take(&mut *collector.0.lock().expect("collector lock"));
+        self.observe(Probe::EnforcedUnder, &result);
         self.under_ran.push(index);
         let shown = Fixture {
             capability: None,
@@ -4060,7 +4347,9 @@ impl<'a> Action<'a> {
                     return;
                 }
                 self.caller_used = true;
-                self.kernel.issue(self.request(&args), &self.caller).await
+                let result = self.kernel.issue(self.request(&args), &self.caller).await;
+                self.observe(Probe::Face, &result);
+                result
             } else {
                 self.resolve_minimal(false).await.map(|(repr, _)| repr)
             };
@@ -4534,7 +4823,9 @@ impl<'a> Action<'a> {
         nth: Option<usize>,
         report: &mut Report,
     ) -> bool {
-        match self.kernel.issue(request.clone(), &self.caller).await {
+        let result = self.kernel.issue(request.clone(), &self.caller).await;
+        self.observe(Probe::Recompute, &result);
+        match result {
             Ok(again) if again.bytes == first.bytes => true,
             Ok(again) => {
                 // Which computation differed: a late one says the earlier ones agreed
@@ -4686,6 +4977,7 @@ impl<'a> Action<'a> {
         }
         self.caller_used = true;
         let result = self.kernel.issue(self.request(&args), &self.caller).await;
+        self.observe(Probe::Pipeline, &result);
         self.fired = Some(result.clone());
         if let Err(Error::MissingArgument(name)) = &result {
             // With `content` and every required input supplied, a missing argument
@@ -4745,6 +5037,7 @@ impl<'a> Action<'a> {
                     let args = self.suite.args_for(self.id, self.spec);
                     self.caller_used = true;
                     let fired = self.kernel.issue(self.request(&args), &self.caller).await;
+                    self.observe(Probe::Baseline, &fired);
                     (args, fired.map(|_| ()))
                 }
             }
@@ -5189,6 +5482,160 @@ impl<'a> Action<'a> {
         }
     }
 
+    // ----- FAILURES -----------------------------------------------------------
+
+    /// Hold every failure the walk observed from this action to what it declares
+    /// (ledger #1546), by core's one predicate, [`ActionSpec::admits_failure`] over
+    /// [`Error::class`]. Runs the action's `fails_under` probes first, so their failures
+    /// are judged with the rest.
+    ///
+    /// Two observations belong to another check and are left to it: a `Denied` under
+    /// the no-grants probe is ENFORCED's (an undeclared gate, whatever the declaration
+    /// says), and REQUIRED's drops are never observed here, since the call is wrong on
+    /// purpose and the kind of its refusal is REQUIRED's subject.
+    async fn failures(&mut self, report: &mut Report) {
+        if !self.runs(Check::Failures) {
+            return;
+        }
+        for i in 0..self.fails.len() {
+            self.fails_under(i, report).await;
+        }
+        // A read nothing above resolved (FAILURES selected alone, or every other
+        // invoking check waived) is resolved once here; a write is judged on what the
+        // walk already fired, and never fired for this check.
+        if !self.spec.verb.is_mutating() && self.minimal.is_none() {
+            let _ = self.resolve_minimal(false).await;
+        }
+        let mut failed: Vec<FailureClass> = Vec::new();
+        for o in &self.observed {
+            if let Some(error) = &o.error {
+                if !failed.contains(&error.class()) {
+                    failed.push(error.class());
+                }
+            }
+        }
+        report.declared.evidence.failures.push(FailuresSeen {
+            endpoint: self.id.to_string(),
+            verb: self.spec.verb,
+            declared: self.spec.failures.classes().map(<[FailureClass]>::to_vec),
+            resolutions: self.observed.len(),
+            failed,
+        });
+        let Some(declared) = self.spec.failures.classes() else {
+            return;
+        };
+        // One finding per undeclared class, naming every probe that produced it.
+        let mut undeclared: Vec<(FailureClass, Vec<Probe>, &Error)> = Vec::new();
+        for o in &self.observed {
+            let Some(error) = &o.error else {
+                continue;
+            };
+            if o.probe == Probe::NoGrants && matches!(error, Error::Denied(_)) {
+                continue;
+            }
+            let class = error.class();
+            if self.spec.admits_failure(class) != Some(false) {
+                continue;
+            }
+            match undeclared.iter_mut().find(|(c, _, _)| *c == class) {
+                Some((_, probes, _)) => {
+                    if !probes.contains(&o.probe) {
+                        probes.push(o.probe);
+                    }
+                }
+                None => undeclared.push((class, vec![o.probe], error)),
+            }
+        }
+        let findings: Vec<Finding> = undeclared
+            .into_iter()
+            .map(|(class, probes, error)| {
+                let from = probes
+                    .iter()
+                    .map(|p| p.described())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.finding(
+                    Check::Failures,
+                    format!(
+                        "declares its failure classes ({}), and {from} failed as `{}`, class \
+                         `{}`, which the declaration does not admit (`ActionSpec::admits_failure`: \
+                         `permanent` is implied, and `denied` beside a `requires`): {}. A caller \
+                         or an agent plans its retries from the declaration, so either return the \
+                         variant of a class it declares ({}), or declare this one \
+                         (`.fails(FailureClass::{class:?})`)",
+                        crate::report::class_words(declared),
+                        error.kind(),
+                        class.word(),
+                        crate::report::visible(&error.to_string()),
+                        class_hint(class)
+                    ),
+                )
+            })
+            .collect();
+        report.findings.extend(findings);
+    }
+
+    /// Fire one [`Suite::fails_under`] probe and hold its failure to the stated class.
+    async fn fails_under(&mut self, i: usize, report: &mut Report) {
+        if !self.may_fire() {
+            return;
+        }
+        let (index, probe, class, target) = {
+            let p = &self.fails[i];
+            (p.index, p.probe, p.class, p.target.clone())
+        };
+        let mut args = self.suite.args_for(self.id, self.spec);
+        for (name, value) in &probe.args {
+            args.insert(name.clone(), value.clone());
+        }
+        let caller = probe
+            .capability
+            .clone()
+            .unwrap_or_else(|| self.caller.clone());
+        let result = self
+            .kernel
+            .issue(build_request(self.spec.verb, &target, &args), &caller)
+            .await;
+        self.observe(Probe::FailsUnder, &result);
+        self.fails_ran.push(index);
+        let shown = probe.to_string();
+        let (got, kind) = match &result {
+            Ok(_) => (None, None),
+            Err(err) => (Some(err.class()), Some(err.kind().to_string())),
+        };
+        match &result {
+            Ok(_) => report.findings.push(self.finding(
+                Check::Failures,
+                format!(
+                    "the `fails_under` probe `{shown}` resolved: it was to fail with class \
+                     `{}`, and the input it names did not provoke that failure",
+                    class.word()
+                ),
+            )),
+            Err(err) if err.class() != class => report.findings.push(self.finding(
+                Check::Failures,
+                format!(
+                    "the `fails_under` probe `{shown}` was to fail with class `{}`, and got \
+                     `{}` (class `{}`): {}. Return the variant of the stated class ({})",
+                    class.word(),
+                    err.kind(),
+                    err.class().word(),
+                    crate::report::visible(&err.to_string()),
+                    class_hint(class)
+                ),
+            )),
+            Err(_) => {}
+        }
+        report.declared.evidence.fails_under.push(FailsUnder {
+            endpoint: self.id.to_string(),
+            verb: self.spec.verb,
+            probe: shown,
+            expected: class,
+            got,
+            kind,
+        });
+    }
+
     fn unprobed(&self, report: &mut Report, check: Check, reason: impl Into<String>) {
         report.unprobed.push(Unprobed {
             endpoint: self.id.to_string(),
@@ -5196,6 +5643,29 @@ impl<'a> Action<'a> {
             check,
             reason: reason.into(),
         });
+    }
+}
+
+/// Which `Error` variants spell a failure class, for a finding's fix: the variants
+/// `Error::class` maps to it.
+fn class_hint(class: FailureClass) -> &'static str {
+    match class {
+        FailureClass::Transient => "`Error::Timeout`, `Error::Unavailable`",
+        FailureClass::RetryAfter => {
+            "`Error::RetryAfter { delay, .. }`, for a rate limit or a window that reopens"
+        }
+        FailureClass::OverBudget => {
+            "`Error::OverBudget`, for an input past a bound the endpoint holds"
+        }
+        FailureClass::Denied => "`Error::Denied`, under a declared `requires`",
+        FailureClass::Refused => {
+            "`Error::Refused`, for a remote authority refusing the credential the endpoint presented"
+        }
+        FailureClass::Permanent => {
+            "`Error::InvalidArgument`, `Error::NotFound`, `Error::Conflict`, `Error::Unsupported`"
+        }
+        FailureClass::Unknown => "`Error::Endpoint`, for a failure the endpoint cannot classify",
+        _ => "see `Error::class`",
     }
 }
 

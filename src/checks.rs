@@ -267,6 +267,32 @@ pub enum Check {
     /// ([`Suite::opt_out_check`](crate::Suite::opt_out_check)). A selection that does not
     /// name it (any written before it existed) does not run it.
     Recompute,
+    /// **Declared failures = produced failures, the half a test can see** (0.10.0, ledger
+    /// #1546). An action that states its failure classes (ikigai-core 0.1.108's
+    /// `ActionSpec::fails` / `Description::fails`) is held to them: every failure the walk
+    /// observes from it (the minimal resolution, an RDF face's `as=` resolution, the
+    /// pipeline firing, REQUIRED's baseline firing, the no-grants probe, an
+    /// [`enforced_under`](crate::Suite::enforced_under) probe, a forced recomputation, a
+    /// [`fails_under`](crate::Suite::fails_under) probe) must have a class its declaration
+    /// admits. The judgment is core's one predicate, `ActionSpec::admits_failure`, over
+    /// core's `Error::class()`, so `permanent` is always admitted and `denied` is admitted
+    /// beside a `requires`. An action that states nothing (`Failures::Unstated`, every
+    /// action written before 0.1.108) has nothing to compare against and is listed on a
+    /// `failures:` line, never a finding.
+    ///
+    /// Two observations are left to the check that owns them: a `Denied` under the
+    /// no-grants probe is [`Enforced`](Check::Enforced)'s (an undeclared gate), and a
+    /// call REQUIRED made by dropping an input is [`Required`](Check::Required)'s.
+    ///
+    /// A [`Suite::fails_under`](crate::Suite::fails_under) probe is the other direction:
+    /// the module supplies an input that must fail with a stated class (`over-budget` for an
+    /// input past its bound), and the action must answer with exactly that class.
+    ///
+    /// **Opt-in in 0.10, the default from 0.11.0**: it runs only under
+    /// [`Suite::check_failures`](crate::Suite::check_failures), and is printed as skipped
+    /// otherwise. A read no other selected check resolved is resolved once for it; a
+    /// mutating action is judged on what the walk already fired, never fired for it.
+    Failures,
 }
 }
 
@@ -290,6 +316,7 @@ impl Check {
             Check::Declarations => "DECLARATIONS",
             Check::Resolves => "RESOLVES",
             Check::Recompute => "RECOMPUTE",
+            Check::Failures => "FAILURES",
         }
     }
 
@@ -309,11 +336,12 @@ impl Check {
                 | Check::Required
                 | Check::Resolves
                 | Check::Recompute
+                | Check::Failures
         )
     }
 
-    fn bit(self) -> u16 {
-        1 << (self as u16)
+    fn bit(self) -> u32 {
+        1 << (self as u32)
     }
 }
 
@@ -342,42 +370,46 @@ impl fmt::Display for Check {
 /// assert_eq!(one.iter().count(), 2);
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Checks(u16);
+pub struct Checks(u32);
 
 impl Checks {
     /// [`Check::ArgSpecs`].
-    pub const ARGSPECS: Checks = Checks(1 << (Check::ArgSpecs as u16));
+    pub const ARGSPECS: Checks = Checks(1 << (Check::ArgSpecs as u32));
     /// [`Check::RequiresVerb`].
-    pub const REQUIRES_VERB: Checks = Checks(1 << (Check::RequiresVerb as u16));
+    pub const REQUIRES_VERB: Checks = Checks(1 << (Check::RequiresVerb as u32));
     /// [`Check::Enforced`].
-    pub const ENFORCED: Checks = Checks(1 << (Check::Enforced as u16));
+    pub const ENFORCED: Checks = Checks(1 << (Check::Enforced as u32));
     /// [`Check::Authority`].
-    pub const AUTHORITY: Checks = Checks(1 << (Check::Authority as u16));
+    pub const AUTHORITY: Checks = Checks(1 << (Check::Authority as u32));
     /// [`Check::Outputs`].
-    pub const OUTPUTS: Checks = Checks(1 << (Check::Outputs as u16));
+    pub const OUTPUTS: Checks = Checks(1 << (Check::Outputs as u32));
     /// [`Check::SkolemRdf`].
-    pub const SKOLEM_RDF: Checks = Checks(1 << (Check::SkolemRdf as u16));
+    pub const SKOLEM_RDF: Checks = Checks(1 << (Check::SkolemRdf as u32));
     /// [`Check::Vocabulary`].
-    pub const VOCABULARY: Checks = Checks(1 << (Check::Vocabulary as u16));
+    pub const VOCABULARY: Checks = Checks(1 << (Check::Vocabulary as u32));
     /// [`Check::Cacheable`].
-    pub const CACHEABLE: Checks = Checks(1 << (Check::Cacheable as u16));
+    pub const CACHEABLE: Checks = Checks(1 << (Check::Cacheable as u32));
     /// [`Check::Pipeline`].
-    pub const PIPELINE: Checks = Checks(1 << (Check::Pipeline as u16));
+    pub const PIPELINE: Checks = Checks(1 << (Check::Pipeline as u32));
     /// [`Check::Required`].
-    pub const REQUIRED: Checks = Checks(1 << (Check::Required as u16));
+    pub const REQUIRED: Checks = Checks(1 << (Check::Required as u32));
     /// [`Check::Names`].
-    pub const NAMES: Checks = Checks(1 << (Check::Names as u16));
+    pub const NAMES: Checks = Checks(1 << (Check::Names as u32));
     /// [`Check::Validate`].
-    pub const VALIDATE: Checks = Checks(1 << (Check::Validate as u16));
+    pub const VALIDATE: Checks = Checks(1 << (Check::Validate as u32));
     /// [`Check::SpaceName`].
-    pub const SPACE_NAME: Checks = Checks(1 << (Check::SpaceName as u16));
+    pub const SPACE_NAME: Checks = Checks(1 << (Check::SpaceName as u32));
     /// [`Check::Declarations`].
-    pub const DECLARATIONS: Checks = Checks(1 << (Check::Declarations as u16));
+    pub const DECLARATIONS: Checks = Checks(1 << (Check::Declarations as u32));
     /// [`Check::Resolves`].
-    pub const RESOLVES: Checks = Checks(1 << (Check::Resolves as u16));
-    /// [`Check::Recompute`]. Sixteen checks fill the `u16` this set is: the next one
-    /// widens it (a private field, so no consumer sees the change).
-    pub const RECOMPUTE: Checks = Checks(1 << (Check::Recompute as u16));
+    pub const RESOLVES: Checks = Checks(1 << (Check::Resolves as u32));
+    /// [`Check::Recompute`].
+    pub const RECOMPUTE: Checks = Checks(1 << (Check::Recompute as u32));
+    /// [`Check::Failures`]. The seventeenth check, which widened this set from a `u16` to
+    /// a `u32` (a private field, so no consumer sees the change). Selected by
+    /// [`Checks::all`], and run only under
+    /// [`Suite::check_failures`](crate::Suite::check_failures) in 0.10.
+    pub const FAILURES: Checks = Checks(1 << (Check::Failures as u32));
     /// Both RDF-face checks: [`Check::SkolemRdf`] and [`Check::Vocabulary`] — the
     /// pair a module without a graph face subtracts.
     pub const RDF: Checks = Checks(Checks::SKOLEM_RDF.0 | Checks::VOCABULARY.0);
@@ -403,12 +435,12 @@ impl Checks {
 
     /// The checks whose [`Check::invokes`] is `invoking`.
     const fn selecting(invoking: bool) -> Checks {
-        let mut bits = 0u16;
+        let mut bits = 0u32;
         let mut i = 0;
         while i < Check::ALL.len() {
             let check = Check::ALL[i];
             if check.invokes() == invoking {
-                bits |= 1 << (check as u16);
+                bits |= 1 << (check as u32);
             }
             i += 1;
         }
@@ -492,11 +524,11 @@ mod tests {
         // `ALL` is generated from the enum (`declare_checks!`), so it cannot omit a
         // variant. This pins what report order and `Checks` rely on beyond that: no
         // duplicate, position = discriminant (the bit a `Checks` holds), and every
-        // discriminant fits the `u16` bitset.
+        // discriminant fits the `u32` bitset.
         for (i, c) in Check::ALL.iter().enumerate() {
             assert_eq!(*c as usize, i, "{c} is at {i} in Check::ALL");
         }
-        assert!(Check::ALL.len() <= u16::BITS as usize);
+        assert!(Check::ALL.len() <= u32::BITS as usize);
     }
 
     #[test]
@@ -539,7 +571,7 @@ mod tests {
     fn every_check_has_its_own_bit() {
         // Fourteen checks do not fit a u8; a shared bit would make one check
         // select another silently.
-        let mut bits: Vec<u16> = Check::ALL.iter().map(|c| c.bit()).collect();
+        let mut bits: Vec<u32> = Check::ALL.iter().map(|c| c.bit()).collect();
         bits.sort_unstable();
         bits.dedup();
         assert_eq!(bits.len(), Check::ALL.len());
