@@ -63,7 +63,12 @@ categories = ["development-tools::testing"]
 # core's one checker, `ActionSpec::check` and `ProposedArgs`, all new in 0.1.105. It is
 # also the release whose kernel injects a declared default and whose builtins are
 # `to-upper` / `reverse-list`, which the tests pin.
-ikigai-core = "0.1.105"
+#
+# 0.1.106 since 0.9.1, SEMANTIC (ledger #1882): from 0.1.106 `validate` accepts a default on
+# an OPTIONAL binding (the kernel fills it when the matched name omits the segment, ledger
+# #1547) and refuses only a required binding's default. VALIDATE's hint says so, and
+# `tests/argspec_shape.rs` pins both halves, which hold only on 0.1.106+.
+ikigai-core = "0.1.106"
 # The vocabulary is the ORACLE for the terms check: a predicate is "defined" iff it
 # is a subject in `ikigai_vocab::VOCABULARY`. So the floor is the newest published
 # vocabulary, not the oldest API this crate compiles against — an older pin would
@@ -118,7 +123,9 @@ ikigai-core = "0.1.105"
 # <0.2.0). It matches the core floor above: vocab 0.1.105 requires `ikigai-core ^0.1.105`
 # and defines the new contract terms (`ik:InputGroup`, `ik:group`, `ik:needs`, …), so a
 # module whose faces emit them is not told they are invented.
-ikigai-vocab = "0.1.105"
+# 0.9.1: re-checked — 0.1.106 is the head on crates.io; raised to it (the RANGE >=0.1.106,
+# <0.2.0). It matches the core floor above.
+ikigai-vocab = "0.1.106"
 # One parser for every RDF face a module can declare (Turtle, N-Triples, N-Quads,
 # TriG, RDF/XML, JSON-LD). 0.2.5 is the version whose `for_slice` and
 # `RdfFormat::from_media_type` this crate was written against.

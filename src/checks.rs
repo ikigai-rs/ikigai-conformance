@@ -168,9 +168,11 @@ pub enum Check {
     ///
     /// Since ikigai-core 0.1.105 `validate` also refuses a relation the contract cannot
     /// honor (an input group, `needs`, a value note, an envelope, an example or an
-    /// `output_from` naming what is not declared) and a default on a binding, on a
-    /// required input, or one the contract's own checker refuses: the kernel injects a
-    /// declared default now, so that default is what every caller who omits it gets.
+    /// `output_from` naming what is not declared) and a default on a required input, or
+    /// one the contract's own checker refuses: the kernel injects a declared default now,
+    /// so that default is what every caller who omits it gets. Since 0.1.106 an OPTIONAL
+    /// binding may carry a default (the kernel fills it when the matched name omits the
+    /// segment); a required binding's default is still refused.
     Validate,
     /// **A name is a claim: same name, same doors.** A module states what kind of
     /// space its constructor builds, and the check holds it to that

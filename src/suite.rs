@@ -3362,8 +3362,10 @@ fn names(description: &Description, report: &mut Report) {
 ///
 /// Since core 0.1.105 `validate` also refuses a contract whose RELATIONS it cannot
 /// honor (ledger #1547): an input group, a `needs`, a value note, an envelope, an
-/// example, an `output_from`, or a DEFAULT (on a binding, on a required input, or one
-/// the contract's own checker refuses). Those are reported with what they cost
+/// example, an `output_from`, or a DEFAULT (on a required input, or one the contract's
+/// own checker refuses). Since core 0.1.106 an optional binding may carry a default, which
+/// the kernel fills when the matched name omits its segment; a REQUIRED binding's default
+/// is still refused (ledger #1547). Those are reported with what they cost
 /// instead: the kernel injects a declared default, and the pre-flight trusts the rest.
 fn validate(description: &Description, report: &mut Report) {
     let Err(refusal) = description.validate() else {
@@ -3377,9 +3379,12 @@ fn validate(description: &Description, report: &mut Report) {
         "default" => {
             "Since core 0.1.105 the kernel INJECTS a declared default (ledger #19), so a \
              default the contract cannot honor is one every caller who omits the input is \
-             handed: drop it, or make it a value the contract accepts. A binding is part of \
-             the resource's name and is never defaulted: drop `.default_value(…)` from it and \
-             say what the shorter name means in its summary"
+             handed: drop it, or make it a value the contract accepts. Since core 0.1.106 an \
+             OPTIONAL binding may carry one (`.binding().optional()`; the kernel fills it when \
+             the matched name leaves its segment out, ledger #1547), but a required binding is \
+             part of every name the endpoint answers and is never omitted: drop \
+             `.default_value(…)` from it, or make the binding optional and bind the shorter \
+             name too"
         }
         "group" | "needs" | "values" | "arguments" | "examples" | "output_from" => {
             "The contract states a relation it cannot honor, and core's one checker \
