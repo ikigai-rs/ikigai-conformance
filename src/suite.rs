@@ -6,17 +6,18 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use ikigai_core::{
-    space_iri, ActionSpec, ArgRef, ArgSpec, Capability, Description, Error, Expiry, InputSource,
-    Iri, Kernel, Representation, Request, Space, SpaceEntry, SpaceKind, Thread, Topology,
-    TraceEvent, Tracer, UriTemplate, Verb, DENIED_NOTE, FAILED_NOTE, SPACE_PREFIX,
+    space_iri, ActionSpec, ArgRef, ArgSpec, Arguments, Capability, Description, Error, Expiry,
+    GroupKind, InputGroup, InputSource, Iri, Kernel, OutputFrom, ProposedArgs, Representation,
+    Request, Space, SpaceEntry, SpaceKind, Thread, Topology, TraceEvent, Tracer, UriTemplate, Verb,
+    DENIED_NOTE, FAILED_NOTE, SPACE_PREFIX,
 };
 
 use crate::checks::{Check, Checks};
 use crate::rdf;
 use crate::report::{
-    Collapsed, Declarations, DeclaredSpace, EnforcedUnder, Evidence, Finding, Inherited, OptedOut,
-    OptedOutAt, OptedOutCheck, Probed, Recomputed, RefusedBy, Report, RequiredProbe, SpaceNaming,
-    Unprobed,
+    Collapsed, Declarations, DeclaredSpace, EnforcedUnder, Evidence, Finding, Inherited, NamedOnly,
+    OptedOut, OptedOutAt, OptedOutCheck, Probed, Recomputed, RefusedBy, Report, RequiredProbe,
+    SpaceNaming, Unprobed,
 };
 
 /// The kernel's own operations are listed by [`Kernel::entries`] ahead of the root
@@ -514,6 +515,9 @@ struct Coverage {
 struct DeclaredInputs {
     by_value: BTreeSet<String>,
     binding: BTreeSet<String>,
+    /// The action's argument set is OPEN (core 0.1.105, ledger #607): any other name is
+    /// an argument too, so a fixture may send one.
+    open: bool,
 }
 
 impl Coverage {
@@ -582,6 +586,7 @@ impl Coverage {
             };
             names.insert(input.name.clone());
         }
+        declared.open |= matches!(spec.arguments, Arguments::Open(_));
     }
 
     /// Whether every action of `id` was excluded by [`Suite::opt_out`].
@@ -1194,9 +1199,9 @@ impl Suite {
     ///     .checks(Checks::NAMES)
     ///     .own("echo")
     ///     .run_blocking(&Kernel::new(Arc::new(space)));
-    /// report.assert_clean(); // `toUpper` is not kebab-case, and not this module's
+    /// report.assert_clean(); // `to-upper` is not this module's, so it is not walked
     /// assert_eq!(&*report.walked, ["echo"]);
-    /// assert_eq!(report.declared.inherited, ["toUpper"]);
+    /// assert_eq!(report.declared.inherited, ["to-upper"]);
     /// ```
     ///
     /// Not walking is also the safer default for a composing host: an inherited
@@ -1223,7 +1228,7 @@ impl Suite {
     /// use ikigai_core::{builtins, EndpointSpace, Exact, Kernel};
     /// use std::sync::Arc;
     ///
-    /// const OURS: [&str; 2] = ["echo", "reverseList"];
+    /// const OURS: [&str; 2] = ["echo", "reverse-list"];
     /// let space = EndpointSpace::new()
     ///     .bind(Exact::new("urn:example:echo"), builtins::echo())
     ///     .bind(Exact::new("urn:example:toUpper"), builtins::to_upper())
@@ -1233,8 +1238,8 @@ impl Suite {
     ///     .own_all(OURS)
     ///     .run_blocking(&Kernel::new(Arc::new(space)));
     /// assert_eq!(report.declared.own, OURS);
-    /// assert_eq!(&*report.walked, ["echo", "reverseList"]);
-    /// assert_eq!(report.declared.inherited, ["toUpper"]);
+    /// assert_eq!(&*report.walked, ["echo", "reverse-list"]);
+    /// assert_eq!(report.declared.inherited, ["to-upper"]);
     /// ```
     pub fn own_all<I>(mut self, ids: I) -> Self
     where
@@ -1277,17 +1282,17 @@ impl Suite {
     /// let suite = Suite::new()
     ///     .checks(Checks::NAMES)
     ///     .own("echo")
-    ///     .inherit("toUpper", "ikigai-core's builtin; its own tests cover it");
+    ///     .inherit("to-upper", "ikigai-core's builtin; its own tests cover it");
     ///
     /// let report = suite.run_blocking(&host(false));
     /// report.assert_clean();
     /// assert!(report
     ///     .to_string()
-    ///     .contains("inherited because: toUpper: ikigai-core's builtin; its own tests cover it"));
+    ///     .contains("inherited because: to-upper: ikigai-core's builtin; its own tests cover it"));
     ///
     /// // A third endpoint joins the pile: red, not silent.
     /// let report = suite.run_blocking(&host(true));
-    /// let finding = report.against("reverseList").next().unwrap();
+    /// let finding = report.against("reverse-list").next().unwrap();
     /// assert!(finding.detail.contains("no `Suite::inherit` gives the reason"), "{report}");
     /// ```
     pub fn inherit(mut self, id: impl Into<String>, reason: impl Into<String>) -> Self {
@@ -1603,7 +1608,7 @@ impl Suite {
             for spec in description.action_specs() {
                 coverage.record_action(&description.id, spec.verb, false);
                 coverage.record_inputs(&description.id, &spec);
-                if !droppable(&spec).is_empty() {
+                if required_probes_something(&spec) {
                     if spec.verb.is_mutating() {
                         coverage.required_mutating_candidates = true;
                     }
@@ -1683,6 +1688,30 @@ impl Suite {
                     continue;
                 }
                 if excluded_at.is_some() {
+                    continue;
+                }
+                // A required input that accepts no value (`"one_of": []`, ledger #41): no
+                // call conforms, the kernel's manifold does not offer the action, and
+                // there is nothing to invoke. Said once, under the first selected check
+                // that would have resolved it.
+                if let Some(input) = uncallable_by(&spec) {
+                    if let Some(check) = Check::ALL
+                        .into_iter()
+                        .find(|c| Checks::INVOKING.contains(*c) && self.runs(&description.id, *c))
+                    {
+                        report.unprobed.push(Unprobed {
+                            endpoint: description.id.clone(),
+                            verb: spec.verb,
+                            check,
+                            reason: format!(
+                                "uncallable, so no invoking check ran: the required input `{}` \
+                                 declares an empty enumeration (`\"one_of\": []`) and accepts no \
+                                 value, so no call conforms and `urn:kernel:actions` does not \
+                                 offer the action",
+                                input.name
+                            ),
+                        });
+                    }
                     continue;
                 }
                 coverage.record_invoked(&description.id, spec.verb);
@@ -2365,6 +2394,11 @@ impl Suite {
             if name == CONNEG || declared.by_value.contains(name) {
                 continue;
             }
+            // An open argument set admits any other name, as core's checker does; a
+            // binding sent as an argument is still a mistake there.
+            if declared.open && !declared.binding.contains(name) {
+                continue;
+            }
             let detail = if declared.binding.contains(name) {
                 format!(
                     "fixture `{fixture}` sends `{name}` as an argument, but `{name}` is a binding \
@@ -2722,19 +2756,30 @@ impl Suite {
     }
 
     /// The minimal by-value arguments for an action: one derived value per required
-    /// `Argument`-source input, overlaid with the fixture's arguments.
+    /// `Argument`-source input, overlaid with the fixture's arguments, then completed
+    /// with what the contract's relations ask (a member of each exactly-one or
+    /// at-least-one group, every input a given one `needs`). An envelope's fields arrive
+    /// inside its carrier, so only the carrier is derived unless the fixture proposes
+    /// fields.
     fn args_for(&self, id: &str, spec: &ActionSpec) -> Args {
-        let mut args: Args = spec
-            .inputs
-            .iter()
-            .filter(|i| i.required && i.source == InputSource::Argument)
+        let fixture = self.fixture_for(id, spec.verb);
+        let fields_given = match &spec.arguments {
+            Arguments::Envelope(carrier) => fixture.is_some_and(|f| {
+                f.args
+                    .keys()
+                    .any(|k| k != carrier && spec.inputs.iter().any(|i| i.name == *k))
+            }),
+            _ => false,
+        };
+        let mut args: Args = minimal_inputs(spec, fields_given)
             .map(|i| (i.name.clone(), sample_value(i).into_bytes()))
             .collect();
-        if let Some(fixture) = self.fixture_for(id, spec.verb) {
+        if let Some(fixture) = fixture {
             for (k, v) in &fixture.args {
                 args.insert(k.clone(), v.clone());
             }
         }
+        complete_relations(spec, &mut args);
         args
     }
 }
@@ -2909,6 +2954,178 @@ fn droppable(spec: &ActionSpec) -> Vec<&ArgSpec> {
         .collect()
 }
 
+/// One call [`Check::Required`] makes: the baseline with an input dropped, or with an
+/// input group's members rearranged.
+struct RequiredCall<'a> {
+    args: Args,
+    shape: CallShape,
+    /// The group the call is about, for a group call.
+    group: Option<&'a InputGroup>,
+    /// The group members the call gives (empty: none of them).
+    given: Vec<String>,
+}
+
+enum CallShape {
+    /// The baseline without this required input.
+    Dropped(String),
+    /// The baseline with the group's members replaced by `given`.
+    Group,
+}
+
+impl RequiredCall<'_> {
+    /// The [`RequiredProbe::input`] field: the dropped input, or the group's node
+    /// segment.
+    fn input(&self) -> String {
+        match (&self.shape, self.group) {
+            (CallShape::Dropped(name), _) => name.clone(),
+            (CallShape::Group, Some(group)) => group.node_segment(),
+            (CallShape::Group, None) => String::new(),
+        }
+    }
+
+    /// `with none of them` / `with only `in`` / `with both `content`, `in``.
+    fn described(&self) -> String {
+        let names = |n: &[String]| {
+            n.iter()
+                .map(|m| format!("`{m}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match (&self.shape, self.given.as_slice()) {
+            (CallShape::Dropped(name), _) => format!("without `{name}`"),
+            (CallShape::Group, []) => "with none of them".to_string(),
+            (CallShape::Group, [one]) => format!("with only `{one}`"),
+            (CallShape::Group, many) => format!("with both {}", names(many)),
+        }
+    }
+
+    /// `exactly one of `content`, `in``.
+    fn rule(&self) -> String {
+        match self.group {
+            Some(group) => format!(
+                "{} {}",
+                match group.kind {
+                    GroupKind::ExactlyOne => "exactly one of",
+                    GroupKind::AtLeastOne => "at least one of",
+                    _ => "at most one of",
+                },
+                group
+                    .members
+                    .iter()
+                    .map(|m| format!("`{m}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            None => String::new(),
+        }
+    }
+}
+
+/// Whether [`Check::Required`] has anything to probe on this action: a required input
+/// it can drop, or an input group whose rule it can break (core 0.1.105, ledger #15).
+fn required_probes_something(spec: &ActionSpec) -> bool {
+    !droppable(spec).is_empty() || !spec.groups.is_empty()
+}
+
+/// Whether `name` is GIVEN in `args`, as core's checker counts a group member: present
+/// with a value that is not blank.
+fn given(args: &Args, name: &str) -> bool {
+    args.get(name)
+        .is_some_and(|v| !String::from_utf8_lossy(v).trim().is_empty())
+}
+
+/// The inputs an action's minimal call sends of its own accord: the required by-value
+/// ones, except that an [`Envelope`](Arguments::Envelope)'s fields arrive inside its
+/// carrier, so the call sends the carrier unless `fields_given` (a fixture proposes
+/// fields, and then the carrier is not sent).
+fn minimal_inputs(spec: &ActionSpec, fields_given: bool) -> impl Iterator<Item = &ArgSpec> {
+    let carrier = match &spec.arguments {
+        Arguments::Envelope(carrier) => Some(carrier.as_str()),
+        _ => None,
+    };
+    spec.inputs.iter().filter(move |i| {
+        i.required
+            && i.source == InputSource::Argument
+            && match carrier {
+                Some(carrier) if fields_given => i.name != carrier,
+                Some(carrier) => i.name == carrier,
+                None => true,
+            }
+    })
+}
+
+/// Fill in what the contract's RELATIONS ask of a call (core 0.1.105): a member of each
+/// exactly-one and at-least-one group none of whose members is given (the group's `pipe`
+/// member, else its first), and every input a given input, or a given value's
+/// [`ValueNote`](ikigai_core::ValueNote), `needs`. Each with the input's sample value.
+/// What is already given is never changed, so a fixture's choice of member stands.
+fn complete_relations(spec: &ActionSpec, args: &mut Args) {
+    let input = |name: &str| spec.inputs.iter().find(|i| i.name == name);
+    // Each pass adds at least one input or stops, so the inputs bound the passes.
+    for _ in 0..=spec.inputs.len() {
+        let mut add: Vec<&ArgSpec> = Vec::new();
+        for group in &spec.groups {
+            if !matches!(group.kind, GroupKind::ExactlyOne | GroupKind::AtLeastOne) {
+                continue;
+            }
+            if group.members.iter().any(|m| given(args, m)) {
+                continue;
+            }
+            let pick = group
+                .pipe
+                .as_deref()
+                .or(group.members.first().map(String::as_str));
+            add.extend(pick.and_then(input));
+        }
+        for arg in &spec.inputs {
+            if !given(args, &arg.name) {
+                continue;
+            }
+            let mut needed: Vec<&str> = arg.needs.iter().map(String::as_str).collect();
+            let value = String::from_utf8_lossy(&args[&arg.name]).into_owned();
+            let items = match arg.list {
+                Some(separator) => separator.split(&value),
+                None => vec![value.as_str()],
+            };
+            for item in items {
+                if let Some(note) = arg.values.get(item) {
+                    needed.extend(note.needs.iter().map(String::as_str));
+                }
+            }
+            add.extend(
+                needed
+                    .into_iter()
+                    .filter(|n| !given(args, n))
+                    .filter_map(input),
+            );
+        }
+        if add.is_empty() {
+            return;
+        }
+        for arg in add {
+            args.entry(arg.name.clone())
+                .or_insert_with(|| sample_value(arg).into_bytes());
+        }
+    }
+}
+
+/// `args` as core's checker reads a proposed call.
+fn proposed(args: &Args) -> ProposedArgs {
+    ProposedArgs::from_pairs(
+        args.iter()
+            .map(|(k, v)| (k.clone(), String::from_utf8_lossy(v).into_owned())),
+    )
+}
+
+/// The required input of `spec` that declares an EMPTY enumeration (`"one_of": []`,
+/// ledger #41): it accepts no value, so no call conforms and the kernel's
+/// `urn:kernel:actions` does not offer the action.
+fn uncallable_by(spec: &ActionSpec) -> Option<&ArgSpec> {
+    spec.inputs.iter().find(|i| {
+        i.required && i.source == InputSource::Argument && i.is_enumerated() && i.one_of.is_empty()
+    })
+}
+
 /// The variables of a template pattern, or `None` for an exact IRI / a malformed
 /// pattern.
 fn template_vars(pattern: &str) -> Option<Vec<String>> {
@@ -2924,11 +3141,16 @@ fn template_vars(pattern: &str) -> Option<Vec<String>> {
     }
 }
 
-/// The smallest plausible value the ArgSpec admits: its default, else the first
-/// `one_of`, else a value shaped by its `class`, else a placeholder.
+/// The smallest plausible value the ArgSpec admits: its default, else its first
+/// declared example (core 0.1.105: `Description::validate` holds an example to the
+/// contract, so it is a value the author vouches for), else the first `one_of`, else a
+/// value shaped by its `class`, else a placeholder.
 fn sample_value(spec: &ArgSpec) -> String {
     if let Some(default) = &spec.default {
         return default.clone();
+    }
+    if let Some(example) = spec.examples.first() {
+        return example.clone();
     }
     if let Some(first) = spec.one_of.first() {
         return first.clone();
@@ -3137,22 +3359,50 @@ fn names(description: &Description, report: &mut Report) {
 /// not one to a literal, so a refused value no longer breaks a document: the finding
 /// says what it is, the strict check on an authoring mistake, not the thing that keeps
 /// the Turtle parsing (ledger #1385).
+///
+/// Since core 0.1.105 `validate` also refuses a contract whose RELATIONS it cannot
+/// honor (ledger #1547): an input group, a `needs`, a value note, an envelope, an
+/// example, an `output_from`, or a DEFAULT (on a binding, on a required input, or one
+/// the contract's own checker refuses). Those are reported with what they cost
+/// instead: the kernel injects a declared default, and the pre-flight trusts the rest.
 fn validate(description: &Description, report: &mut Report) {
-    if let Err(refusal) = description.validate() {
-        report.findings.push(Finding::new(
-            &description.id,
-            None,
-            Check::Validate,
-            format!(
-                "`Description::validate` refuses it: {}. Core's emitters encode a name \
-                 and degrade an authored IRI that is not one to a literal, so the endpoint's \
-                 Meta Turtle and contract IRIs still parse, but not as written: the value is \
-                 an authoring mistake, and `bind` does not validate, so this is where the \
-                 refusal is seen",
-                crate::report::visible(&refusal.to_string())
-            ),
-        ));
-    }
+    let Err(refusal) = description.validate() else {
+        return;
+    };
+    let field = match &refusal {
+        Error::InvalidArgument { name, .. } => name.as_str(),
+        _ => "",
+    };
+    let cost = match field {
+        "default" => {
+            "Since core 0.1.105 the kernel INJECTS a declared default (ledger #19), so a \
+             default the contract cannot honor is one every caller who omits the input is \
+             handed: drop it, or make it a value the contract accepts. A binding is part of \
+             the resource's name and is never defaulted: drop `.default_value(…)` from it and \
+             say what the shorter name means in its summary"
+        }
+        "group" | "needs" | "values" | "arguments" | "examples" | "output_from" => {
+            "The contract states a relation it cannot honor, and core's one checker \
+             (`ActionSpec::check`, behind `urn:kernel:validate` and every MCP tool schema) \
+             trusts it as written. `bind` does not validate, so this is where the refusal \
+             is seen"
+        }
+        _ => {
+            "Core's emitters encode a name and degrade an authored IRI that is not one to a \
+             literal, so the endpoint's Meta Turtle and contract IRIs still parse, but not \
+             as written: the value is an authoring mistake, and `bind` does not validate, so \
+             this is where the refusal is seen"
+        }
+    };
+    report.findings.push(Finding::new(
+        &description.id,
+        None,
+        Check::Validate,
+        format!(
+            "`Description::validate` refuses it: {}. {cost}",
+            crate::report::visible(&refusal.to_string())
+        ),
+    ));
 }
 
 // ----- PIPELINE (static half) -------------------------------------------------
@@ -3160,6 +3410,25 @@ fn validate(description: &Description, report: &mut Report) {
 fn pipeline_static(description: &Description, report: &mut Report) {
     for spec in description.action_specs() {
         if !spec.verb.is_mutating() {
+            // A read whose only intake is a pipe-less group: the engine's "required set"
+            // is the required inputs plus each group's `pipe` (core's
+            // `ActionSpec::pipe_slots`), and here both are empty.
+            let required = spec
+                .inputs
+                .iter()
+                .any(|i| i.required && i.source == InputSource::Argument);
+            let asking: Vec<&InputGroup> = spec
+                .groups
+                .iter()
+                .filter(|g| matches!(g.kind, GroupKind::ExactlyOne | GroupKind::AtLeastOne))
+                .collect();
+            if !required && !asking.is_empty() && spec.pipe_slots(&[]).is_empty() {
+                report.declared.evidence.named_only.push(NamedOnly {
+                    endpoint: description.id.clone(),
+                    verb: spec.verb,
+                    groups: asking.iter().map(|g| g.node_segment()).collect(),
+                });
+            }
             continue;
         }
         let by_value: Vec<&ArgSpec> = spec
@@ -3535,8 +3804,20 @@ impl<'a> Action<'a> {
 
     /// The arguments the pipeline probe fires with: the minimal ones, plus `content`
     /// (the fixture's if it gave one, else a sample) where the action declares it.
+    /// Where `content` is a member of an exactly-one or at-most-one group, the piped
+    /// value REPLACES the group's named alternative, as the engine routes it: a pipe
+    /// fills a group's slot only when no member is named.
     fn pipeline_args(&self, content: &ArgSpec) -> Args {
         let mut args = self.suite.args_for(self.id, self.spec);
+        for group in &self.spec.groups {
+            if matches!(group.kind, GroupKind::ExactlyOne | GroupKind::AtMostOne)
+                && group.has("content")
+            {
+                for member in group.members.iter().filter(|m| *m != "content") {
+                    args.remove(member);
+                }
+            }
+        }
         args.entry("content".to_string())
             .or_insert_with(|| sample_value(content).into_bytes());
         args
@@ -4418,10 +4699,21 @@ impl<'a> Action<'a> {
 
     // ----- REQUIRED -----------------------------------------------------------
 
-    /// Drop each required by-value input from the call the walk resolved, one at a
-    /// time, and expect a typed refusal (ledger #329). Five adopters wrote this by
-    /// hand; ARGSPECS reads `required` and the minimal call supplies every required
-    /// input, so nothing else could see a `required` the endpoint does without.
+    /// Hold the contract's statement of what a call NEEDS to what the endpoint does
+    /// (ledger #329, #15). Five adopters wrote the first half by hand; ARGSPECS reads
+    /// `required` and the minimal call supplies every required input, so nothing else
+    /// could see a `required` the endpoint does without.
+    ///
+    /// From the call the walk resolved, it makes the calls the contract's rules are
+    /// about: each required by-value input dropped; for each input group (core
+    /// 0.1.105), every member dropped, each other member alone, and a second member
+    /// beside the first where the group allows at most one. Core's one checker
+    /// ([`ActionSpec::check`]) says whether the contract refuses each call (a
+    /// violation the baseline call did not already have), and the endpoint must
+    /// agree: a call the contract refuses gets a typed refusal (`MissingArgument` or
+    /// `InvalidArgument`), and a call it accepts is not refused as missing an argument.
+    /// A disagreement is the pre-flight (`urn:kernel:validate`, an MCP tool schema)
+    /// refusing a call the endpoint serves, or blessing one it refuses.
     async fn required(&mut self, report: &mut Report) {
         if !self.runs(Check::Required) {
             return;
@@ -4430,11 +4722,10 @@ impl<'a> Action<'a> {
         if mutating && !self.suite.required_on_mutating {
             return;
         }
-        let inputs = droppable(self.spec);
-        if inputs.is_empty() {
+        if !required_probes_something(self.spec) {
             return;
         }
-        // The call each drop is measured against: the minimal resolution for a read;
+        // The call each probe is measured against: the minimal resolution for a read;
         // for a write, the pipeline probe's firing when it made one, else one firing
         // with the minimal inputs (the declaration opted into firings).
         let (args, baseline) = if mutating {
@@ -4468,57 +4759,204 @@ impl<'a> Action<'a> {
             );
             return;
         }
-        for input in inputs {
-            let name = &input.name;
-            let mut dropped = args.clone();
-            if dropped.remove(name).is_none() {
-                continue;
-            }
+        // What the contract already says about the baseline: a probe's verdict is the
+        // violations it ADDS, so a fixture the contract would refuse does not make
+        // every probe read as refused.
+        let before = self.spec.check(&proposed(&args));
+        for probe in self.required_plan(&args) {
             if !self.may_fire() {
                 return;
             }
+            let refused_by_contract = self
+                .spec
+                .check(&proposed(&probe.args))
+                .into_iter()
+                .any(|v| !before.contains(&v));
             self.caller_used = true;
             let outcome = self
                 .kernel
-                .issue(self.request(&dropped), &self.caller)
+                .issue(self.request(&probe.args), &self.caller)
                 .await;
-            // The evidence, whatever came back: a clean REQUIRED says what it dropped.
+            // The evidence, whatever came back: a clean REQUIRED says what it probed.
             report.declared.evidence.required.push(RequiredProbe {
                 endpoint: self.id.to_string(),
                 verb: self.spec.verb,
-                input: name.clone(),
+                input: probe.input(),
                 refusal: outcome.as_ref().err().map(|e| e.kind().to_string()),
+                group: probe.group.map(InputGroup::node_segment),
+                given: probe.given.clone(),
+                contract_refuses: refused_by_contract,
             });
-            match outcome {
-                Ok(_) => report.findings.push(self.finding(
-                    Check::Required,
-                    format!(
+            self.judge_required(&probe, refused_by_contract, outcome.map(|_| ()), report);
+        }
+    }
+
+    /// The calls [`required`](Self::required) makes from the baseline `args`.
+    fn required_plan(&self, args: &Args) -> Vec<RequiredCall<'a>> {
+        let spec: &'a ActionSpec = self.spec;
+        let mut plan = Vec::new();
+        for input in droppable(spec) {
+            let mut dropped = args.clone();
+            if dropped.remove(&input.name).is_some() {
+                plan.push(RequiredCall {
+                    args: dropped,
+                    shape: CallShape::Dropped(input.name.clone()),
+                    group: None,
+                    given: Vec::new(),
+                });
+            }
+        }
+        let fixture = self.suite.fixture_for(self.id, self.spec.verb);
+        let value_of = |name: &str| -> Option<Vec<u8>> {
+            fixture.and_then(|f| f.args.get(name).cloned()).or_else(|| {
+                self.spec
+                    .inputs
+                    .iter()
+                    .find(|i| i.name == name)
+                    .map(|i| sample_value(i).into_bytes())
+            })
+        };
+        for group in &spec.groups {
+            let given_now: Vec<&str> = group
+                .members
+                .iter()
+                .map(String::as_str)
+                .filter(|m| given(args, m))
+                .collect();
+            let without: Args = args
+                .iter()
+                .filter(|(k, _)| !group.has(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let with = |members: &[&str]| -> Option<RequiredCall<'a>> {
+                let mut call = without.clone();
+                for m in members {
+                    let value = match args.get(*m) {
+                        Some(v) if given(args, m) => v.clone(),
+                        _ => value_of(m)?,
+                    };
+                    call.insert((*m).to_string(), value);
+                }
+                Some(RequiredCall {
+                    args: call,
+                    shape: CallShape::Group,
+                    group: Some(group),
+                    given: members.iter().map(|m| (*m).to_string()).collect(),
+                })
+            };
+            let wants_one = matches!(group.kind, GroupKind::ExactlyOne | GroupKind::AtLeastOne);
+            let at_most_one = matches!(group.kind, GroupKind::ExactlyOne | GroupKind::AtMostOne);
+            if wants_one && !given_now.is_empty() {
+                plan.extend(with(&[]));
+                for member in group.members.iter().map(String::as_str) {
+                    if !given_now.contains(&member) {
+                        plan.extend(with(&[member]));
+                    }
+                }
+            }
+            if at_most_one {
+                let first = given_now
+                    .first()
+                    .copied()
+                    .or(group.members.first().map(String::as_str));
+                let second = group
+                    .members
+                    .iter()
+                    .map(String::as_str)
+                    .find(|m| Some(*m) != first);
+                if let (Some(first), Some(second)) = (first, second) {
+                    plan.extend(with(&[first, second]));
+                }
+            }
+        }
+        plan
+    }
+
+    /// One [`required`](Self::required) call's outcome against what the contract says
+    /// of it.
+    fn judge_required(
+        &self,
+        call: &RequiredCall<'_>,
+        refused_by_contract: bool,
+        outcome: Result<(), Error>,
+        report: &mut Report,
+    ) {
+        let what = call.described();
+        match (refused_by_contract, outcome) {
+            (true, Ok(())) => report.findings.push(self.finding(
+                Check::Required,
+                match &call.shape {
+                    CallShape::Dropped(name) => format!(
                         "declares `{name}` required, but resolved without it: declared required, \
                          actually optional. `urn:kernel:validate` and an MCP tool schema both \
                          refuse a valid call that omits it. Mark it `.optional()` (with \
                          `.default_value(…)` if it has one), or refuse its absence \
                          (`inv.inline_str(\"{name}\")?` is a typed `MissingArgument`)"
                     ),
-                )),
-                Err(Error::MissingArgument(_) | Error::InvalidArgument { .. }) => {}
-                Err(err) if err.is_transient() => self.unprobed(
-                    report,
-                    Check::Required,
-                    format!(
-                        "without `{name}` it failed transiently ({err}), so whether it refuses a \
-                         missing `{name}` was not observed"
+                    CallShape::Group => format!(
+                        "declares {}, but resolved {what}: the contract refuses a call the \
+                         endpoint serves, so `urn:kernel:validate` and an MCP tool schema refuse \
+                         it too. {}",
+                        call.rule(),
+                        if call.given.is_empty() {
+                            "Refuse the call with none of them (a typed `MissingArgument`), or \
+                             drop the group"
+                                .to_string()
+                        } else {
+                            "Refuse the pair (a typed `InvalidArgument`), or declare \
+                             `InputGroup::at_least_one` if both together are fine"
+                                .to_string()
+                        }
                     ),
+                },
+            )),
+            (true, Err(Error::MissingArgument(_) | Error::InvalidArgument { .. })) => {}
+            (_, Err(err)) if err.is_transient() => self.unprobed(
+                report,
+                Check::Required,
+                format!(
+                    "{what} it failed transiently ({err}), so what the endpoint does with that \
+                     call was not observed"
                 ),
-                Err(err) => report.findings.push(self.finding(
-                    Check::Required,
-                    format!(
+            ),
+            (true, Err(err)) => report.findings.push(self.finding(
+                Check::Required,
+                match &call.shape {
+                    CallShape::Dropped(name) => format!(
                         "refused a call without the required `{name}`, but as `{err}`, not as a \
                          typed `MissingArgument` or `InvalidArgument`: an agent cannot tell its own \
                          omission from a failure of the endpoint (`inv.inline_str(\"{name}\")?` \
                          refuses with `MissingArgument`)"
                     ),
-                )),
-            }
+                    CallShape::Group => format!(
+                        "refused a call {what}, which breaks {}, but as `{err}`, not as a typed \
+                         `MissingArgument` or `InvalidArgument`: an agent cannot tell its own \
+                         mistake from a failure of the endpoint",
+                        call.rule()
+                    ),
+                },
+            )),
+            (false, Ok(())) => {}
+            (false, Err(Error::MissingArgument(missing))) => report.findings.push(self.finding(
+                Check::Required,
+                format!(
+                    "declares {}, so a call {what} conforms, but the endpoint refused it as \
+                     missing `{missing}`: core's pre-flight blesses a call the endpoint refuses \
+                     (the false green ledger #15 removed). Read the member the call gave, or \
+                     correct the group",
+                    call.rule()
+                ),
+            )),
+            (false, Err(err)) => self.unprobed(
+                report,
+                Check::Required,
+                format!(
+                    "{what} it was refused as `{err}`, which is not a missing argument: the value \
+                     the walk sent may be the cause, so whether the endpoint honors {} was not \
+                     observed. A Fixture naming the member decides it",
+                    call.rule()
+                ),
+            ),
         }
     }
 
@@ -4601,6 +5039,31 @@ impl<'a> Action<'a> {
                 return;
             }
         }
+        // A pass-through (core 0.1.105, ledger #45/#301): `outputs` reads "at least
+        // these", and the served type is held to where the contract says it comes from.
+        match &self.spec.output_from {
+            Some(OutputFrom::Input(name)) => {
+                if let Some(detail) = self.output_from_input(name, &got, &args, report).await {
+                    report.findings.push(self.finding(Check::Outputs, detail));
+                }
+                return;
+            }
+            Some(OutputFrom::Origin) => {
+                self.unprobed(
+                    report,
+                    Check::Outputs,
+                    format!(
+                        "a declared pass-through (`output_from` origin): served `{got}`, a type \
+                         decided outside the kernel at resolve time, so the contract states \
+                         nothing to hold it to"
+                    ),
+                );
+                return;
+            }
+            // `OutputFrom` is non-exhaustive: a form this suite does not know yet is
+            // held to the declared outputs, as before.
+            _ => {}
+        }
         let detail = if declared.is_empty() {
             format!(
                 "served `{got}` but declares no output: a face the manifold does not announce \
@@ -4619,6 +5082,77 @@ impl<'a> Action<'a> {
             )
         };
         report.findings.push(self.finding(Check::Outputs, detail));
+    }
+
+    /// [`outputs`](Self::outputs) for `output_from(Input(name))`: the type served must be
+    /// the type of the resource the input names. A finding's detail, or `None` when it
+    /// matched or could not be observed (recorded as unprobed).
+    async fn output_from_input(
+        &mut self,
+        name: &str,
+        got: &str,
+        args: &Args,
+        report: &mut Report,
+    ) -> Option<String> {
+        let input = self.spec.inputs.iter().find(|i| i.name == name);
+        if input.is_some_and(|i| i.source == InputSource::Binding) {
+            self.unprobed(
+                report,
+                Check::Outputs,
+                format!(
+                    "a declared pass-through (`output_from` input `{name}`, a binding): served \
+                     `{got}`; the resource a binding determines is the endpoint's to find, so \
+                     the walk cannot resolve it to compare"
+                ),
+            );
+            return None;
+        }
+        let value = args
+            .get(name)
+            .map(|v| String::from_utf8_lossy(v).into_owned());
+        let Some(iri) = value.as_deref().and_then(|v| Iri::parse(v).ok()) else {
+            self.unprobed(
+                report,
+                Check::Outputs,
+                format!(
+                    "a declared pass-through (`output_from` input `{name}`): served `{got}`, but \
+                     the call's `{name}` ({}) is not an IRI the walk can resolve to compare",
+                    value.map_or("not sent".to_string(), |v| format!("`{}`", shown(&v)))
+                ),
+            );
+            return None;
+        };
+        // A read of the input's resource, never a firing of the action: allowed in a
+        // set-aside run too.
+        self.caller_used = true;
+        let source = Request::new(Verb::Source, iri.clone());
+        match self.kernel.issue(source, &self.caller).await {
+            Ok(origin) => {
+                let expected = rdf::bare_media_type(&origin.repr_type.media_type);
+                (expected != got).then(|| {
+                    format!(
+                        "declares its output type comes from `{name}` (`output_from`), and \
+                         `{name}` is `{iri}`, which serves `{expected}`; but it served `{got}`, \
+                         which is neither that nor a declared output. Serve the input's type, \
+                         or declare `{got}` (`.output(\"{got}\")`)",
+                        iri = iri.as_str()
+                    )
+                })
+            }
+            Err(err) => {
+                self.unprobed(
+                    report,
+                    Check::Outputs,
+                    format!(
+                        "a declared pass-through (`output_from` input `{name}`): served `{got}`, \
+                         but `{name}`'s resource `{}` did not resolve ({err}), so there was no \
+                         type to compare",
+                        iri.as_str()
+                    ),
+                );
+                None
+            }
+        }
     }
 
     // ----- RESOLVES -----------------------------------------------------------

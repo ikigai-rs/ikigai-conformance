@@ -349,14 +349,42 @@ pub struct RequiredProbe {
     pub endpoint: String,
     /// The action's verb.
     pub verb: Verb,
-    /// The required input left out of the call.
+    /// The required input left out of the call; for a call about an input GROUP, the
+    /// group's node segment (`group:exactly-one:content,in`, core's
+    /// `InputGroup::node_segment`).
     pub input: String,
-    /// The kind of refusal the call without it got, as
+    /// The kind of refusal the call got, as
     /// [`Error::kind`](ikigai_core::Error::kind) names it (`missing-argument`,
-    /// `invalid-argument`, the two the check expects, or `endpoint`, `timeout`, …),
-    /// or `None` when it RESOLVED: declared required, actually optional, which is a
-    /// finding.
+    /// `invalid-argument`, the two the check expects of a call the contract refuses, or
+    /// `endpoint`, `timeout`, …), or `None` when it RESOLVED: for a dropped required
+    /// input, declared required, actually optional, which is a finding.
     pub refusal: Option<String>,
+    /// For a call about an input group, its node segment (as `input`); `None` for a
+    /// dropped required input.
+    pub group: Option<String>,
+    /// For a group call, the members it gave: none (every member dropped), one (that
+    /// member alone), or two (a pair, where the group allows at most one).
+    pub given: Vec<String>,
+    /// Whether core's one checker (`ActionSpec::check`) refuses the call: the verdict the
+    /// endpoint's outcome is held to. Always `true` for a dropped required input.
+    pub contract_refuses: bool,
+}
+
+/// A `Source` or `Exists` action no pipe can reach (core 0.1.105, ledger #15): it
+/// declares no required by-value input, and every input group that asks for a member
+/// has no `pipe`, so the engine has no slot to route a piped, positional or batch-stdin
+/// value into and calls it ambiguous. Information, never a finding: a named-only
+/// endpoint is a legitimate choice, and this line is where it is seen. Printed as a
+/// `pipeline:` line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NamedOnly {
+    /// The endpoint's description id.
+    pub endpoint: String,
+    /// The action's verb.
+    pub verb: Verb,
+    /// The node segments of its pipe-less groups.
+    pub groups: Vec<String>,
 }
 
 /// Where a [`Suite::enforced_under`](crate::Suite::enforced_under) probe's refusal
@@ -497,6 +525,9 @@ pub struct Evidence {
     /// [`Check::Recompute`] recomputed and found identical, in walk order
     /// (`recomputed:` lines).
     pub recomputed: Vec<Recomputed>,
+    /// Every read action whose only intake is an input group with no `pipe` member, in
+    /// walk order (`pipeline:` lines, under [`Check::Pipeline`]).
+    pub named_only: Vec<NamedOnly>,
 }
 
 /// One cacheable result [`Check::Recompute`] forced to recompute and found
@@ -573,7 +604,7 @@ pub struct Recomputed {
 ///
 /// // One line per finding, endpoint id first, then the check's label.
 /// let first = report.findings[0].to_string();
-/// assert!(first.starts_with("toUpper  "), "{first}");
+/// assert!(first.starts_with("to-upper  "), "{first}");
 /// assert!(report.findings.iter().any(|f| f.check == Check::ArgSpecs
 ///     && f.detail.contains("input `in` has no class")));
 /// assert_eq!(report.endpoints, 1);
@@ -675,10 +706,10 @@ pub struct Declarations {
     ///     .checks(Checks::NAMES)
     ///     .own("echo")
     ///     .run_blocking(&Kernel::new(Arc::new(space)));
-    /// assert_eq!(report.declared.inherited, ["toUpper", "reverseList"]); // bind order
+    /// assert_eq!(report.declared.inherited, ["to-upper", "reverse-list"]); // bind order
     /// let mut inherited = report.declared.inherited.clone();
     /// inherited.sort();
-    /// assert_eq!(inherited, ["reverseList", "toUpper"]);
+    /// assert_eq!(inherited, ["reverse-list", "to-upper"]);
     /// ```
     ///
     /// It lives here rather than on [`Report`] because `Report` is the `Err` of
@@ -760,6 +791,12 @@ impl Report {
         }
     }
 
+    /// The read actions a pipe cannot reach because their only intake is an input
+    /// group with no `pipe` member (`pipeline:` lines): see [`NamedOnly`].
+    pub fn named_only(&self) -> &[NamedOnly] {
+        &self.declared.evidence.named_only
+    }
+
     /// Every input [`Check::Required`] dropped, and the refusal each drop got, in
     /// walk order: the evidence behind a clean `REQUIRED` (the `required:` lines).
     /// Empty when it dropped nothing; [`required_nothing`](Self::required_nothing)
@@ -839,11 +876,12 @@ impl Report {
     ///
     /// let space = EndpointSpace::new().bind(Exact::new("urn:example:toUpper"), builtins::to_upper());
     /// let report = Suite::new()
-    ///     .checks(Checks::ARGSPECS | Checks::NAMES)
+    ///     .checks(Checks::ARGSPECS | Checks::CACHEABLE)
     ///     .run_blocking(&Kernel::new(Arc::new(space)));
+    /// // An untyped input, and a pure function nobody declared pure.
     /// assert_eq!(
     ///     report.keys(),
-    ///     BTreeSet::from([("toUpper", Check::ArgSpecs), ("toUpper", Check::Names)])
+    ///     BTreeSet::from([("to-upper", Check::ArgSpecs), ("to-upper", Check::Cacheable)])
     /// );
     /// ```
     pub fn keys(&self) -> BTreeSet<(&str, Check)> {
@@ -1092,6 +1130,23 @@ impl fmt::Display for Report {
         }
         // What REQUIRED dropped, as `probed:` says what was resolved: a clean
         // REQUIRED otherwise read the same over twelve drops and over none.
+        if self.checks.contains(Check::Pipeline) {
+            for n in &declared.evidence.named_only {
+                writeln!(
+                    f,
+                    "pipeline: {} {} is named-only: {} {} no `pipe` member, so a piped or \
+                     positional value has no slot (`InputGroup::pipe` names the member it fills)",
+                    visible(&n.endpoint),
+                    verb_name(n.verb),
+                    n.groups
+                        .iter()
+                        .map(|g| format!("`{}`", visible(g)))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    if n.groups.len() == 1 { "has" } else { "have" }
+                )?;
+            }
+        }
         if self.checks.contains(Check::Required) {
             let evidence = &declared.evidence;
             if !evidence.required.is_empty() {
@@ -1108,16 +1163,44 @@ impl fmt::Display for Report {
                 )?;
             }
             for p in &evidence.required {
+                let Some(group) = &p.group else {
+                    write!(
+                        f,
+                        "required: {} {} without `{}`: ",
+                        visible(&p.endpoint),
+                        verb_name(p.verb),
+                        visible(&p.input)
+                    )?;
+                    match &p.refusal {
+                        Some(kind) => writeln!(f, "refused {kind}")?,
+                        None => writeln!(f, "resolved — declared required, actually optional")?,
+                    }
+                    continue;
+                };
+                let given = if p.given.is_empty() {
+                    "none of its members".to_string()
+                } else {
+                    p.given
+                        .iter()
+                        .map(|m| format!("`{}`", visible(m)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
                 write!(
                     f,
-                    "required: {} {} without `{}`: ",
+                    "required: {} {} {} given {given} (the contract {}): ",
                     visible(&p.endpoint),
                     verb_name(p.verb),
-                    visible(&p.input)
+                    visible(group),
+                    if p.contract_refuses {
+                        "refuses it"
+                    } else {
+                        "accepts it"
+                    }
                 )?;
                 match &p.refusal {
                     Some(kind) => writeln!(f, "refused {kind}")?,
-                    None => writeln!(f, "resolved — declared required, actually optional")?,
+                    None => writeln!(f, "resolved")?,
                 }
             }
             if let Some(why) = &evidence.required_nothing {
@@ -1503,11 +1586,15 @@ mod tests {
                     label: None,
                     enforced_under: vec![],
                     recomputed: vec![],
+                    named_only: vec![],
                     required: vec![RequiredProbe {
                         endpoint: id.into(),
                         verb: Verb::Source,
                         input: "in".into(),
                         refusal: None,
+                        group: None,
+                        given: vec![],
+                        contract_refuses: true,
                     }],
                     required_nothing: None,
                     idle_waivers: vec![OptedOutCheck {
@@ -1626,18 +1713,25 @@ mod tests {
                     label: None,
                     enforced_under: vec![],
                     recomputed: vec![],
+                    named_only: vec![],
                     required: vec![
                         RequiredProbe {
                             endpoint: "cms-graph".into(),
                             verb: Verb::Source,
                             input: "in".into(),
                             refusal: Some("missing-argument".into()),
+                            group: None,
+                            given: vec![],
+                            contract_refuses: true,
                         },
                         RequiredProbe {
                             endpoint: "to-upper".into(),
                             verb: Verb::Source,
                             input: "in".into(),
                             refusal: None,
+                            group: None,
+                            given: vec![],
+                            contract_refuses: true,
                         },
                     ],
                     inherited_because: vec![],

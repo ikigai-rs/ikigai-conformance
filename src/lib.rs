@@ -48,14 +48,14 @@
 //! | [`RequiresVerb`](Check::RequiresVerb) | declared = enforced | a `requires` with no verb — enforced on every verb since core 0.1.85, but the catalog cannot say which actions it gates |
 //! | [`Enforced`](Check::Enforced) | declared = enforced | under a capability holding no grants, an action with `requires` is refused with a typed `Denied`; an action declaring nothing is not (an undeclared gate: a capability to declare, or a state to document and waive); opt-in, a caller a [`Suite::enforced_under`] probe names (some grant under the prefix, not this target's) is refused with a typed `Denied` by the module's own rule |
 //! | [`Authority`](Check::Authority) | declared = enforced | the fourth cell of the same probe: a `Sink` or a `Delete` that declares no `requires` and **mutated anyway** under a capability holding no grants — no scope to withhold, so no caller can be given read without write. A `Source` is not in scope; a mutating action refused for some other reason is unprobed, never a finding |
-//! | [`Outputs`](Check::Outputs) | faces are declared | the bare media type the action serves with its minimal inputs (parameters stripped) is one of its declared `outputs` — a wrong declaration hides a face from every consumer that reads outputs, the two RDF checks included |
+//! | [`Outputs`](Check::Outputs) | faces are declared | the bare media type the action serves with its minimal inputs (parameters stripped) is one of its declared `outputs` — a wrong declaration hides a face from every consumer that reads outputs, the two RDF checks included; a pass-through (`output_from`, core 0.1.105) is held to the type of the resource its named input names, and an `Origin` one is reported unprobed |
 //! | [`SkolemRdf`](Check::SkolemRdf) | skolemize; no blank nodes | every declared RDF face ([`rdf::RDF_FACES`]) resolves with minimal inputs, parses, and has no blank node |
 //! | [`Vocabulary`](Check::Vocabulary) | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known ([`rdf::WELL_KNOWN_NAMESPACES`]) or module-registered namespace |
 //! | [`Cacheable`](Check::Cacheable) | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and — if it never expires (`Expiry::Never`; an `Expiry::At` deadline is a bound) — carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; an endpoint declared pure carries no thread but its own name and what it read; a result declared live ([`Suite::live`]) is `Expiry::Always` |
-//! | [`Pipeline`](Check::Pipeline) | pipeline citizenship | a mutating action with by-value inputs (on a `Sink`, required or not) declares `content` (where the pipe's value arrives); an action declaring `content` reads it |
-//! | [`Required`](Check::Required) | ArgSpecs from day one | each input declared required, by value and with no default, dropped from the call the walk resolved, is refused with a typed `MissingArgument` or `InvalidArgument`; a call that succeeds without it is "declared required, actually optional". `Source` and `Exists` by default, `Sink` and `Delete` only under [`Suite::required_on_mutating`] |
+//! | [`Pipeline`](Check::Pipeline) | pipeline citizenship | a mutating action with by-value inputs (on a `Sink`, required or not) declares `content` (where the pipe's value arrives); an action declaring `content` reads it; a read whose only intake is a pipe-less input group is a `pipeline:` information line ([`Report::named_only`]) |
+//! | [`Required`](Check::Required) | ArgSpecs from day one | each input declared required, by value and with no default, dropped from the call the walk resolved, is refused with a typed `MissingArgument` or `InvalidArgument`; a call that succeeds without it is "declared required, actually optional". each input group (core 0.1.105) is probed with every member dropped, each other member alone and a pair, and the endpoint must agree with core's one checker (`ActionSpec::check`) on each call. `Source` and `Exists` by default, `Sink` and `Delete` only under [`Suite::required_on_mutating`] |
 //! | [`Names`](Check::Names) | naming convention | the id is a kebab-case noun (the convention `ikigai-core`'s crate docs state) |
-//! | [`Validate`](Check::Validate) | a name is spelled into IRIs | `Description::validate()` accepts the description: no id, input name, `class` or `requires` holds a character an `IRIREF` cannot carry, and no name holds a code point no IRI carries (core 0.1.99). Core's emitters encode a name and degrade a bad authored IRI to a literal (core 0.1.100), so the documents parse; this is the strict check on top. `bind` does not validate, so this is where a bad name is caught |
+//! | [`Validate`](Check::Validate) | a name is spelled into IRIs | `Description::validate()` accepts the description: no id, input name, `class` or `requires` holds a character an `IRIREF` cannot carry, and no name holds a code point no IRI carries (core 0.1.99). Core's emitters encode a name and degrade a bad authored IRI to a literal (core 0.1.100), so the documents parse; this is the strict check on top. `bind` does not validate, so this is where a bad name is caught. Since core 0.1.105 it also refuses a relation the contract cannot honor (a group, `needs`, a value note, an envelope, an example, `output_from`) and a default on a binding, on a required input, or one the contract refuses |
 //! | [`SpaceName`](Check::SpaceName) | a name is a claim: same name, same doors | a space declared self-named ([`Suite::self_named_space`]) claims [`space_iri`](ikigai_core::space_iri)`(module)` under [`SPACE_PREFIX`](ikigai_core::SPACE_PREFIX), on its topology root too, and two calls hold the same doors; a space declared host-named ([`Suite::host_named_space`]) claims nothing |
 //! | [`Declarations`](Check::Declarations) | — | every declaration the module made ([`Suite::live`], [`Suite::cacheable`], [`Suite::pure`], [`Suite::namespace`], [`Suite::required_on_mutating`], a [`Fixture`], an [`opt_out`](Suite::opt_out), an [`opt_out_at`](Suite::opt_out_at), an [`opt_out_check`](Suite::opt_out_check), a declared space) reached the check that would honor it |
 //! | [`Recompute`](Check::Recompute) | cacheability | an `Expiry::Never` answer the cache holds is recomputed 24 times, each after a cut of every thread it carries and of everything it read, and every computation must repeat the first one's bytes (a fixture needs enough entries for an order to differ); each thread an endpoint declared is also cut alone. `CACHEABLE`'s second resolution is the cache hit and can only repeat the first, so this is the witness that sees a wrong `.cacheable()` (a fresh nonce, key or timestamp, `HashMap` order) |
@@ -290,8 +290,8 @@ mod suite;
 pub use checks::{Check, Checks};
 pub use report::{
     Collapsed, Declarations, DeclaredSpace, EnforcedUnder, Evidence, Expected, Finding, Inherited,
-    OptedOut, OptedOutAt, OptedOutCheck, Probed, Recomputed, RefusedBy, Report, RequiredProbe,
-    SpaceNaming, Unprobed,
+    NamedOnly, OptedOut, OptedOutAt, OptedOutCheck, Probed, Recomputed, RefusedBy, Report,
+    RequiredProbe, SpaceNaming, Unprobed,
 };
 pub use suite::{Fixture, Suite};
 
@@ -307,12 +307,13 @@ use ikigai_core::Kernel;
 /// use std::sync::Arc;
 ///
 /// let root = EndpointSpace::new()
-///     .bind(Exact::new("urn:example:reverseList"), builtins::reverse_list());
+///     .bind(Exact::new("urn:example:reverse-list"), builtins::reverse_list());
 /// let report = check(&Kernel::new(Arc::new(root))).unwrap_err();
-/// // The builtins predate the recipe: an untyped input, a pre-convention id, and —
-/// // being pure functions nobody declared pure — a cacheable result with no thread.
+/// // The builtins predate the recipe: an untyped input and — being pure functions
+/// // nobody declared pure — a cacheable result with no thread. Their ids became
+/// // kebab-case in core 0.1.105, so NAMES has nothing to say.
 /// assert!(report.of(Check::ArgSpecs).count() >= 1);
-/// assert!(report.of(Check::Names).count() == 1);
+/// assert!(report.of(Check::Names).count() == 0);
 /// assert!(report.of(Check::Cacheable).count() == 1);
 /// ```
 pub fn check(kernel: &Kernel) -> Result<Report, Report> {

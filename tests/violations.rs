@@ -3080,7 +3080,7 @@ fn space_name_catches_two_declarations_of_one_name_over_different_doors() {
     assert!(
         findings[0].detail.contains(
             "are both declared as `urn:iki:space:example` but hold \
-             different doors (first call: `/ door 1 `urn:example:part` (exact) -> toUpper`; \
+             different doors (first call: `/ door 1 `urn:example:part` (exact) -> to-upper`; \
              second call: nothing)"
         ),
         "{report}"
@@ -3501,8 +3501,7 @@ fn a_static_walk_reads_every_description_and_runs_nothing() {
     assert_eq!(exec.load(Ordering::SeqCst), 0, "{report}");
     assert_eq!(notify.load(Ordering::SeqCst), 0, "{report}");
     // Every description was still read: the fix list is in hand before anything ran.
-    assert_eq!(&*report.walked, ["exec", "notify", "toUpper"]);
-    assert_caught(&report, Check::Names, "id `toUpper`");
+    assert_eq!(&*report.walked, ["exec", "notify", "to-upper"]);
     assert_caught(&report, Check::ArgSpecs, "input `in` has no class");
     let text = report.to_string();
     assert!(
@@ -3532,9 +3531,9 @@ fn without_own_the_only_lever_on_a_dependency_keeps_its_static_findings() {
         );
     let report = Suite::new()
         .pure("upper")
-        .opt_out("toUpper", None, "a dependency's endpoint, not ours")
+        .opt_out("to-upper", None, "a dependency's endpoint, not ours")
         .run_blocking(&kernel(space));
-    assert!(report.against("toUpper").count() >= 2, "{report}");
+    assert!(report.against("to-upper").count() >= 1, "{report}");
     assert!(report.against("upper").next().is_none(), "{report}");
 }
 
@@ -3554,13 +3553,13 @@ fn own_scopes_the_walk_and_reports_the_rest_as_inherited() {
         .run_blocking(&kernel(space));
     report.assert_clean();
     assert_eq!(&*report.walked, ["upper"]);
-    assert_eq!(report.declared.inherited, ["toUpper", "exec"]);
+    assert_eq!(report.declared.inherited, ["to-upper", "exec"]);
     assert_eq!(report.endpoints, 1);
     // Inherited means NOT walked: the dependency's subprocess never ran.
     assert_eq!(exec.load(Ordering::SeqCst), 0, "{report}");
     let text = report.to_string();
     assert!(text.contains("own: upper (1 endpoint(s) walked)"), "{text}");
-    assert!(text.contains("inherited: toUpper exec — "), "{text}");
+    assert!(text.contains("inherited: to-upper exec — "), "{text}");
 
     // A prefix ends in `*`.
     let space = EndpointSpace::new()
@@ -3574,7 +3573,7 @@ fn own_scopes_the_walk_and_reports_the_rest_as_inherited() {
         .pure("upper")
         .run_blocking(&kernel(space));
     report.assert_clean();
-    assert_eq!(report.declared.inherited, ["toUpper"]);
+    assert_eq!(report.declared.inherited, ["to-upper"]);
 }
 
 #[test]
@@ -3606,7 +3605,7 @@ fn a_declaration_for_an_inherited_endpoint_says_it_is_inherited() {
     let report = Suite::new()
         .own("upper")
         .pure("upper")
-        .fixture(Fixture::new("toUpper", Verb::Source).arg("in", "x"))
+        .fixture(Fixture::new("to-upper", Verb::Source).arg("in", "x"))
         .run_blocking(&kernel(space));
     assert_caught(
         &report,
@@ -3617,7 +3616,7 @@ fn a_declaration_for_an_inherited_endpoint_says_it_is_inherited() {
 
 // ----- Suite::inherit, Suite::own_all, Finding::is_suite_wide (ledger #1497) ---------
 
-/// `upper` is the module's; `toUpper` and `exec` are bound beside it.
+/// `upper` is the module's; `to-upper` and `exec` are bound beside it.
 fn composed(exec: Arc<AtomicUsize>) -> EndpointSpace {
     EndpointSpace::new()
         .bind(Exact::new("urn:example:upper"), conforming())
@@ -3636,10 +3635,13 @@ fn inherit_pins_the_inherited_list_and_prints_each_reason() {
         .own("upper")
         .pure("upper")
         .inherit("exec", "a subprocess seam the host owns")
-        .inherit("toUpper", "ikigai-core's builtin, covered by its own tests")
+        .inherit(
+            "to-upper",
+            "ikigai-core's builtin, covered by its own tests",
+        )
         .run_blocking(&kernel(composed(exec.clone())));
     report.assert_clean();
-    assert_eq!(report.declared.inherited, ["toUpper", "exec"]);
+    assert_eq!(report.declared.inherited, ["to-upper", "exec"]);
     assert_eq!(exec.load(Ordering::SeqCst), 0, "{report}");
     assert_eq!(
         report.inherited_because(),
@@ -3649,7 +3651,7 @@ fn inherit_pins_the_inherited_list_and_prints_each_reason() {
                 reason: "a subprocess seam the host owns".into(),
             },
             Inherited {
-                endpoint: "toUpper".into(),
+                endpoint: "to-upper".into(),
                 reason: "ikigai-core's builtin, covered by its own tests".into(),
             },
         ]
@@ -3657,7 +3659,7 @@ fn inherit_pins_the_inherited_list_and_prints_each_reason() {
     let text = report.to_string();
     for line in [
         "inherited because: exec: a subprocess seam the host owns\n",
-        "inherited because: toUpper: ikigai-core's builtin, covered by its own tests\n",
+        "inherited because: to-upper: ikigai-core's builtin, covered by its own tests\n",
     ] {
         assert!(text.contains(line), "missing {line:?}:\n{text}");
     }
@@ -3670,7 +3672,7 @@ fn an_inherited_endpoint_no_inherit_names_is_a_finding_no_selection_removes() {
         .checks(Checks::NAMES)
         .opt_out_check("exec", Check::Declarations, "trying to waive it")
         .own("upper")
-        .inherit("toUpper", "ikigai-core's builtin")
+        .inherit("to-upper", "ikigai-core's builtin")
         .run_blocking(&kernel(composed(exec)));
     let pinned: Vec<&Finding> = report
         .of(Check::Declarations)
@@ -3706,7 +3708,7 @@ fn an_inherit_for_an_id_that_is_not_inherited_is_a_finding() {
     let report = Suite::new()
         .checks(Checks::NAMES)
         .own("upper")
-        .inherit("toUpper", "a dependency")
+        .inherit("to-upper", "a dependency")
         .inherit("exec", "a seam")
         .inherit("upper", "a stale reason")
         .run_blocking(&kernel(composed(exec.clone())));
@@ -3719,20 +3721,20 @@ fn an_inherit_for_an_id_that_is_not_inherited_is_a_finding() {
     // No `own` at all: nothing is inherited.
     let report = Suite::new()
         .checks(Checks::NAMES)
-        .inherit("toUpper", "a dependency")
+        .inherit("to-upper", "a dependency")
         .run_blocking(&kernel(composed(exec.clone())));
-    let found = reasons(&report, "toUpper");
+    let found = reasons(&report, "to-upper");
     assert_eq!(found.len(), 1, "{report}");
     assert!(found[0].contains("no `Suite::own` is declared"), "{report}");
     // An id nothing binds.
     let report = Suite::new()
         .checks(Checks::NAMES)
         .own("upper")
-        .inherit("toUpper", "a dependency")
+        .inherit("to-upper", "a dependency")
         .inherit("exec", "a seam")
-        .inherit("to-upper", "a typo")
+        .inherit("toUpper", "the name before the rename")
         .run_blocking(&kernel(composed(exec)));
-    let found = reasons(&report, "to-upper");
+    let found = reasons(&report, "toUpper");
     assert_eq!(found.len(), 1, "{report}");
     assert!(
         found[0].contains("the kernel binds no endpoint with that id"),
@@ -3752,7 +3754,7 @@ fn an_opt_out_left_beside_own_is_a_finding_that_points_at_inherit() {
     let report = Suite::new()
         .own("upper")
         .pure("upper")
-        .opt_out("toUpper", None, "a dependency's endpoint, not ours")
+        .opt_out("to-upper", None, "a dependency's endpoint, not ours")
         .run_blocking(&kernel(space));
     assert_caught(
         &report,
@@ -3784,7 +3786,7 @@ fn own_all_is_own_for_each_id() {
     assert_eq!(all.declared.own, OURS);
     assert_eq!(all.declared.own, folded.declared.own);
     assert_eq!(&*all.walked, ["upper", "exec"]);
-    assert_eq!(all.declared.inherited, ["toUpper"]);
+    assert_eq!(all.declared.inherited, ["to-upper"]);
     // Owned Strings and a slice reference work too.
     let owned: Vec<String> = OURS.iter().map(|s| s.to_string()).collect();
     let report = Suite::new()
