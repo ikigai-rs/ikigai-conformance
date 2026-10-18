@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use ikigai_core::Verb;
+use ikigai_core::{FailureClass, Verb};
 
 use crate::checks::{Check, Checks};
 use crate::suite::Fixture;
@@ -528,6 +528,135 @@ pub struct Evidence {
     /// Every read action whose only intake is an input group with no `pipe` member, in
     /// walk order (`pipeline:` lines, under [`Check::Pipeline`]).
     pub named_only: Vec<NamedOnly>,
+    /// Whether the module opted into [`Check::Failures`]
+    /// ([`Suite::check_failures`](crate::Suite::check_failures)). A declaration, kept here
+    /// for the reason [`inherited_because`](Self::inherited_because) is.
+    pub check_failures: bool,
+    /// What [`Check::Failures`] saw of every action it ran on, in walk order
+    /// (`failures:` lines): the evidence a clean `FAILURES` stands on, and the actions
+    /// that state no failure classes and so were compared with nothing.
+    pub failures: Vec<FailuresSeen>,
+    /// Every [`Suite::fails_under`](crate::Suite::fails_under) probe that ran, in walk
+    /// order (`fails under:` lines).
+    pub fails_under: Vec<FailsUnder>,
+}
+
+/// What [`Check::Failures`] saw of one action: what it declares and the classes of the
+/// failures the walk observed from it. A stated declaration prints as a `failures:` line
+/// of its own; the actions that state nothing share one.
+///
+/// ```
+/// use ikigai_conformance::{Checks, Suite};
+/// use ikigai_core::{
+///     ArgSpec, Description, EndpointSpace, Error, Exact, FailureClass, FnEndpoint, Invocation,
+///     Kernel, ReprType, Representation, Verb,
+/// };
+/// use std::sync::Arc;
+///
+/// // A bounded parser: past 8 bytes it refuses with `OverBudget`, and it says so.
+/// let parse = FnEndpoint::new("parse", |inv: &Invocation<'_>| {
+///     let text = inv.inline_str("content")?;
+///     if text.len() > 8 {
+///         return Err(Error::OverBudget { detail: format!("{} bytes, past 8", text.len()) });
+///     }
+///     Ok(Representation::new(ReprType::new("text/plain"), text.as_bytes().to_vec()))
+/// })
+/// .with_description(
+///     Description::new("parse")
+///         .verb(Verb::Source)
+///         .input(ArgSpec::new("content").class("http://www.w3.org/2001/XMLSchema#string"))
+///         .output("text/plain")
+///         .fails(FailureClass::OverBudget),
+/// );
+/// let space = EndpointSpace::new().bind(Exact::new("urn:example:parse"), parse);
+/// let report = Suite::new()
+///     .checks(Checks::FAILURES)
+///     .check_failures()
+///     .run_blocking(&Kernel::new(Arc::new(space)));
+/// report.assert_clean();
+/// let seen = &report.failures_seen()[0];
+/// assert_eq!(seen.declared.as_deref(), Some(&[FailureClass::OverBudget][..]));
+/// assert!(seen.failed.is_empty()); // the walk's sample is short: it answered
+/// assert!(report.to_string().contains(
+///     "failures: parse source declares over-budget: 1 resolution(s), none failed\n"
+/// ), "{report}");
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FailuresSeen {
+    /// The endpoint's description id.
+    pub endpoint: String,
+    /// The action's verb.
+    pub verb: Verb,
+    /// The classes the action declares, in declaration order (an empty list says "only
+    /// the implied ones"), or `None` when it states none and nothing was compared.
+    pub declared: Option<Vec<FailureClass>>,
+    /// How many resolutions of the action the walk observed, answers and failures both.
+    pub resolutions: usize,
+    /// The distinct classes ([`Error::class`](ikigai_core::Error::class)) of the
+    /// failures among them, in the order first seen.
+    pub failed: Vec<FailureClass>,
+}
+
+/// One [`Suite::fails_under`](crate::Suite::fails_under) probe and what it got, printed
+/// as a `fails under:` line.
+///
+/// ```
+/// use ikigai_conformance::{Checks, Fixture, Suite};
+/// use ikigai_core::{
+///     ArgSpec, Description, EndpointSpace, Error, Exact, FailureClass, FnEndpoint, Invocation,
+///     Kernel, ReprType, Representation, Verb,
+/// };
+/// use std::sync::Arc;
+///
+/// let parse = FnEndpoint::new("parse", |inv: &Invocation<'_>| {
+///     let text = inv.inline_str("content")?;
+///     if text.len() > 8 {
+///         return Err(Error::OverBudget { detail: format!("{} bytes, past 8", text.len()) });
+///     }
+///     Ok(Representation::new(ReprType::new("text/plain"), text.as_bytes().to_vec()))
+/// })
+/// .with_description(
+///     Description::new("parse")
+///         .verb(Verb::Source)
+///         .input(ArgSpec::new("content").class("http://www.w3.org/2001/XMLSchema#string"))
+///         .output("text/plain")
+///         .fails(FailureClass::OverBudget),
+/// );
+/// let space = EndpointSpace::new().bind(Exact::new("urn:example:parse"), parse);
+/// let report = Suite::new()
+///     .checks(Checks::FAILURES)
+///     .check_failures()
+///     .fails_under(
+///         Fixture::new("parse", Verb::Source).arg("content", "far too long"),
+///         FailureClass::OverBudget,
+///     )
+///     .run_blocking(&Kernel::new(Arc::new(space)));
+/// report.assert_clean();
+/// let probe = &report.fails_under_probes()[0];
+/// assert_eq!(probe.got, Some(FailureClass::OverBudget));
+/// assert_eq!(probe.kind.as_deref(), Some("over-budget"));
+/// assert!(report.to_string().contains(
+///     "fails under: parse source content=\"far too long\" expecting over-budget: failed \
+///      over-budget\n"
+/// ), "{report}");
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FailsUnder {
+    /// The endpoint's description id.
+    pub endpoint: String,
+    /// The action's verb.
+    pub verb: Verb,
+    /// The probe as a fixture line prints it, its caller included.
+    pub probe: String,
+    /// The class the module said the probe must fail with.
+    pub expected: FailureClass,
+    /// The class it failed with, or `None` when it RESOLVED (a finding).
+    pub got: Option<FailureClass>,
+    /// The kind of the failure, as [`Error::kind`](ikigai_core::Error::kind) names it, or
+    /// `None` when it resolved.
+    pub kind: Option<String>,
 }
 
 /// One cacheable result [`Check::Recompute`] forced to recompute and found
@@ -855,6 +984,18 @@ impl Report {
     /// recomputed and found identical (the `recomputed:` lines), in walk order.
     pub fn recomputed(&self) -> &[Recomputed] {
         &self.declared.evidence.recomputed
+    }
+
+    /// What [`Check::Failures`] saw of every action it ran on (the `failures:` lines), in
+    /// walk order: see [`FailuresSeen`]. Empty when it did not run.
+    pub fn failures_seen(&self) -> &[FailuresSeen] {
+        &self.declared.evidence.failures
+    }
+
+    /// Every [`Suite::fails_under`](crate::Suite::fails_under) probe that ran and what it
+    /// got (the `fails under:` lines), in walk order: see [`FailsUnder`].
+    pub fn fails_under_probes(&self) -> &[FailsUnder] {
+        &self.declared.evidence.fails_under
     }
 
     /// Which run produced this report: the [`Suite::label`](crate::Suite::label), or
@@ -1224,6 +1365,58 @@ impl fmt::Display for Report {
                 writeln!(f, ": identical")?;
             }
         }
+        // What FAILURES compared, as `required:` says what was dropped.
+        if self.checks.contains(Check::Failures) {
+            let mut unstated: Vec<String> = Vec::new();
+            for seen in &declared.evidence.failures {
+                let Some(classes) = &seen.declared else {
+                    unstated.push(format!(
+                        "{} {}",
+                        visible(&seen.endpoint),
+                        verb_name(seen.verb)
+                    ));
+                    continue;
+                };
+                write!(
+                    f,
+                    "failures: {} {} declares {}: {} resolution(s), ",
+                    visible(&seen.endpoint),
+                    verb_name(seen.verb),
+                    class_words(classes),
+                    seen.resolutions
+                )?;
+                if seen.failed.is_empty() {
+                    writeln!(f, "none failed")?;
+                } else {
+                    writeln!(f, "failed as {}", class_words(&seen.failed))?;
+                }
+            }
+            if !unstated.is_empty() {
+                writeln!(
+                    f,
+                    "failures: {} action(s) state no failure classes, so nothing was compared: {}",
+                    unstated.len(),
+                    unstated.join(", ")
+                )?;
+            }
+            for p in &declared.evidence.fails_under {
+                write!(
+                    f,
+                    "fails under: {} expecting {}: ",
+                    p.probe,
+                    p.expected.word()
+                )?;
+                match (&p.kind, p.got) {
+                    (Some(kind), Some(got)) if got == p.expected => writeln!(f, "failed {kind}")?,
+                    (Some(kind), Some(got)) => writeln!(
+                        f,
+                        "failed {kind}, class {} — not the stated class",
+                        got.word()
+                    )?,
+                    _ => writeln!(f, "resolved — the stated failure did not happen")?,
+                }
+            }
+        }
         // What each `enforced_under` probe got: the module's own rule, reached or not.
         for p in &declared.evidence.enforced_under {
             let holding = p
@@ -1442,6 +1635,19 @@ pub(crate) fn visible(s: &str) -> String {
         .collect()
 }
 
+/// Failure classes as their words, comma-separated; an empty declaration is "only the
+/// implied classes" (`permanent`, and `denied` beside a `requires`).
+pub(crate) fn class_words(classes: &[FailureClass]) -> String {
+    if classes.is_empty() {
+        return "only the implied classes".to_string();
+    }
+    classes
+        .iter()
+        .map(|c| c.word())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Ids joined by a space, each [`visible`].
 fn joined<S: AsRef<str>>(ids: &[S]) -> String {
     ids.iter()
@@ -1587,6 +1793,9 @@ mod tests {
                     enforced_under: vec![],
                     recomputed: vec![],
                     named_only: vec![],
+                    check_failures: false,
+                    failures: vec![],
+                    fails_under: vec![],
                     required: vec![RequiredProbe {
                         endpoint: id.into(),
                         verb: Verb::Source,
@@ -1714,6 +1923,9 @@ mod tests {
                     enforced_under: vec![],
                     recomputed: vec![],
                     named_only: vec![],
+                    check_failures: false,
+                    failures: vec![],
+                    fails_under: vec![],
                     required: vec![
                         RequiredProbe {
                             endpoint: "cms-graph".into(),

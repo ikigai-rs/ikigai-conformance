@@ -57,9 +57,10 @@
 //! | [`Names`](Check::Names) | naming convention | the id is a kebab-case noun (the convention `ikigai-core`'s crate docs state) |
 //! | [`Validate`](Check::Validate) | a name is spelled into IRIs | `Description::validate()` accepts the description: no id, input name, `class` or `requires` holds a character an `IRIREF` cannot carry, and no name holds a code point no IRI carries (core 0.1.99). Core's emitters encode a name and degrade a bad authored IRI to a literal (core 0.1.100), so the documents parse; this is the strict check on top. `bind` does not validate, so this is where a bad name is caught. Since core 0.1.105 it also refuses a relation the contract cannot honor (a group, `needs`, a value note, an envelope, an example, `output_from`) and a default on a required input (a required binding included; an optional binding may carry one since core 0.1.106), or one the contract refuses |
 //! | [`SpaceName`](Check::SpaceName) | a name is a claim: same name, same doors | a space declared self-named ([`Suite::self_named_space`]) claims [`space_iri`](ikigai_core::space_iri)`(module)` under [`SPACE_PREFIX`](ikigai_core::SPACE_PREFIX), on its topology root too, and two calls hold the same doors; a space declared host-named ([`Suite::host_named_space`]) claims nothing |
-//! | [`Declarations`](Check::Declarations) | — | every declaration the module made ([`Suite::live`], [`Suite::cacheable`], [`Suite::pure`], [`Suite::namespace`], [`Suite::required_on_mutating`], a [`Fixture`], an [`opt_out`](Suite::opt_out), an [`opt_out_at`](Suite::opt_out_at), an [`opt_out_check`](Suite::opt_out_check), a declared space) reached the check that would honor it |
+//! | [`Declarations`](Check::Declarations) | — | every declaration the module made ([`Suite::live`], [`Suite::cacheable`], [`Suite::pure`], [`Suite::namespace`], [`Suite::required_on_mutating`], [`Suite::check_failures`], a [`Suite::fails_under`] probe, a [`Fixture`], an [`opt_out`](Suite::opt_out), an [`opt_out_at`](Suite::opt_out_at), an [`opt_out_check`](Suite::opt_out_check), a declared space) reached the check that would honor it |
 //! | [`Recompute`](Check::Recompute) | cacheability | an `Expiry::Never` answer the cache holds is recomputed 24 times, each after a cut of every thread it carries and of everything it read, and every computation must repeat the first one's bytes (a fixture needs enough entries for an order to differ); each thread an endpoint declared is also cut alone. `CACHEABLE`'s second resolution is the cache hit and can only repeat the first, so this is the witness that sees a wrong `.cacheable()` (a fresh nonce, key or timestamp, `HashMap` order) |
 //! | [`Resolves`](Check::Resolves) | — | the resolution another check needed resolved; a failure is reported once per action, with the refusal's kind, the check that needed it, and an untyped input the walk had to invent a value for |
+//! | [`Failures`](Check::Failures) | declared = produced | **opt-in in 0.10 ([`Suite::check_failures`]), the default from 0.11.0.** An action that states its failure classes (core 0.1.108's `ActionSpec::fails` / `Description::fails`) fails only with a class it admits: every failure the walk observes is held to the declaration by core's `ActionSpec::admits_failure` over `Error::class()` (`permanent` implied, `denied` beside a `requires`); an action that states nothing is listed on a `failures:` line, never a finding; a [`Suite::fails_under`] probe must fail with exactly the class it states |
 //!
 //! Both RDF checks resolve and **parse** the face, so a mislabeled or malformed
 //! graph is reported whichever of the two is selected — under
@@ -86,6 +87,11 @@
 //!   out or unprobed). A clean `REQUIRED` used to read the same over twelve drops
 //!   and over none ([`Report::required_probes`], [`Report::required_nothing`]).
 //! - **`unprobed:`** — the actions a check could not observe, with the reason.
+//! - **`failures:`** and **`fails under:`** — under [`Failures`](Check::Failures), what
+//!   each action that states its failure classes declares and which classes the walk saw
+//!   it fail with, one line for every action that states none (compared with nothing),
+//!   and each [`Suite::fails_under`] probe's outcome ([`Report::failures_seen`],
+//!   [`Report::fails_under_probes`]).
 //! - **`note:`** — a [`Suite::opt_out_check`] that suppressed nothing: the waived
 //!   check ran with its findings set aside and found none ([`Report::idle_waivers`]).
 //!   Information, never a finding.
@@ -289,9 +295,9 @@ mod suite;
 
 pub use checks::{Check, Checks};
 pub use report::{
-    Collapsed, Declarations, DeclaredSpace, EnforcedUnder, Evidence, Expected, Finding, Inherited,
-    NamedOnly, OptedOut, OptedOutAt, OptedOutCheck, Probed, Recomputed, RefusedBy, Report,
-    RequiredProbe, SpaceNaming, Unprobed,
+    Collapsed, Declarations, DeclaredSpace, EnforcedUnder, Evidence, Expected, FailsUnder,
+    FailuresSeen, Finding, Inherited, NamedOnly, OptedOut, OptedOutAt, OptedOutCheck, Probed,
+    Recomputed, RefusedBy, Report, RequiredProbe, SpaceNaming, Unprobed,
 };
 pub use suite::{Fixture, Suite};
 
