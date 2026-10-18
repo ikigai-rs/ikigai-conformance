@@ -933,8 +933,26 @@ anyone memoizes by id.
 
 ## Status
 
-0.9.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.9.1. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.9.0 → 0.9.1: an optional binding may carry a default (ledger #1882)
+
+Core 0.1.106 lets an **optional** binding declare a default (`.binding().optional()`
+with `.default_value(…)`): the kernel fills it when the matched name leaves the segment
+out, so ikigai-ledger's bare `items` reads as `default:items` (ledger #1547). `validate`
+refuses only a **required** binding's default now. The core and vocab floors move to
+0.1.106, and `VALIDATE`'s hint stops saying a binding is never defaulted: for a required
+binding it says to drop the default, or make the binding optional and bind the shorter
+name too.
+
+**Will it turn a green suite red?** No. It turns one green: the 0.9.0 note below says
+`VALIDATE` refuses a default on a binding, and named ikigai-ledger, ikigai-gonk and
+ikigai-org. Each of those bindings is built with `.default_value(…)`, which makes the
+input optional, so on core 0.1.106 they pass and need no waiver. A required binding with
+a default (set `required = true` after the builder) is still a finding. Source changes for
+a consumer: none. A patch release, so a `"0.9.0"` pin admits it; raise `ikigai-core` and
+`ikigai-vocab` to `"0.1.106"` where a module's own test relies on the filled default.
 
 ### 0.8.4 → 0.9.0: core 0.1.105's contract shape (ledger #1547)
 
