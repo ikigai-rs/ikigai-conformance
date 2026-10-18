@@ -378,33 +378,88 @@ fn an_envelope_sends_its_carrier_not_its_fields() {
     report.assert_clean();
 }
 
+/// `urn:example:{ledger}:items`, modeled on ikigai-ledger's `items`: bound at the short
+/// name `urn:example:items` AND the spelled-out template, with a `{ledger}` binding
+/// defaulting to `default`. It answers the binding it read. `required` makes the binding
+/// one the name always carries, which no default can serve.
+fn ledger_items(required: bool) -> EndpointSpace {
+    let mut ledger = ArgSpec::new("ledger")
+        .class(XSD_STRING)
+        .default_value("default")
+        .binding()
+        .optional();
+    ledger.required = required;
+    let items = Arc::new(
+        FnEndpoint::new("items", |inv: &Invocation<'_>| {
+            let ledger = inv.bindings.get("ledger").unwrap_or("<none>").to_string();
+            Ok(text(ledger).cacheable())
+        })
+        .with_description(
+            Description::new("items")
+                .verb(Verb::Source)
+                .input(ledger)
+                .output("text/plain"),
+        ),
+    );
+    EndpointSpace::new()
+        .bind_arc(Exact::new("urn:example:items"), items.clone())
+        .bind_arc(
+            UriTemplate::parse("urn:example:{ledger}:items").unwrap(),
+            items,
+        )
+}
+
+/// Ledger #1882: since core 0.1.106 an OPTIONAL binding may carry a default (the kernel
+/// fills it when the matched name leaves the segment out, ledger #1547), so the
+/// ledger-shaped `{ledger}` passes VALIDATE and every declaration it makes reaches a
+/// check. On 0.1.105 VALIDATE refused it.
 #[test]
-fn validate_names_what_a_default_on_a_binding_costs() {
-    let page = FnEndpoint::new("page", |inv: &Invocation<'_>| {
-        Ok(text(inv.inline_str("ledger").unwrap_or("default").to_string()).cacheable())
-    })
-    .with_description(
-        Description::new("page")
-            .verb(Verb::Source)
-            .input(
-                ArgSpec::new("ledger")
-                    .class(XSD_STRING)
-                    .default_value("default")
-                    .binding(),
-            )
-            .output("text/plain"),
+fn an_optional_binding_with_a_default_is_clean() {
+    let report = Suite::new()
+        .checks(Checks::VALIDATE | Checks::DECLARATIONS)
+        .run_blocking(&kernel(ledger_items(false)));
+    report.assert_clean();
+    let k = kernel(ledger_items(false));
+    let read = |name: &str| {
+        let request =
+            ikigai_core::Request::new(Verb::Source, ikigai_core::Iri::parse(name).unwrap());
+        let root = ikigai_core::Capability::root();
+        String::from_utf8(
+            futures::executor::block_on(k.issue(request, &root))
+                .unwrap()
+                .bytes,
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        read("urn:example:items"),
+        "default",
+        "the kernel fills the default"
     );
-    let space = EndpointSpace::new().bind(
-        UriTemplate::parse("urn:example:page:{ledger}").unwrap(),
-        page,
-    );
+    assert_eq!(read("urn:example:work:items"), "work");
+}
+
+/// A REQUIRED binding is part of every name the endpoint answers, so a default on it is
+/// still refused, and the hint says how to make it one that can be left out.
+#[test]
+fn validate_names_what_a_default_on_a_required_binding_costs() {
     let report = Suite::new()
         .checks(Checks::VALIDATE)
-        .run_blocking(&kernel(space));
-    assert_caught(&report, Check::Validate, "is a binding with a default");
+        .run_blocking(&kernel(ledger_items(true)));
     assert_caught(
         &report,
         Check::Validate,
-        "A binding is part of the resource's name and is never defaulted",
+        "is a required binding with a default",
+    );
+    assert_caught(
+        &report,
+        Check::Validate,
+        "a required binding is part of every name the endpoint answers and is never omitted",
+    );
+    assert!(
+        report.of(Check::Validate).all(|f| !f
+            .detail
+            .contains("A binding is part of the resource's name")),
+        "the 0.1.105 hint is gone:\n{report}"
     );
 }
