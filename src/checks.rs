@@ -267,6 +267,29 @@ pub enum Check {
     /// ([`Suite::opt_out_check`](crate::Suite::opt_out_check)). A selection that does not
     /// name it (any written before it existed) does not run it.
     Recompute,
+    /// **One graph, two faces, the same terms** (ledger #356). Every literal in an RDF
+    /// face carries the datatype its property's `rdfs:range` declares in `ikigai-vocab`
+    /// ([`rdf::datatype_mismatches`](crate::rdf::datatype_mismatches)).
+    ///
+    /// The JSON-LD context (`ikigai_vocab::CONTEXT`) is GENERATED from those ranges; a
+    /// hand-written Turtle face is not, so the two are independent decisions about one
+    /// literal. A bare Turtle `ik:batchAt 2` is `xsd:integer`, while the context coerces
+    /// the same JSON number to `xsd:positiveInteger`, the range. Both are value-correct
+    /// and the range assertion is true, but the literals are not term-equal, so a diff of
+    /// the two faces of the same graph shows a difference that is not there.
+    ///
+    /// The rule is "tag what the shorthand cannot express", not "tag everything": Turtle
+    /// writes `xsd:integer`, `xsd:decimal`, `xsd:double`, `xsd:boolean` and a plain string
+    /// bare ([`rdf::TURTLE_SHORTHAND`](crate::rdf::TURTLE_SHORTHAND)), so `ik:context 8192`
+    /// (range `xsd:integer`) passes untagged. Only a property whose range is an XSD
+    /// datatype other than `xsd:string` is judged: a string, `rdfs:Literal` or IRI range is
+    /// not a coercion the context makes.
+    ///
+    /// It reads the faces [`SkolemRdf`](Check::SkolemRdf) and
+    /// [`Vocabulary`](Check::Vocabulary) already resolve and parse, and resolves nothing
+    /// of its own; when neither of those is selected it reports a face that is mislabeled
+    /// or malformed under its own name, as they do.
+    Datatypes,
     /// **Declared failures = produced failures, the half a test can see** (0.10.0, ledger
     /// #1546). An action that states its failure classes (ikigai-core 0.1.108's
     /// `ActionSpec::fails` / `Description::fails`) is held to them: every failure the walk
@@ -317,6 +340,7 @@ impl Check {
             Check::Resolves => "RESOLVES",
             Check::Recompute => "RECOMPUTE",
             Check::Failures => "FAILURES",
+            Check::Datatypes => "DATATYPES",
         }
     }
 
@@ -337,6 +361,7 @@ impl Check {
                 | Check::Resolves
                 | Check::Recompute
                 | Check::Failures
+                | Check::Datatypes
         )
     }
 
@@ -410,9 +435,12 @@ impl Checks {
     /// [`Checks::all`], and run only under
     /// [`Suite::check_failures`](crate::Suite::check_failures) in 0.10.
     pub const FAILURES: Checks = Checks(1 << (Check::Failures as u32));
-    /// Both RDF-face checks: [`Check::SkolemRdf`] and [`Check::Vocabulary`] — the
-    /// pair a module without a graph face subtracts.
-    pub const RDF: Checks = Checks(Checks::SKOLEM_RDF.0 | Checks::VOCABULARY.0);
+    /// [`Check::Datatypes`].
+    pub const DATATYPES: Checks = Checks(1 << (Check::Datatypes as u32));
+    /// Every RDF-face check: [`Check::SkolemRdf`], [`Check::Vocabulary`] and
+    /// [`Check::Datatypes`] — the set a module without a graph face subtracts.
+    pub const RDF: Checks =
+        Checks(Checks::SKOLEM_RDF.0 | Checks::VOCABULARY.0 | Checks::DATATYPES.0);
     /// Every check that reads descriptions and declarations only, and resolves
     /// nothing: the safe FIRST run over a kernel whose endpoints spawn processes,
     /// reach the network or call a model (ledger #348). A walk under these resolves
@@ -549,7 +577,7 @@ mod tests {
             without.skipped().collect::<Vec<_>>(),
             vec![Check::Cacheable]
         );
-        assert_eq!((Checks::all() - Checks::RDF).skipped().count(), 2);
+        assert_eq!((Checks::all() - Checks::RDF).skipped().count(), 3);
     }
 
     #[test]

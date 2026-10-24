@@ -1,6 +1,7 @@
-//! Parsing a declared RDF face and reading it for the two graph checks: blank
-//! nodes ([`Check::SkolemRdf`](crate::Check::SkolemRdf)) and the terms it uses
-//! ([`Check::Vocabulary`](crate::Check::Vocabulary)).
+//! Parsing a declared RDF face and reading it for the three graph checks: blank
+//! nodes ([`Check::SkolemRdf`](crate::Check::SkolemRdf)), the terms it uses
+//! ([`Check::Vocabulary`](crate::Check::Vocabulary)), and whether each literal's
+//! datatype is its property's declared range ([`Check::Datatypes`](crate::Check::Datatypes)).
 //!
 //! **This module is public on purpose.** [`parse`] + [`terms`] + [`is_defined`] are
 //! exactly what `VOCABULARY` runs, so a module can reproduce the check by hand over
@@ -25,10 +26,10 @@
 //! the module's own and temporarily undefined: registering a namespace waives every
 //! term under it forever, including the next one somebody invents.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
-use oxrdf::vocab::rdf;
+use oxrdf::vocab::{rdf, rdfs, xsd};
 use oxrdf::{NamedOrBlankNode, Term, Triple};
 use oxrdfio::{RdfFormat, RdfParser};
 
@@ -214,6 +215,123 @@ pub fn is_defined(term: &str, namespaces: &[String]) -> bool {
         return vocabulary_terms().contains(term);
     }
     is_well_known(term) || namespaces.iter().any(|ns| term.starts_with(ns.as_str()))
+}
+
+/// The XSD namespace, under which every datatype range the vocabulary declares lies.
+const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+
+/// The datatypes Turtle writes without a tag: a bare `2` is `xsd:integer`, `2.5`
+/// `xsd:decimal`, `2.5e0` `xsd:double`, `true` `xsd:boolean`, and a plain `"x"`
+/// `xsd:string`. A literal of any other datatype must be tagged (`"2"^^xsd:positiveInteger`)
+/// or it is silently one of these.
+pub const TURTLE_SHORTHAND: &[&str] = &[
+    "http://www.w3.org/2001/XMLSchema#integer",
+    "http://www.w3.org/2001/XMLSchema#decimal",
+    "http://www.w3.org/2001/XMLSchema#double",
+    "http://www.w3.org/2001/XMLSchema#boolean",
+    "http://www.w3.org/2001/XMLSchema#string",
+];
+
+/// The datatype ranges `ikigai-vocab` declares: every `ik:` property whose
+/// `rdfs:range` is an XSD datatype other than `xsd:string`, mapped to that range.
+/// These are exactly the properties `ikigai_vocab::CONTEXT` coerces to a datatype,
+/// because the context is generated from the same ranges. `xsd:string` and
+/// `rdfs:Literal` stay plain terms in the context, and an IRI range is not a
+/// literal's, so neither is here. Parsed once.
+///
+/// ```
+/// use ikigai_conformance::rdf::datatype_ranges;
+///
+/// let ranges = datatype_ranges();
+/// assert_eq!(
+///     ranges["https://ikigai-rs.dev/ns#batchAt"],
+///     "http://www.w3.org/2001/XMLSchema#positiveInteger"
+/// );
+/// assert!(!ranges.contains_key("https://ikigai-rs.dev/ns#id"), "an xsd:string range");
+/// ```
+pub fn datatype_ranges() -> &'static BTreeMap<String, String> {
+    static RANGES: OnceLock<BTreeMap<String, String>> = OnceLock::new();
+    RANGES.get_or_init(|| {
+        let triples = parse("text/turtle", ikigai_vocab::VOCABULARY.as_bytes())
+            .expect("ikigai-vocab's own vocabulary.ttl parses");
+        triples
+            .iter()
+            .filter(|t| t.predicate.as_ref() == rdfs::RANGE)
+            .filter_map(|t| match (&t.subject, &t.object) {
+                (NamedOrBlankNode::NamedNode(p), Term::NamedNode(range))
+                    if p.as_str().starts_with(ikigai_vocab::NS)
+                        && range.as_str().starts_with(XSD)
+                        && range.as_ref() != xsd::STRING =>
+                {
+                    Some((p.as_str().to_string(), range.as_str().to_string()))
+                }
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+/// One literal whose datatype is not its property's declared range.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DatatypeMismatch {
+    /// The property, a full IRI.
+    pub predicate: String,
+    /// The literal's datatype as written (for a bare Turtle number, the shorthand's).
+    pub datatype: String,
+    /// The `rdfs:range` the vocabulary declares, which the JSON-LD context coerces to.
+    pub range: String,
+}
+
+/// Every literal in `triples` whose datatype differs from the `rdfs:range`
+/// [`datatype_ranges`] declares for its property, one entry per (property, datatype)
+/// pair, sorted. Value-equal is not enough: the JSON-LD face, coerced by the context
+/// generated from the range, carries the range as its datatype, and two literals with
+/// different datatypes are different terms, so a diff of the two faces of one graph
+/// shows a difference that is not there.
+///
+/// The rule is "tag what the shorthand cannot express", not "tag everything": a bare
+/// `ik:context 8192` is `xsd:integer`, its range, and passes.
+///
+/// ```
+/// use ikigai_conformance::rdf::{datatype_mismatches, parse};
+///
+/// let face = parse(
+///     "text/turtle",
+///     b"@prefix ik: <https://ikigai-rs.dev/ns#> .\n\
+///       @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+///       <urn:llm:a> ik:context 8192 ; ik:batchAt 2 .\n\
+///       <urn:llm:b> ik:batchAt \"4\"^^xsd:positiveInteger .",
+/// )
+/// .unwrap();
+/// let found = datatype_mismatches(&face);
+/// assert_eq!(found.len(), 1);
+/// assert_eq!(found[0].predicate, "https://ikigai-rs.dev/ns#batchAt");
+/// assert_eq!(found[0].datatype, "http://www.w3.org/2001/XMLSchema#integer");
+/// assert_eq!(found[0].range, "http://www.w3.org/2001/XMLSchema#positiveInteger");
+/// ```
+pub fn datatype_mismatches(triples: &[Triple]) -> Vec<DatatypeMismatch> {
+    let ranges = datatype_ranges();
+    let mut found: BTreeMap<(String, String), DatatypeMismatch> = BTreeMap::new();
+    for t in triples {
+        let Term::Literal(literal) = &t.object else {
+            continue;
+        };
+        let Some(range) = ranges.get(t.predicate.as_str()) else {
+            continue;
+        };
+        let datatype = literal.datatype().as_str();
+        if datatype == range {
+            continue;
+        }
+        found
+            .entry((t.predicate.as_str().to_string(), datatype.to_string()))
+            .or_insert_with(|| DatatypeMismatch {
+                predicate: t.predicate.as_str().to_string(),
+                datatype: datatype.to_string(),
+                range: range.clone(),
+            });
+    }
+    found.into_values().collect()
 }
 
 #[cfg(test)]
