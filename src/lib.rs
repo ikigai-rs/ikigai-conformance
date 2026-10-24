@@ -295,9 +295,9 @@ mod suite;
 
 pub use checks::{Check, Checks};
 pub use report::{
-    Collapsed, Declarations, DeclaredSpace, EnforcedUnder, Evidence, Expected, FailsUnder,
-    FailuresSeen, Finding, Inherited, NamedOnly, OptedOut, OptedOutAt, OptedOutCheck, Probed,
-    Recomputed, RefusedBy, Report, RequiredProbe, SpaceNaming, Unprobed,
+    Collapsed, Declarations, DeclaredSpace, DeclaredVocabulary, EnforcedUnder, Evidence, Expected,
+    FailsUnder, FailuresSeen, Finding, Inherited, NamedOnly, OptedOut, OptedOutAt, OptedOutCheck,
+    Probed, Recomputed, RefusedBy, Report, RequiredProbe, SpaceNaming, Unprobed,
 };
 pub use suite::{Fixture, Suite};
 

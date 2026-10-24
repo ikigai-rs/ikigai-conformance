@@ -204,6 +204,133 @@ pub fn vocabulary_terms() -> &'static BTreeSet<String> {
     })
 }
 
+/// A vocabulary a module SHIPS — the graph defining its own terms — read as the
+/// oracle [`Suite::vocabulary`](crate::Suite::vocabulary) holds a face to: every term
+/// under the graph's namespace must be one of its subjects. The same rule
+/// [`vocabulary_terms`] applies to `ikigai-vocab`, pointed at the module's own file.
+///
+/// **The namespace is read off the subjects.** Every named subject outside `ik:` and
+/// the [`WELL_KNOWN_NAMESPACES`] is a term, and its namespace is its IRI up to and
+/// including the last `#`, else the last `/`, else the last `:`. A subject typed
+/// `owl:Ontology` is the graph's own header, not a term, and contributes no
+/// namespace (`<https://example.org/log> a owl:Ontology` would otherwise claim all of
+/// `https://example.org/`). An `ik:` subject is `ikigai-vocab`'s to define, so a
+/// module's graph that restates one neither defines nor widens anything.
+///
+/// ```
+/// use ikigai_conformance::rdf::Vocabulary;
+///
+/// let ttl = "@prefix log: <https://example.org/log#> .\n\
+///            @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n\
+///            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+///            @prefix owl: <http://www.w3.org/2002/07/owl#> .\n\
+///            <https://example.org/log> a owl:Ontology .\n\
+///            log:Entry a rdfs:Class .\n\
+///            log:level a rdf:Property .";
+/// let vocab = Vocabulary::parse(ttl).unwrap();
+/// assert_eq!(vocab.namespaces().iter().collect::<Vec<_>>(), ["https://example.org/log#"]);
+/// assert!(vocab.defines("https://example.org/log#level"));
+/// // Under the namespace and not a subject: an invented term, not a waived one.
+/// assert!(vocab.covers("https://example.org/log#levle"));
+/// assert!(!vocab.defines("https://example.org/log#levle"));
+/// assert!(!vocab.covers("https://example.org/other#x"));
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Vocabulary {
+    namespaces: BTreeSet<String>,
+    terms: BTreeSet<String>,
+}
+
+impl Vocabulary {
+    /// Read `turtle` as a vocabulary. Refused when it does not parse, or when it
+    /// defines no term outside `ik:` and the well-known namespaces — a graph that
+    /// names no namespace of its own can check nothing.
+    pub fn parse(turtle: &str) -> Result<Self, String> {
+        let triples = parse("text/turtle", turtle.as_bytes())?;
+        let headers: BTreeSet<&str> = triples
+            .iter()
+            .filter(|t| {
+                t.predicate.as_ref() == rdf::TYPE
+                    && matches!(&t.object, Term::NamedNode(n) if n.as_str() == OWL_ONTOLOGY)
+            })
+            .filter_map(|t| match &t.subject {
+                NamedOrBlankNode::NamedNode(n) => Some(n.as_str()),
+                _ => None,
+            })
+            .collect();
+        let mut terms = BTreeSet::new();
+        let mut namespaces = BTreeSet::new();
+        for t in &triples {
+            let NamedOrBlankNode::NamedNode(n) = &t.subject else {
+                continue;
+            };
+            let iri = n.as_str();
+            if headers.contains(iri) || iri.starts_with(ikigai_vocab::NS) || is_well_known(iri) {
+                continue;
+            }
+            if let Some(ns) = namespace_of(iri) {
+                namespaces.insert(ns.to_string());
+                terms.insert(iri.to_string());
+            }
+        }
+        if namespaces.is_empty() {
+            return Err(
+                "defines no term outside `ik:` and the well-known namespaces, so it \
+                        names no namespace of its own to hold a face to"
+                    .to_string(),
+            );
+        }
+        Ok(Vocabulary { namespaces, terms })
+    }
+
+    /// The namespaces read off the graph's subjects, sorted.
+    pub fn namespaces(&self) -> &BTreeSet<String> {
+        &self.namespaces
+    }
+
+    /// The terms the graph defines: its subjects under [`namespaces`](Self::namespaces).
+    pub fn terms(&self) -> &BTreeSet<String> {
+        &self.terms
+    }
+
+    /// The namespace of this vocabulary `term` lies under, if any — the longest, so
+    /// `…/log#` wins over `…/` when a graph has subjects in both.
+    pub fn covering(&self, term: &str) -> Option<&str> {
+        self.namespaces
+            .iter()
+            .filter(|ns| term.starts_with(ns.as_str()))
+            .max_by_key(|ns| ns.len())
+            .map(String::as_str)
+    }
+
+    /// Whether `term` lies under one of this vocabulary's namespaces — the scope it
+    /// answers for, defined or not.
+    pub fn covers(&self, term: &str) -> bool {
+        self.covering(term).is_some()
+    }
+
+    /// Whether `term` is one of the graph's subjects.
+    pub fn defines(&self, term: &str) -> bool {
+        self.terms.contains(term)
+    }
+}
+
+const OWL_ONTOLOGY: &str = "http://www.w3.org/2002/07/owl#Ontology";
+
+/// `iri` up to and including its last `#`, else its last `/`, else its last `:`;
+/// `None` when that leaves nothing after the scheme (`urn:`, `https://`).
+fn namespace_of(iri: &str) -> Option<&str> {
+    let cut = iri
+        .rfind('#')
+        .or_else(|| iri.rfind('/'))
+        .or_else(|| iri.rfind(':'))?;
+    let ns = &iri[..=cut];
+    let scheme_only = ns
+        .find(':')
+        .is_some_and(|c| ns[c + 1..].trim_matches('/').is_empty());
+    (!scheme_only).then_some(ns)
+}
+
 /// Whether `term` is accounted for: defined in `ikigai-vocab`, under a well-known
 /// namespace, or under one of the module's registered `namespaces`.
 ///
@@ -238,6 +365,34 @@ mod tests {
         assert!(!is_defined(&format!("{}invented", ikigai_vocab::NS), &[]));
         assert!(is_defined("urn:my:ns#x", &["urn:my:ns#".to_string()]));
         assert!(!is_defined("urn:my:ns#x", &[]));
+    }
+
+    #[test]
+    fn a_vocabulary_namespace_is_cut_at_the_last_hash_slash_or_colon() {
+        assert_eq!(
+            namespace_of("https://example.org/log#level"),
+            Some("https://example.org/log#")
+        );
+        assert_eq!(
+            namespace_of("https://example.org/log/level"),
+            Some("https://example.org/log/")
+        );
+        assert_eq!(
+            namespace_of("urn:example:ns:level"),
+            Some("urn:example:ns:")
+        );
+        assert_eq!(
+            namespace_of("https://example.org"),
+            None,
+            "nothing past the scheme"
+        );
+        assert_eq!(namespace_of("urn:x"), None);
+        // Subjects in two namespaces: each term is judged by the longer one.
+        let v = Vocabulary::parse("<https://e.org/a#x> <urn:p> 1 .\n<https://e.org/b> <urn:p> 1 .")
+            .unwrap();
+        assert_eq!(v.covering("https://e.org/a#y"), Some("https://e.org/a#"));
+        assert_eq!(v.covering("https://e.org/c"), Some("https://e.org/"));
+        assert!(v.defines("https://e.org/b") && !v.defines("https://e.org/c"));
     }
 
     #[test]
