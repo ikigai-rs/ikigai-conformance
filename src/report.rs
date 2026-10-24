@@ -238,6 +238,18 @@ pub struct DeclaredSpace {
     pub opaque: usize,
 }
 
+/// A vocabulary the module ships, as [`Suite::vocabulary`](crate::Suite::vocabulary)
+/// read it: the namespaces its subjects name and how many terms it defines under
+/// them. Printed `module vocabulary: https://example.org/log# (12 terms)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DeclaredVocabulary {
+    /// The namespaces read off the graph's subjects, sorted.
+    pub namespaces: Vec<String>,
+    /// How many terms the graph defines under them.
+    pub terms: usize,
+}
+
 /// One face that was reached and served — positive evidence of what a walk
 /// actually looked at.
 ///
@@ -856,6 +868,10 @@ pub struct Declarations {
     pub live: Vec<String>,
     /// The namespaces the module registered as its own for [`Check::Vocabulary`].
     pub namespaces: Vec<String>,
+    /// The vocabularies the module ships, held exactly by [`Check::Vocabulary`]
+    /// ([`Suite::vocabulary`](crate::Suite::vocabulary)). One that did not parse is a
+    /// finding and is not listed here.
+    pub vocabularies: Vec<DeclaredVocabulary>,
     /// The fixtures the module supplied, printed one per line (`fixture: file
     /// source path="README.md"`) so a reader can tell which inputs a walk ran over.
     pub fixtures: Vec<Fixture>,
@@ -1550,6 +1566,15 @@ impl fmt::Display for Report {
         if !declared.namespaces.is_empty() {
             writeln!(f, "module namespaces: {}", declared.namespaces.join(" "))?;
         }
+        for v in &declared.vocabularies {
+            writeln!(
+                f,
+                "module vocabulary: {} ({} term{})",
+                v.namespaces.join(" "),
+                v.terms,
+                if v.terms == 1 { "" } else { "s" }
+            )?;
+        }
         for fixture in &declared.fixtures {
             writeln!(f, "fixture: {fixture}")?;
         }
@@ -1786,6 +1811,7 @@ mod tests {
                 cacheable: vec![id.into()],
                 live: vec![id.into()],
                 namespaces: vec![],
+                vocabularies: vec![],
                 fixtures: vec![Fixture::new(id, Verb::Source)],
                 spaces: vec![],
                 evidence: Evidence {
@@ -1896,6 +1922,10 @@ mod tests {
                 cacheable: vec!["to-upper".into()],
                 live: vec!["clock-now".into()],
                 namespaces: vec!["urn:example:ns#".into()],
+                vocabularies: vec![DeclaredVocabulary {
+                    namespaces: vec!["https://example.org/log#".into()],
+                    terms: 12,
+                }],
                 fixtures: vec![Fixture::new("file", Verb::Source)
                     .binding("path", "README.md")
                     .arg(

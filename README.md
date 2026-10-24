@@ -63,7 +63,7 @@ pointing at the check.
 | `AUTHORITY` | declared = enforced | the fourth cell of `ENFORCED`'s own probe: a `Sink` or a `Delete` that declares no `requires` and **mutated anyway** under a capability holding no grants. Nothing gates the write, so nothing can be withheld — a party that should read and report cannot be given read alone, because read is all there is. A `Source` is not in scope (a public read is a decision a module makes); a mutating action refused for some *other* reason is recorded as `unprobed`, never as a finding, because what an ungranted caller could do through it was not observed |
 | `OUTPUTS` | faces are declared | the bare media type the action serves with its minimal inputs (`;charset=` and other parameters stripped, no `as=`) is one of its declared `outputs`. A wrong declaration hides a face from every consumer that reads outputs — `SKOLEM-RDF` and `VOCABULARY` included, which filter the declaration for RDF faces before probing; linkeddata's `sparql-construct` declared only `application/sparql-results+json` over Turtle for its whole life and the RDF checks saw nothing. What the check cannot observe (a mutating action never fired under root, a failed minimal resolution, a caller's `as=` label) is printed as `unprobed`, never as a finding. A **pass-through** (core 0.1.105's `output_from`, ledger #45/#301) reads `outputs` as "at least these": `output_from(Input("src"))` holds the served type to the type `src`'s resource serves (the walk resolves it), and `output_from(Origin)` (a type decided outside the kernel, an HTTP origin's) is printed as a declared pass-through, never a finding. Delete the `Check::Outputs` waiver a pass-through used to need |
 | `SKOLEM-RDF` | skolemize; no blank nodes | every declared RDF face (`text/turtle`, `application/ld+json`, `application/rdf+xml`, N-Triples, N-Quads, TriG) resolves with the smallest inputs its ArgSpecs allow, parses, and has no blank node |
-| `VOCABULARY` | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known namespace (rdf, rdfs, xsd, owl, dcterms, Dublin Core Elements 1.1, foaf, schema, prov, ical, skos, sh, and the W3C Web Annotation `oa:`) or one the module registers. Because it parses, it also reports a mislabeled or malformed face — under its own name when `SKOLEM-RDF` is not selected, so `VOCABULARY` alone proves a hand-written `@prefix` line is well-formed (a face that does not resolve at all is `RESOLVES`'s) |
+| `VOCABULARY` | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known namespace (rdf, rdfs, xsd, owl, dcterms, Dublin Core Elements 1.1, foaf, schema, prov, ical, skos, sh, and the W3C Web Annotation `oa:`) or one the module registers (`Suite::namespace`, a waiver). A module that ships the graph defining its own terms passes it to `Suite::vocabulary`, and every term under that graph's namespace must be one of its subjects — the same rule `ik:` is held to against `ikigai-vocab`. Because it parses, it also reports a mislabeled or malformed face — under its own name when `SKOLEM-RDF` is not selected, so `VOCABULARY` alone proves a hand-written `@prefix` line is well-formed (a face that does not resolve at all is `RESOLVES`'s) |
 | `CACHEABLE` | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and — if it never expires (`Expiry::Never`; an `Expiry::At` deadline is a bound) — carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; an endpoint declared pure carries no thread but its own name and what it read; a result declared live (`Suite::live`) is `Expiry::Always` |
 | `PIPELINE` | pipeline citizenship | a mutating action with by-value inputs declares `content` (where a pipe's value and a `sink`'s body arrive), and on a `Sink` whether or not any of them is required: a Sink whose inputs are all optional is the one a pipe alone most often drives (0.8.4; a `Delete` with only optional inputs, a `reason`, is not held to it); an action declaring `content` reads it. A read whose only intake is an input group with no `pipe` member is printed as a `pipeline: … is named-only` line, information rather than a finding: no pipe can reach it (`InputGroup::pipe` names the member a pipe fills). Where `content` is a member of an exactly-one group, the pipeline probe sends it INSTEAD of the named alternative, as the engine routes a pipe |
 | `REQUIRED` | ArgSpecs from day one | each input an action declares **required**, by value and with no default, is dropped from the call the walk resolved, one at a time, and the call must then be refused with a typed `MissingArgument` or `InvalidArgument`. A call that **succeeds** without it is "declared required, actually optional": a false negative in the selection funnel, because `urn:kernel:validate` and an MCP tool schema both refuse a valid call that omits it. Five adopters wrote this check by hand (http, runbook, cms, secret, sexpr shipped the defect). A refusal of another kind is a finding too (an agent cannot tell its own omission from a failure of the endpoint), unless it is transient. `Source` and `Exists` by default; `Sink` and `Delete` only under `Suite::required_on_mutating()`, because each drop is a firing and a wrongly accepted one has mutated. A call that did not resolve in the first place is listed as `unprobed`. Since 0.9.0 (core 0.1.105) it also probes each **input group**: every member dropped, each other member alone, and a second member beside the first where the group allows at most one. Core's one checker (`ActionSpec::check`, the rules behind `urn:kernel:validate`) says whether the contract refuses each call, and the endpoint must agree: a call the contract refuses gets a typed refusal, and a call it accepts is not refused as missing an argument. The second is the false green ledger #15 removed from the pre-flight; the first is a group stricter than the endpoint (`exactly_one` where both together are served: `at_least_one`). The minimal call fills each exactly-one or at-least-one group with its `pipe` member (else its first), and every input a given one `needs` |
@@ -314,7 +314,8 @@ Suite::new()
     .opt_out("email-send", Some(Verb::Sink), "sends real mail")
     .opt_out_at("urn:orgfile:{path}", None, "jailed to a configured dir")
     .opt_out_check("review", Check::Vocabulary, "ik:quote lands in vocab 0.1.70")
-    .namespace("https://example.org/cms#")   // a vocabulary this module serves
+    .namespace("https://example.org/cms#")   // documented as this module's own: waived
+    .vocabulary(ikigai_log::VOCABULARY_TTL)  // the graph this module ships: held to it
     .pure("wc")                              // a pure function: no thread but its own name
     .cacheable("catalog")                    // marks .cacheable(): hold it to that
     .live("secret")                          // uncacheable by decision: hold it to that
@@ -395,6 +396,27 @@ goes red in both directions — a new invented term fails, and so does the day t
 missing terms land, which makes the waiver self-destructing. That is strictly
 better than `Suite::namespace` for a module's own namespace: a registration waives
 every term under it forever, including the next one somebody invents.
+
+**When the module OWNS the answer, it need not wait for anyone's release:
+`Suite::vocabulary(turtle)`** (ledger #344). Pass the graph the module ships
+(`ikigai_log::VOCABULARY_TTL`, say) and every term a probed face uses under that
+graph's namespace must be one of its subjects — a typo, or a term added to a face and
+not to the graph, is a `VOCABULARY` finding naming the namespace. It is what ikigai-log
+wrote by hand (`the_faces_emit_only_terms_the_vocabulary_defines`), and what
+`rdf::vocabulary_terms` does for `ik:`. The namespace is read off the graph's subjects
+(cut at the last `#`, else `/`, else `:`; an `owl:Ontology` header and `ik:` or
+well-known subjects name none), and the report prints it: `module vocabulary:
+https://example.org/log# (12 terms)`. A term under it is judged by the graph even when
+a `Suite::namespace` also covers it, which leaves that registration idle. A graph that
+does not parse, or defines no term of its own, is a `VOCABULARY` finding at `(suite)`;
+one no probed face speaks is a `DECLARATIONS` finding. `rdf::Vocabulary` is the same
+reading, public, for a hand test.
+
+**What `Suite::namespace` means by "the module's own" is a claim, not a check.** The
+suite dereferences nothing: the module DOCUMENTS the namespace as its own, in a graph
+it serves, a published vocabulary, or README prose (ikigai-sign's `sig:` is prose
+only, so it registers the prefix; it can move to `Suite::vocabulary` once it serves a
+graph). A namespace a module merely speaks is someone else's.
 
 **What a walk fires, under root** (or as the caller a `Fixture::capability` names
 for that action) — the footprint a fixture author can count on.
@@ -812,6 +834,7 @@ ran. The check covers every declaration, not that one:
 | `required_on_mutating` when `REQUIRED` is unselected or no `Sink`/`Delete` declares a required by-value input (endpoint `(suite)`) | `` `Suite::required_on_mutating` reached nothing: …`` |
 | an `opt_out_check` for a check that could not have run for that id anyway | `waived SKOLEM-RDF … but that check could not have run for it anyway: it declares no RDF face` |
 | a `namespace` that accounted for no term in any probed face (endpoint `(suite)`) | `registered namespace … accounted for no term: …` |
+| a `vocabulary` under whose namespace no probed face used a term (endpoint `(suite)`) | `` the vocabulary for `…` (`Suite::vocabulary`) held no term to its definition: …`` |
 
 The rule is structural — *could this declaration have applied?* — never "did it
 silence a finding today": a standing waiver that happens to be green is doing its

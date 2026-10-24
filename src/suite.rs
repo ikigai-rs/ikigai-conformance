@@ -15,9 +15,9 @@ use ikigai_core::{
 use crate::checks::{Check, Checks};
 use crate::rdf;
 use crate::report::{
-    Collapsed, Declarations, DeclaredSpace, EnforcedUnder, Evidence, FailsUnder, FailuresSeen,
-    Finding, Inherited, NamedOnly, OptedOut, OptedOutAt, OptedOutCheck, Probed, Recomputed,
-    RefusedBy, Report, RequiredProbe, SpaceNaming, Unprobed,
+    Collapsed, Declarations, DeclaredSpace, DeclaredVocabulary, EnforcedUnder, Evidence,
+    FailsUnder, FailuresSeen, Finding, Inherited, NamedOnly, OptedOut, OptedOutAt, OptedOutCheck,
+    Probed, Recomputed, RefusedBy, Report, RequiredProbe, SpaceNaming, Unprobed,
 };
 
 /// The kernel's own operations are listed by [`Kernel::entries`] ahead of the root
@@ -483,6 +483,9 @@ struct Coverage {
     cacheable_unresolved: BTreeSet<String>,
     /// Registered namespaces that accounted for at least one term in a probed face.
     namespaces_used: BTreeSet<String>,
+    /// The [`Suite::vocabulary`] graphs (by index) under whose namespace at least one
+    /// term in a probed face lay, defined or not.
+    vocabularies_used: BTreeSet<usize>,
     /// Whether any RDF face was probed at all (an unused namespace means something
     /// different when nothing was parsed).
     faces_probed: bool,
@@ -690,6 +693,9 @@ pub struct Suite {
     opt_outs_at: Vec<OptOutAt>,
     opt_out_checks: Vec<OptOutCheck>,
     namespaces: Vec<String>,
+    /// What [`Suite::vocabulary`] was given, read once: a graph that does not parse
+    /// is kept as its reason, and reported rather than dropped.
+    vocabularies: Vec<Result<rdf::Vocabulary, String>>,
     pure: Vec<String>,
     cacheable: Vec<String>,
     live: Vec<String>,
@@ -723,6 +729,7 @@ impl Suite {
             opt_outs_at: Vec::new(),
             opt_out_checks: Vec::new(),
             namespaces: Vec::new(),
+            vocabularies: Vec::new(),
             pure: Vec::new(),
             cacheable: Vec::new(),
             live: Vec::new(),
@@ -1080,9 +1087,19 @@ impl Suite {
     }
 
     /// Register a namespace prefix as the module's own, so terms under it are not
-    /// reported by [`Check::Vocabulary`]. Register only a namespace the module
-    /// DEFINES (serves a vocabulary for); an undefined one is what the check exists
-    /// to catch.
+    /// reported by [`Check::Vocabulary`] — any term, defined or not, now or in any
+    /// later release.
+    ///
+    /// **What counts as the module's own is a claim nothing here can check.** The
+    /// suite does not dereference the prefix or read a definition: "the module's own"
+    /// means the module DOCUMENTS the namespace as its own — a graph it serves, a
+    /// published vocabulary, or prose in its README (ikigai-sign's `sig:` is the prose
+    /// case). A namespace it merely speaks belongs to someone else, and an undefined
+    /// one is what the check exists to catch.
+    ///
+    /// **A module that ships the graph defining its terms wants
+    /// [`vocabulary`](Self::vocabulary) instead**, which holds every term under the
+    /// graph's namespace to the graph's subjects rather than waiving them.
     ///
     /// A registration that accounted for no term in any probed face is reported by
     /// [`Check::Declarations`]: it waives every term under that prefix forever —
@@ -1091,6 +1108,63 @@ impl Suite {
     /// having no id.
     pub fn namespace(mut self, prefix: impl Into<String>) -> Self {
         self.namespaces.push(prefix.into());
+        self
+    }
+
+    /// Hold the module's own terms to the vocabulary it SHIPS: every term a probed
+    /// face uses under the namespace of `turtle` must be one of that graph's subjects
+    /// (ledger #344). Where [`namespace`](Self::namespace) waives a prefix, this
+    /// checks it exactly — the rule [`Check::Vocabulary`] already applies to `ik:`
+    /// against `ikigai-vocab`, pointed at the module's own file, so a typo or a term
+    /// added to a face and not to the graph is a finding.
+    ///
+    /// The namespace is read off the graph's subjects ([`rdf::Vocabulary`] says how);
+    /// the report prints it with the term count (`module vocabulary: … (12 terms)`). A
+    /// term under it is judged by the graph alone, even when a registered
+    /// [`namespace`](Self::namespace) also covers it — which leaves that registration
+    /// accounting for nothing, and [`Check::Declarations`] says so.
+    ///
+    /// A graph that does not parse, or defines no term of its own, is a
+    /// [`Check::Vocabulary`] finding at `(suite)`: the module ships it, so it is the
+    /// module's defect. One under whose namespace no probed face used a term is a
+    /// [`Check::Declarations`] finding, as an unused `namespace` is.
+    ///
+    /// ```
+    /// use ikigai_conformance::{Check, Suite};
+    /// use ikigai_core::{Description, EndpointSpace, Exact, FnEndpoint, Invocation, Kernel};
+    /// use ikigai_core::{ReprType, Representation, Verb};
+    /// use std::sync::Arc;
+    ///
+    /// // What `ikigai_log::VOCABULARY_TTL` is to ikigai-log: the module's own graph.
+    /// const VOCABULARY_TTL: &str = "@prefix log: <https://example.org/log#> .\n\
+    ///     @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+    ///     log:Entry a rdfs:Class .\n\
+    ///     log:level rdfs:domain log:Entry .";
+    ///
+    /// let entries = FnEndpoint::new("entries", |_inv: &Invocation<'_>| {
+    ///     Ok(Representation::new(
+    ///         ReprType::new("text/turtle"),
+    ///         b"@prefix log: <https://example.org/log#> .\n\
+    ///           <urn:log:1> a log:Entry ; log:levle \"warn\" ." as &[u8],
+    ///     ))
+    /// })
+    /// .with_description(Description::new("entries").verb(Verb::Source).output("text/turtle"));
+    /// let kernel = Kernel::new(Arc::new(
+    ///     EndpointSpace::new().bind(Exact::new("urn:log:entries"), entries),
+    /// ));
+    ///
+    /// let report = Suite::new().vocabulary(VOCABULARY_TTL).run_blocking(&kernel);
+    /// let vocab: Vec<_> = report.of(Check::Vocabulary).collect();
+    /// assert_eq!(vocab.len(), 1, "{report}");
+    /// assert!(vocab[0].detail.contains("`https://example.org/log#levle`"));
+    ///
+    /// // `namespace` would have waived the typo with the rest of the prefix.
+    /// let waived = Suite::new().namespace("https://example.org/log#").run_blocking(&kernel);
+    /// assert_eq!(waived.of(Check::Vocabulary).count(), 0);
+    /// ```
+    pub fn vocabulary(mut self, turtle: impl AsRef<str>) -> Self {
+        self.vocabularies
+            .push(rdf::Vocabulary::parse(turtle.as_ref()));
         self
     }
 
@@ -1600,6 +1674,15 @@ impl Suite {
                 cacheable: self.cacheable.clone(),
                 live: self.live.clone(),
                 namespaces: self.namespaces.clone(),
+                vocabularies: self
+                    .vocabularies
+                    .iter()
+                    .flatten()
+                    .map(|v| DeclaredVocabulary {
+                        namespaces: v.namespaces().iter().cloned().collect(),
+                        terms: v.terms().len(),
+                    })
+                    .collect(),
                 fixtures: self.fixtures.clone(),
                 spaces: self
                     .spaces
@@ -2237,6 +2320,7 @@ impl Suite {
             );
         }
         self.namespace_declarations(coverage, report);
+        self.vocabulary_declarations(coverage, report);
         self.space_declarations(report);
         self.fixture_declarations(coverage, report);
         self.enforced_under_declarations(coverage, report);
@@ -2491,6 +2575,50 @@ impl Suite {
                  A registration waives every term under it forever, so an unused one is scope \
                  nobody needs — drop it, or narrow it to the prefix the module really serves"
             ),
+            );
+        }
+    }
+
+    fn vocabulary_declarations(&self, coverage: &Coverage, report: &mut Report) {
+        for (i, vocabulary) in self.vocabularies.iter().enumerate() {
+            let vocabulary = match vocabulary {
+                Ok(v) => v,
+                Err(e) => {
+                    // The module ships this graph: one that cannot be read is its
+                    // defect, not an idle declaration, and it checked nothing.
+                    let detail = format!(
+                        "the vocabulary passed to `Suite::vocabulary` {e}, so no face was held \
+                         to it"
+                    );
+                    if self.checks.contains(Check::Vocabulary) {
+                        report
+                            .findings
+                            .push(Finding::new(SUITE, None, Check::Vocabulary, detail));
+                    } else {
+                        self.inert(report, SUITE, detail);
+                    }
+                    continue;
+                }
+            };
+            if coverage.vocabularies_used.contains(&i) {
+                continue;
+            }
+            let why = if !self.checks.contains(Check::Vocabulary) {
+                "VOCABULARY is not selected (`Suite::checks`)"
+            } else if !coverage.faces_probed {
+                "no RDF face was probed at all"
+            } else {
+                "no term in any probed face lies under its namespace"
+            };
+            let shown: Vec<&str> = vocabulary.namespaces().iter().map(String::as_str).collect();
+            self.inert(
+                report,
+                SUITE,
+                format!(
+                    "the vocabulary for `{}` (`Suite::vocabulary`) held no term to its \
+                     definition: {why}. Drop it, or probe the face that speaks it",
+                    shown.join("` `")
+                ),
             );
         }
     }
@@ -4415,6 +4543,32 @@ impl<'a> Action<'a> {
                     if rdf::is_defined(&term, &[]) {
                         continue;
                     }
+                    // A vocabulary the module ships answers for its namespace
+                    // exactly, ahead of any registration that would waive it.
+                    let shipped = self
+                        .suite
+                        .vocabularies
+                        .iter()
+                        .enumerate()
+                        .find_map(|(i, v)| {
+                            let v = v.as_ref().ok()?;
+                            Some((i, v, v.covering(&term)?))
+                        });
+                    if let Some((i, v, ns)) = shipped {
+                        coverage.vocabularies_used.insert(i);
+                        if !v.defines(&term) {
+                            report.findings.push(self.finding(
+                                Check::Vocabulary,
+                                format!(
+                                    "the `{face}` face uses `{term}`, which is under `{ns}`, the \
+                                     namespace of the vocabulary the module ships \
+                                     (`Suite::vocabulary`), and that graph does not define it: \
+                                     add it to the vocabulary, or fix the term"
+                                ),
+                            ));
+                        }
+                        continue;
+                    }
                     // WHICH registered namespace accounted for it, not merely
                     // whether one did: a namespace that accounts for nothing is a
                     // standing waiver nobody needs, and DECLARATIONS says so.
@@ -4437,7 +4591,8 @@ impl<'a> Action<'a> {
                                     "the `{face}` face uses `{term}`, which ikigai-vocab does not \
                                  define and no well-known or registered namespace covers: an \
                                  invented term with no definition (define it in the vocabulary, \
-                                 or `Suite::namespace` one the module serves)"
+                                 or `Suite::vocabulary` the graph the module ships, or `Suite::namespace` one it \
+                                 documents as its own)"
                                 ),
                             ));
                         }

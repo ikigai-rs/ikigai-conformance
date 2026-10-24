@@ -577,6 +577,123 @@ fn vocabulary_catches_invented_terms_and_honors_registered_namespaces() {
         .contains("module namespaces: urn:example:ns#"));
 }
 
+/// The graph `invented_terms`' module would ship for `mine:`: it defines `Widget`
+/// and not `size`.
+const MINE_TTL: &str = "@prefix mine: <urn:example:ns#> .\n\
+     @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n\
+     @prefix owl: <http://www.w3.org/2002/07/owl#> .\n\
+     <urn:example:ns> a owl:Ontology .\n\
+     mine:Widget a rdfs:Class ; rdfs:label \"a widget\" .\n\
+     mine:colour rdfs:domain mine:Widget .";
+
+/// Ledger #344: a module that SHIPS the graph defining its terms was left with
+/// `Suite::namespace`, which waives every term under the prefix, the one its graph
+/// does not define included. `Suite::vocabulary` holds them to the graph.
+#[test]
+fn vocabulary_holds_a_shipped_namespace_to_its_graph_where_namespace_waives_it() {
+    // The waiver: `mine:size` is in no graph, and nothing says so.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:invented"), invented_terms());
+    let waived = Suite::new()
+        .namespace("urn:example:ns#")
+        .run_blocking(&kernel(space));
+    assert!(
+        !only(&waived, Check::Vocabulary)
+            .iter()
+            .any(|d| d.contains("ns#size")),
+        "{waived}"
+    );
+
+    // The exact check: `mine:size` is a finding, `mine:Widget` is not, and the
+    // invented `ik:` term is still `ikigai-vocab`'s.
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:invented"), invented_terms());
+    let report = Suite::new()
+        .vocabulary(MINE_TTL)
+        .run_blocking(&kernel(space));
+    let details = only(&report, Check::Vocabulary);
+    assert_eq!(details.len(), 2, "{report}");
+    assert!(details.iter().any(|d| d.contains("ns#madeUp")), "{report}");
+    let size = details
+        .iter()
+        .find(|d| d.contains("`urn:example:ns#size`"))
+        .unwrap_or_else(|| panic!("{report}"));
+    assert!(size.contains("`Suite::vocabulary`"), "{size}");
+    assert!(size.contains("under `urn:example:ns#`"), "{size}");
+    assert!(!details.iter().any(|d| d.contains("Widget")), "{report}");
+    assert!(
+        report.of(Check::Declarations).next().is_none(),
+        "a vocabulary that judged a term is not idle:\n{report}"
+    );
+    // The ontology header is not a term and widened nothing to `urn:example:`.
+    assert_eq!(report.declared.vocabularies.len(), 1);
+    assert_eq!(
+        report.declared.vocabularies[0].namespaces,
+        ["urn:example:ns#"]
+    );
+    assert_eq!(report.declared.vocabularies[0].terms, 2);
+    assert!(
+        report
+            .to_string()
+            .contains("module vocabulary: urn:example:ns# (2 terms)"),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_vocabulary_judges_its_namespace_ahead_of_a_registration_which_goes_idle() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:invented"), invented_terms());
+    let report = Suite::new()
+        .namespace("urn:example:ns#")
+        .vocabulary(MINE_TTL)
+        .run_blocking(&kernel(space));
+    assert_caught(&report, Check::Vocabulary, "`urn:example:ns#size`");
+    assert_caught(
+        &report,
+        Check::Declarations,
+        "registered namespace `urn:example:ns#` (`Suite::namespace`) accounted for no term",
+    );
+}
+
+#[test]
+fn a_vocabulary_no_face_speaks_is_idle_and_one_that_cannot_be_read_is_a_finding() {
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:invented"), invented_terms());
+    let report = Suite::new()
+        .namespace("urn:example:ns#")
+        .vocabulary("@prefix x: <https://example.com/other#> .\nx:Thing x:label \"t\" .")
+        .run_blocking(&kernel(space));
+    assert_caught(
+        &report,
+        Check::Declarations,
+        "the vocabulary for `https://example.com/other#` (`Suite::vocabulary`) held no term",
+    );
+    assert!(
+        report
+            .of(Check::Declarations)
+            .all(|f| f.endpoint == "(suite)"),
+        "{report}"
+    );
+
+    for (ttl, why) in [
+        ("@prefix x: <urn:x#> . x:a x:b ", "does not parse"),
+        (
+            "@prefix ik: <https://ikigai-rs.dev/ns#> .\nik:Endpoint ik:id \"x\" .",
+            "defines no term outside `ik:`",
+        ),
+    ] {
+        let space = EndpointSpace::new().bind(Exact::new("urn:example:invented"), invented_terms());
+        let report = Suite::new()
+            .namespace("urn:example:ns#")
+            .vocabulary(ttl)
+            .run_blocking(&kernel(space));
+        let suite: Vec<&Finding> = report
+            .of(Check::Vocabulary)
+            .filter(|f| f.endpoint == "(suite)")
+            .collect();
+        assert_eq!(suite.len(), 1, "{report}");
+        assert!(suite[0].detail.contains(why), "{report}");
+        assert!(report.declared.vocabularies.is_empty(), "{report}");
+    }
+}
+
 /// Ledger #343: the W3C Web Annotation vocabulary (`oa:`, what ikigai-browse's
 /// annotation overlay speaks) and Dublin Core Elements 1.1 (`dc:`, what a Zotero
 /// export speaks) are published standards, not invented terms. One seeded annotation
