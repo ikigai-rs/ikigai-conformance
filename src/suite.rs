@@ -2521,10 +2521,14 @@ impl Suite {
                  default ({}; `Sink` and `Delete` only under `Suite::required_on_mutating`)",
                 verb_list(&coverage.verbs_of(id))
             )),
-            Check::SkolemRdf | Check::Vocabulary if !coverage.rdf_faces.contains(id) => Some(
-                "it declares no RDF face, and the graph checks probe declared RDF outputs only"
-                    .to_string(),
-            ),
+            Check::SkolemRdf | Check::Vocabulary | Check::Datatypes
+                if !coverage.rdf_faces.contains(id) =>
+            {
+                Some(
+                    "it declares no RDF face, and the graph checks probe declared RDF outputs only"
+                        .to_string(),
+                )
+            }
             _ => None,
         }
     }
@@ -4011,7 +4015,7 @@ impl<'a> Action<'a> {
         match check {
             Check::Enforced => self.enforced(&mut scratch).await,
             Check::Authority => self.authority(&mut scratch).await,
-            Check::SkolemRdf | Check::Vocabulary => {
+            Check::SkolemRdf | Check::Vocabulary | Check::Datatypes => {
                 self.rdf_faces(&mut scratch, &mut coverage).await
             }
             Check::Cacheable => self.cacheable(&mut scratch, &mut coverage).await,
@@ -4442,21 +4446,24 @@ impl<'a> Action<'a> {
         }
     }
 
-    // ----- SKOLEM-RDF + VOCABULARY --------------------------------------------
+    // ----- SKOLEM-RDF + VOCABULARY + DATATYPES ---------------------------------
 
     async fn rdf_faces(&mut self, report: &mut Report, coverage: &mut Coverage) {
         let skolem = self.runs(Check::SkolemRdf);
         let vocab = self.runs(Check::Vocabulary);
-        if !skolem && !vocab {
+        let datatypes = self.runs(Check::Datatypes);
+        if !skolem && !vocab && !datatypes {
             return;
         }
         // Failures of the face itself (unresolvable, not RDF, unparseable) are
-        // SkolemRdf's when it runs, Vocabulary's otherwise — a report never loses
-        // them to the selection.
+        // SkolemRdf's when it runs, Vocabulary's next, Datatypes' otherwise — a
+        // report never loses them to the selection.
         let face_check = if skolem {
             Check::SkolemRdf
-        } else {
+        } else if vocab {
             Check::Vocabulary
+        } else {
+            Check::Datatypes
         };
         let faces: Vec<String> = self
             .spec
@@ -4597,6 +4604,34 @@ impl<'a> Action<'a> {
                             ));
                         }
                     }
+                }
+            }
+            if datatypes {
+                for m in rdf::datatype_mismatches(&triples) {
+                    let short = |iri: &str| {
+                        iri.replace(ikigai_vocab::NS, "ik:")
+                            .replace("http://www.w3.org/2001/XMLSchema#", "xsd:")
+                    };
+                    let shorthand = rdf::TURTLE_SHORTHAND.contains(&m.datatype.as_str());
+                    report.findings.push(self.finding(
+                        Check::Datatypes,
+                        format!(
+                            "the `{face}` face writes `{}` as `{}`, but its rdfs:range is `{}`, \
+                             the datatype ikigai-vocab's JSON-LD context coerces it to: \
+                             value-equal, not term-equal, so the two faces of one graph diff \
+                             where nothing differs. Tag it `^^{}`{}",
+                            short(&m.predicate),
+                            short(&m.datatype),
+                            short(&m.range),
+                            short(&m.range),
+                            if shorthand {
+                                " (an untagged Turtle literal can only be xsd:integer, \
+                                 xsd:decimal, xsd:double, xsd:boolean or xsd:string)"
+                            } else {
+                                ""
+                            }
+                        ),
+                    ));
                 }
             }
         }
