@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use ikigai_core::{
     space_iri, ActionSpec, ArgRef, ArgSpec, Arguments, Capability, Description, Error, Expiry,
     FailureClass, GroupKind, InputGroup, InputSource, Iri, Kernel, OutputFrom, ProposedArgs,
-    Representation, Request, Space, SpaceEntry, SpaceKind, Thread, Topology, TraceEvent, Tracer,
-    UriTemplate, Verb, DENIED_NOTE, FAILED_NOTE, SPACE_PREFIX,
+    Representation, Request, SealOwner, Space, SpaceEntry, SpaceKind, Thread, Topology, TraceEvent,
+    Tracer, UriTemplate, Verb, DENIED_NOTE, FAILED_NOTE, SPACE_PREFIX,
 };
 
 use crate::checks::{Check, Checks};
@@ -20,10 +20,13 @@ use crate::report::{
     Probed, Recomputed, RefusedBy, Report, RequiredProbe, SpaceNaming, Unprobed,
 };
 
-/// The kernel's own operations are listed by [`Kernel::entries`] ahead of the root
-/// space's bindings; they are core's, not the module's, so the walk skips them
-/// unless asked ([`Suite::include_kernel_ops`]).
-const KERNEL_NS: &str = "urn:kernel:";
+/// Whether an entry belongs to core, according to the kernel under test. Host
+/// and level seals protect module endpoints too; those must still be walked.
+fn core_owned(pattern: &str, seals: &[(String, SealOwner)]) -> bool {
+    seals
+        .iter()
+        .any(|(prefix, owner)| *owner == SealOwner::Core && pattern.starts_with(prefix))
+}
 
 /// The XSD namespace, for deriving a plausible scalar from a declared `class`.
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
@@ -1367,7 +1370,7 @@ impl Suite {
         self
     }
 
-    /// Walk the kernel's own `urn:kernel:*` operations too. They are core's
+    /// Walk operations under every prefix the kernel seals for core too. They are core's
     /// endpoints, not the module's — off by default so a module's report is about
     /// the module.
     ///
@@ -1742,12 +1745,13 @@ impl Suite {
         let mut listed: Vec<String> = Vec::new();
         // The kernel's own operations by what they are called HERE, so a mount that
         // renamed a peer's can still be told apart (ledger #335).
-        let ops = KernelOps::of(kernel, &entries);
+        let seals = kernel.sealed();
+        let ops = KernelOps::of(kernel, &entries, &seals);
         // Mounted bindings that describe with no action: a peer that did not answer
         // with a contract, reported once per mount after the walk (ledger #334).
         let mut contractless: Vec<Contractless> = Vec::new();
         for entry in entries {
-            if entry.pattern.starts_with(KERNEL_NS) && !self.kernel_ops {
+            if core_owned(&entry.pattern, &seals) && !self.kernel_ops {
                 continue;
             }
             let description = kernel.describe_pattern(&entry.pattern);
@@ -3164,7 +3168,7 @@ fn unwalked(id: &str, coverage: &Coverage) -> String {
 /// `urn:kernel:catalog`), or, for an operation a newer peer has and this kernel does
 /// not, when its id is `kernel-…` and its pattern holds a `:kernel:` segment.
 struct KernelOps {
-    /// The description ids of this kernel's `urn:kernel:*` operations.
+    /// The description ids of this kernel's core-sealed operations.
     ids: BTreeSet<String>,
     /// Their patterns without the leading `urn:` (`kernel:catalog`), the part an
     /// alias keeps.
@@ -3172,14 +3176,14 @@ struct KernelOps {
 }
 
 impl KernelOps {
-    fn of(kernel: &Kernel, entries: &[SpaceEntry]) -> Self {
+    fn of(kernel: &Kernel, entries: &[SpaceEntry], seals: &[(String, SealOwner)]) -> Self {
         let mut ops = KernelOps {
             ids: BTreeSet::new(),
             names: BTreeSet::new(),
         };
         for entry in entries
             .iter()
-            .filter(|e| e.origin.is_none() && e.pattern.starts_with(KERNEL_NS))
+            .filter(|e| e.origin.is_none() && core_owned(&e.pattern, seals))
         {
             if let Some(name) = entry.pattern.strip_prefix("urn:") {
                 ops.names.insert(name.to_string());
@@ -6023,6 +6027,70 @@ fn count_opaque(node: &Topology) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_core_sealed_prefix_is_core_owned() {
+        let mut seals = Kernel::new(Arc::new(ikigai_core::EndpointSpace::new())).sealed();
+        seals.push(("urn:stream:".into(), SealOwner::Core));
+        seals.push(("urn:future-core:".into(), SealOwner::Core));
+        seals.push(("urn:host:".into(), SealOwner::Host));
+        seals.push((
+            "urn:module:".into(),
+            SealOwner::Level(Iri::parse("urn:level:module").unwrap()),
+        ));
+        for pattern in [
+            "urn:kernel:catalog",
+            "urn:stream:collect",
+            "urn:stream:text",
+            "urn:stream:range",
+            "urn:future-core:op",
+        ] {
+            assert!(
+                core_owned(pattern, &seals),
+                "core-owned entry {pattern} must be skipped"
+            );
+        }
+        for pattern in [
+            "urn:host:op",
+            "urn:module:op",
+            "urn:example:op",
+            "urn:streaming:op",
+        ] {
+            assert!(
+                !core_owned(pattern, &seals),
+                "module/host entry {pattern} must still be walked"
+            );
+        }
+    }
+
+    #[test]
+    fn mounted_operations_are_learned_from_every_core_seal() {
+        use ikigai_core::{EndpointSpace, Exact, FnEndpoint};
+
+        let kernel = Kernel::new(Arc::new(
+            EndpointSpace::new().bind(
+                Exact::new("urn:future-core:op"),
+                FnEndpoint::new("future-op", |_| unreachable!("description only"))
+                    .with_description(Description::new("future-op").verb(Verb::Source)),
+            ),
+        ));
+        let mut seals = kernel.sealed();
+        // Simulate a future core catalog without raising this crate's core pin.
+        seals.push(("urn:future-core:".into(), SealOwner::Core));
+        let ops = KernelOps::of(&kernel, &kernel.entries().unwrap(), &seals);
+        let renamed = SpaceEntry::new("urn:edge:future-core:op", "remote").with_origin("peer");
+        assert!(
+            ops.renamed(&renamed, None),
+            "recognize the re-prefixed name without a contract"
+        );
+        let moved = SpaceEntry::new("urn:edge:other", "remote").with_origin("peer");
+        assert!(
+            ops.renamed(&moved, Some(&Description::new("future-op"))),
+            "recognize the description id even under another name"
+        );
+        assert!(!ops.renamed(&SpaceEntry::new("urn:edge:future-core:op", "local"), None));
+        assert!(!ops.renamed(&moved, Some(&Description::new("module-op"))));
+    }
 
     #[test]
     fn sample_values_follow_the_declared_class() {

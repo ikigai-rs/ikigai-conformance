@@ -243,3 +243,54 @@ fn the_builtins_space_passes_space_name_self_named_with_a_part_and_host_named() 
         .run_blocking(&builtins_kernel());
     report.assert_clean();
 }
+
+/// Only Core seals exclude entries; a host's and a level's protected bindings
+/// still belong in the module's report. The opt-in includes core's catalog too.
+#[test]
+fn core_seals_are_skipped_but_host_and_level_seals_are_walked() {
+    use ikigai_core::{Fallback, Level, SealOwner};
+
+    let host = EndpointSpace::new().bind(Exact::new("urn:host:upper"), builtins::to_upper());
+    let module = Level::new(
+        Iri::parse("urn:level:module").unwrap(),
+        Arc::new(
+            EndpointSpace::new().bind(Exact::new("urn:module:reverse"), builtins::reverse_list()),
+        ),
+    )
+    .in_namespace("urn:module:")
+    .sealing(["urn:module:"]);
+    let kernel = Kernel::new(Arc::new(Fallback::new(vec![
+        Arc::new(host),
+        Arc::new(module),
+    ])))
+    .with_sealed(["urn:host:"]);
+    let seals = kernel.sealed();
+    assert!(seals.contains(&("urn:host:".into(), SealOwner::Host)));
+    assert!(seals
+        .iter()
+        .any(|(prefix, owner)| prefix == "urn:module:" && matches!(owner, SealOwner::Level(_))));
+
+    let report = Suite::new().checks(Checks::NAMES).run_blocking(&kernel);
+    assert_eq!(&*report.walked, ["to-upper", "reverse-list"], "{report}");
+    report.assert_clean();
+
+    let included = Suite::new()
+        .checks(Checks::NAMES)
+        .include_kernel_ops()
+        .run_blocking(&kernel);
+    for entry in kernel.entries().unwrap() {
+        if seals
+            .iter()
+            .any(|(prefix, owner)| *owner == SealOwner::Core && entry.pattern.starts_with(prefix))
+        {
+            let id = kernel.describe_pattern(&entry.pattern).unwrap().id;
+            assert!(!report.walked.contains(&id), "{report}");
+            assert!(included.walked.contains(&id), "{included}");
+        }
+    }
+    assert!(included.walked.contains(&"to-upper".into()), "{included}");
+    assert!(
+        included.walked.contains(&"reverse-list".into()),
+        "{included}"
+    );
+}
