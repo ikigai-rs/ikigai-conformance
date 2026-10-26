@@ -540,8 +540,8 @@ pub struct Evidence {
     /// Every read action whose only intake is an input group with no `pipe` member, in
     /// walk order (`pipeline:` lines, under [`Check::Pipeline`]).
     pub named_only: Vec<NamedOnly>,
-    /// Whether the module opted into [`Check::Failures`]
-    /// ([`Suite::check_failures`](crate::Suite::check_failures)). A declaration, kept here
+    /// Whether the suite explicitly called
+    /// [`Suite::check_failures`](crate::Suite::check_failures). A declaration, kept here
     /// for the reason [`inherited_because`](Self::inherited_because) is.
     pub check_failures: bool,
     /// What [`Check::Failures`] saw of every action it ran on, in walk order
@@ -583,7 +583,6 @@ pub struct Evidence {
 /// let space = EndpointSpace::new().bind(Exact::new("urn:example:parse"), parse);
 /// let report = Suite::new()
 ///     .checks(Checks::FAILURES)
-///     .check_failures()
 ///     .run_blocking(&Kernel::new(Arc::new(space)));
 /// report.assert_clean();
 /// let seen = &report.failures_seen()[0];
@@ -638,7 +637,6 @@ pub struct FailuresSeen {
 /// let space = EndpointSpace::new().bind(Exact::new("urn:example:parse"), parse);
 /// let report = Suite::new()
 ///     .checks(Checks::FAILURES)
-///     .check_failures()
 ///     .fails_under(
 ///         Fixture::new("parse", Verb::Source).arg("content", "far too long"),
 ///         FailureClass::OverBudget,

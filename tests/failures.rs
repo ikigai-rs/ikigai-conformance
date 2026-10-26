@@ -1,8 +1,8 @@
 //! `FAILURES` and `Suite::fails_under` (ledger #1546): an action that states its failure
 //! classes (core 0.1.108's `ActionSpec::fails` / `Description::fails`) is held to them.
 //! Every failure the walk observes must have a class core's `ActionSpec::admits_failure`
-//! admits, and a `fails_under` probe must fail with exactly the class it states. Opt-in
-//! for one minor (`Suite::check_failures`), so a suite that does not ask is unchanged.
+//! admits, and a `fails_under` probe must fail with exactly the class it states. The check runs by
+//! default since 0.11.0, including probes without `Suite::check_failures`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -80,7 +80,6 @@ fn always_failing(over: fn(usize) -> Error, declared: Option<&[FailureClass]>) -
 fn failures(suite: Suite, kernel: &Kernel) -> Report {
     suite
         .checks(Checks::FAILURES | Checks::DECLARATIONS)
-        .check_failures()
         .run_blocking(kernel)
 }
 
@@ -243,8 +242,7 @@ fn a_fails_under_probe_that_resolves_is_a_finding_and_the_right_class_is_clean()
 }
 
 #[test]
-fn the_default_off_path_changes_nothing_for_existing_adopters() {
-    // A declaration the action breaks: FAILURES would report it, once opted into.
+fn failures_run_by_default_and_subtracting_the_check_turns_them_off() {
     let run = |suite: Suite| {
         let calls = Arc::new(AtomicUsize::new(0));
         let k = kernel(
@@ -257,35 +255,37 @@ fn the_default_off_path_changes_nothing_for_existing_adopters() {
     let (default, default_calls) = run(Suite::new());
     let (subtracted, subtracted_calls) = run(Suite::new().checks(Checks::all() - Checks::FAILURES));
     let (selected, selected_calls) = run(Suite::new().checks(Checks::all()));
-    assert_eq!(default.of(Check::Failures).count(), 0, "{default}");
-    assert!(default.failures_seen().is_empty());
-    // Not opted into, it is exactly a suite that subtracted it: the same findings, the
-    // same text, the same firings.
-    assert_eq!(default.to_string(), subtracted.to_string());
-    assert_eq!(selected.to_string(), subtracted.to_string());
+    assert_eq!(default.of(Check::Failures).count(), 1, "{default}");
+    assert!(!default.failures_seen().is_empty());
+    assert!(!default.declared.evidence.check_failures);
+    assert_eq!(default.to_string(), selected.to_string());
     assert_eq!(default_calls, subtracted_calls);
     assert_eq!(selected_calls, subtracted_calls);
+    assert_eq!(subtracted.of(Check::Failures).count(), 0, "{subtracted}");
+    assert!(subtracted.failures_seen().is_empty());
+    assert_eq!(
+        subtracted.of(Check::Declarations).count(),
+        0,
+        "{subtracted}"
+    );
     assert!(
-        default
+        subtracted
             .to_string()
             .lines()
             .any(|l| l.starts_with("skipped:") && l.ends_with(" FAILURES")),
+        "{subtracted}"
+    );
+    assert!(
+        !default
+            .to_string()
+            .lines()
+            .any(|l| l.starts_with("skipped:") && l.contains("FAILURES")),
         "{default}"
     );
-    // Opted in, it fires nothing the walk did not already fire.
-    let (on, on_calls) = run(Suite::new().check_failures());
-    assert_eq!(on_calls, default_calls, "{on}");
-    assert_eq!(on.of(Check::Failures).count(), 1, "{on}");
-    let mut without: Vec<_> = on
-        .findings
-        .iter()
-        .filter(|f| f.check != Check::Failures)
-        .cloned()
-        .collect();
-    without.sort_by_key(|f| f.to_string());
-    let mut before = default.findings.clone();
-    before.sort_by_key(|f| f.to_string());
-    assert_eq!(without, before);
+    let (explicit, explicit_calls) = run(Suite::new().check_failures());
+    assert_eq!(explicit_calls, default_calls);
+    assert_eq!(explicit.to_string(), default.to_string());
+    assert!(explicit.declared.evidence.check_failures);
 }
 
 #[test]
@@ -414,9 +414,9 @@ fn a_waiver_sets_the_finding_aside() {
 }
 
 #[test]
-fn a_probe_or_an_opt_in_that_reached_nothing_is_a_declarations_finding() {
+fn probes_run_without_an_explicit_request_and_unused_requests_are_findings() {
     let k = always_failing(over_budget, Some(&[FailureClass::OverBudget]));
-    // A probe without the opt-in.
+    // A selected probe runs without an explicit request.
     let report = Suite::new()
         .checks(Checks::FAILURES | Checks::DECLARATIONS)
         .fails_under(
@@ -424,18 +424,33 @@ fn a_probe_or_an_opt_in_that_reached_nothing_is_a_declarations_finding() {
             FailureClass::OverBudget,
         )
         .run_blocking(&k);
-    let finding = report.of(Check::Declarations).next().expect("{report}");
+    report.assert_clean();
+    assert_eq!(report.fails_under_probes().len(), 1);
+    assert!(!report.declared.evidence.check_failures);
+    // An unselected probe still reports why it never ran.
+    let report = Suite::new()
+        .checks(Checks::DECLARATIONS)
+        .fails_under(
+            Fixture::new("parse", Verb::Source),
+            FailureClass::OverBudget,
+        )
+        .run_blocking(&k);
+    assert_eq!(report.of(Check::Declarations).count(), 1, "{report}");
     assert!(
-        finding
+        report
+            .of(Check::Declarations)
+            .next()
+            .unwrap()
             .detail
-            .contains("never ran: FAILURES runs only under `Suite::check_failures()`"),
+            .contains("FAILURES is not selected"),
         "{report}"
     );
-    // The opt-in without the check.
+    // An explicit request without the check produces exactly one finding.
     let report = Suite::new()
         .checks(Checks::NAMES | Checks::DECLARATIONS)
         .check_failures()
         .run_blocking(&k);
+    assert_eq!(report.of(Check::Declarations).count(), 1, "{report}");
     let finding = report.of(Check::Declarations).next().expect("{report}");
     assert!(
         finding

@@ -311,9 +311,8 @@ pub enum Check {
     /// the module supplies an input that must fail with a stated class (`over-budget` for an
     /// input past its bound), and the action must answer with exactly that class.
     ///
-    /// **Opt-in in 0.10, the default from 0.11.0**: it runs only under
-    /// [`Suite::check_failures`](crate::Suite::check_failures), and is printed as skipped
-    /// otherwise. A read no other selected check resolved is resolved once for it; a
+    /// **Runs by default since 0.11.0**; subtract [`Checks::FAILURES`] to skip it.
+    /// A read no other selected check resolved is resolved once for it; a
     /// mutating action is judged on what the walk already fired, never fired for it.
     Failures,
 }

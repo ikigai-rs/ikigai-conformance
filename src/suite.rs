@@ -683,11 +683,8 @@ struct OptOutCheck {
 /// ```
 #[derive(Clone, Debug)]
 pub struct Suite {
-    /// What runs: [`selected`](Self::selected), less [`Check::Failures`] until
-    /// [`Suite::check_failures`] opts into it.
-    checks: Checks,
     /// What [`Suite::checks`] selected.
-    selected: Checks,
+    checks: Checks,
     check_failures: bool,
     fixtures: Vec<Fixture>,
     enforced_under: Vec<Fixture>,
@@ -717,13 +714,11 @@ impl Default for Suite {
 }
 
 impl Suite {
-    /// Every check, no fixtures, no opt-outs, kernel operations skipped. Every check
-    /// RUNS but [`Check::Failures`], which is opt-in in 0.10
-    /// ([`check_failures`](Self::check_failures)) and printed as skipped until then.
+    /// Every check, no fixtures, no opt-outs, kernel operations skipped.
+    /// [`Check::Failures`] runs by default since 0.11.0.
     pub fn new() -> Self {
         Suite {
-            checks: Checks::all() - Checks::FAILURES,
-            selected: Checks::all(),
+            checks: Checks::all(),
             check_failures: false,
             fixtures: Vec::new(),
             enforced_under: Vec::new(),
@@ -745,24 +740,19 @@ impl Suite {
         }
     }
 
-    /// Select the checks to run; the rest are reported as skipped. [`Check::Failures`]
-    /// runs only when selected AND opted into ([`check_failures`](Self::check_failures)),
-    /// in 0.10.
+    /// Select exactly the checks to run; the rest are reported as skipped.
     pub fn checks(mut self, checks: Checks) -> Self {
-        self.selected = checks;
-        self.checks = self.effective();
+        self.checks = checks;
         self
     }
 
-    /// Opt into [`Check::Failures`]: hold every action that states its failure classes
-    /// (ikigai-core 0.1.108's `ActionSpec::fails` / `Description::fails`) to them, and run
-    /// the [`fails_under`](Self::fails_under) probes (ledger #1546).
+    /// Record an explicit request for [`Check::Failures`], kept for compatibility.
     ///
-    /// Opt-in for one minor: 0.10 adds the check off, so a module that re-pins changes
-    /// nothing until it asks, and **0.11.0 makes it the default** (subtract
-    /// [`Checks::FAILURES`] then to keep it off). It runs where the other invoking checks
-    /// run, and fires nothing a walk does not already fire, but one minimal resolution of a
-    /// read no other selected check resolved.
+    /// The check runs by default since 0.11.0: it holds every action that states its
+    /// failure classes to them and runs the [`fails_under`](Self::fails_under) probes.
+    /// Subtract [`Checks::FAILURES`] to turn it off. This method records the request
+    /// without changing the selected checks. FAILURES fires nothing a walk does not
+    /// already fire, but one minimal resolution of a read no other selected check resolved.
     ///
     /// A declaration that reached nothing (FAILURES not selected) is reported by
     /// [`Check::Declarations`].
@@ -788,28 +778,18 @@ impl Suite {
     /// );
     /// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(Exact::new("urn:example:fetch"), fetch)));
     ///
-    /// // Off by default: printed as skipped, and nothing is judged.
-    /// let off = Suite::new().checks(Checks::FAILURES).run_blocking(&kernel);
-    /// assert!(off.is_clean(), "{off}");
+    /// // Subtracting FAILURES prints it as skipped and judges nothing.
+    /// let off = Suite::new().checks(Checks::all() - Checks::FAILURES).run_blocking(&kernel);
+    /// assert_eq!(off.of(Check::Failures).count(), 0, "{off}");
     /// assert!(off.to_string().lines().any(|l| l.starts_with("skipped:") && l.ends_with(" FAILURES")), "{off}");
     ///
-    /// let on = Suite::new().checks(Checks::FAILURES).check_failures().run_blocking(&kernel);
+    /// let on = Suite::new().run_blocking(&kernel);
     /// let finding = on.of(Check::Failures).next().expect("an undeclared class");
     /// assert!(finding.detail.contains("class `unknown`"), "{on}");
     /// ```
     pub fn check_failures(mut self) -> Self {
         self.check_failures = true;
-        self.checks = self.effective();
         self
-    }
-
-    /// The checks that run: the selection, less FAILURES until it is opted into.
-    fn effective(&self) -> Checks {
-        if self.check_failures {
-            self.selected
-        } else {
-            self.selected - Checks::FAILURES
-        }
     }
 
     /// Hold one action to a stated failure class under an input the module supplies
@@ -826,10 +806,9 @@ impl Suite {
     /// [`Check::Failures`] finding. Its failure is also an observation like any other, so
     /// an action that states its classes must admit the one the probe provokes.
     ///
-    /// It runs where FAILURES runs (opted into with [`check_failures`](Self::check_failures),
-    /// selected, not waived for the id) and fires the action once per probe: a `Sink` or a
-    /// `Delete` named here is fired. A probe that never ran is reported by
-    /// [`Check::Declarations`].
+    /// It runs where FAILURES runs (selected, not waived for the id) and fires the
+    /// action once per probe: a `Sink` or a `Delete` named here is fired. A probe that
+    /// never ran is reported by [`Check::Declarations`].
     ///
     /// ```
     /// use ikigai_conformance::{Check, Checks, Fixture, Suite};
@@ -858,7 +837,6 @@ impl Suite {
     /// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(Exact::new("urn:example:unzip"), unzip)));
     /// let report = Suite::new()
     ///     .checks(Checks::FAILURES)
-    ///     .check_failures()
     ///     .fails_under(
     ///         Fixture::new("unzip", Verb::Source).arg("content", "a bomb"),
     ///         FailureClass::OverBudget,
@@ -2313,7 +2291,7 @@ impl Suite {
                 );
             }
         }
-        if self.check_failures && !self.selected.contains(Check::Failures) {
+        if self.check_failures && !self.checks.contains(Check::Failures) {
             self.inert(
                 report,
                 SUITE,
@@ -2468,13 +2446,6 @@ impl Suite {
         }
         if !coverage.walked.contains(id) {
             return Some(unwalked(id, coverage));
-        }
-        if check == Check::Failures && self.selected.contains(check) && !self.check_failures {
-            return Some(
-                "FAILURES runs only under `Suite::check_failures()` in 0.10 (the default from \
-                 0.11.0), so it is skipped everywhere"
-                    .to_string(),
-            );
         }
         if !self.checks.contains(check) {
             return Some(format!(

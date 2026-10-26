@@ -23,8 +23,7 @@ cms-graph  VOCABULARY  source: the `text/turtle` face uses `https://ikigai-rs.de
 sparql-construct  OUTPUTS  source: served `text/turtle` with its minimal inputs but declares only `application/sparql-results+json`: a face the manifold does not announce and the RDF checks never saw — declare it (`.output("text/turtle")`) or serve what is declared
 link-remove  DECLARATIONS  declared live (`Suite::live`) but nothing held it to it: it declares no cacheable verb (it declares delete), and CACHEABLE returns early on a mutating one. The report prints `declared live: link-remove`, which reads as a check that ran
 7 finding(s) across 4 endpoint(s), 4 action(s)
-checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES RECOMPUTE DATATYPES
-skipped: FAILURES
+checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES RECOMPUTE DATATYPES FAILURES
 probed 3 face(s) across 3 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
 probed: ik-context source `application/ld+json`: 0 triple(s) — nothing was checked
@@ -74,7 +73,7 @@ pointing at the check.
 | `RESOLVES` | — | the resolution another check needed (the minimal one that `OUTPUTS`, `SKOLEM-RDF`, `VOCABULARY` and `CACHEABLE` read; the pipeline probe's firing of a `Sink`) resolved. A failure is reported ONCE per action under this label, with the refusal's kind, the check that needed it and, where the walk had to invent a value for an input that declares no class, that input by name: fixing it fixes both findings. It fires nothing of its own. Not selected (a selection written before 0.8.4), the failure is reported under the check that needed it, as before |
 | `RECOMPUTE` | cacheability | an `Expiry::Never` answer the cache holds is recomputed after a cut of every thread it carries and of everything it read, 24 times, and every computation must repeat the first one's bytes (one recomputation agrees with the first by chance as often as a two-entry map's order does); each thread an endpoint declared (`depends_on`) is also cut alone and recomputed. `CACHEABLE`'s second resolution is the cache hit, so it can only repeat the first: this is the witness that sees a wrong `.cacheable()` (a fresh nonce, key or timestamp, a `HashMap` order). An order is caught only if the fixture has enough entries for order to matter ([below](#a-fixture-gives-an-order-something-to-order)). An `Expiry::At` answer is exempt (a function of the time too). Each clean answer is a `recomputed:` line. Subtract it (`Checks::all() - Checks::RECOMPUTE`) for a test that pins how often a fixture is read, or waive it per endpoint with the reason an answer differs by design |
 | `DATATYPES` | one graph, two faces, the same terms | every literal in an RDF face carries the datatype its property's `rdfs:range` declares in `ikigai-vocab` — the datatype the generated JSON-LD context (`ikigai_vocab::CONTEXT`) coerces it to. A hand-written Turtle `ik:batchAt 2` is a bare `xsd:integer` while the context coerces the same JSON number to `xsd:positiveInteger`: value-equal, not term-equal, so a diff of the two faces of one graph shows a difference that is not there. The rule is "tag what the shorthand cannot express": Turtle writes `xsd:integer`, `xsd:decimal`, `xsd:double`, `xsd:boolean` and a plain string bare, so `ik:context 8192` (range `xsd:integer`) passes untagged, and only a property whose range is an XSD datatype other than `xsd:string` is judged. Reads the faces `SKOLEM-RDF` and `VOCABULARY` already parse (`rdf::datatype_mismatches` reproduces it by hand); in `Checks::RDF` (ledger #356) |
-| `FAILURES` | declared = produced | **Opt-in in 0.10 (`Suite::check_failures()`), the default from 0.11.0.** An action that states its failure classes (core 0.1.108's `.fails(FailureClass::…)` on an `ActionSpec` or a flat `Description`) fails only with a class it admits: every failure the walk observes from it (the minimal resolution, an RDF face's `as=` resolution, the pipeline firing, REQUIRED's baseline firing, the no-grants probe, an `enforced_under` probe, a forced recomputation, a `fails_under` probe) is held to the declaration by core's one predicate, `ActionSpec::admits_failure`, over `Error::class()`. `permanent` is always admitted and `denied` beside a `requires`. An action that states nothing is listed on a `failures:` line, never a finding. A `Denied` under the no-grants probe stays `ENFORCED`'s, and REQUIRED's deliberately broken calls stay `REQUIRED`'s. A `Suite::fails_under` probe must fail with exactly the class it states. It fires nothing a walk does not already fire, but one minimal resolution of a read no other selected check resolved |
+| `FAILURES` | declared = produced | **Runs by default since 0.11.0.** An action that states its failure classes (core 0.1.108's `.fails(FailureClass::…)` on an `ActionSpec` or a flat `Description`) fails only with a class it admits: every failure the walk observes from it (the minimal resolution, an RDF face's `as=` resolution, the pipeline firing, REQUIRED's baseline firing, the no-grants probe, an `enforced_under` probe, a forced recomputation, a `fails_under` probe) is held to the declaration by core's one predicate, `ActionSpec::admits_failure`, over `Error::class()`. `permanent` is always admitted and `denied` beside a `requires`. An action that states nothing is listed on a `failures:` line, never a finding. A `Denied` under the no-grants probe stays `ENFORCED`'s, and REQUIRED's deliberately broken calls stay `REQUIRED`'s. A `Suite::fails_under` probe must fail with exactly the class it states. It fires nothing a walk does not already fire, but one minimal resolution of a read no other selected check resolved |
 
 ### Why `VALIDATE` is here and not in `bind`
 
@@ -720,7 +719,6 @@ use ikigai_conformance::{Fixture, Suite};
 use ikigai_core::{FailureClass, Verb};
 
 let report = Suite::new()
-    .check_failures()
     .fails_under(
         Fixture::new("gunzip", Verb::Source).arg_bytes("content", zip_bomb()),
         FailureClass::OverBudget,
@@ -732,12 +730,11 @@ A probe that resolves, or fails with another class, is a `FAILURES` finding, and
 probe that ran is a `fails under:` line. Its failure is an observation like any other, so
 an action that states its classes must admit the one its own probe provokes.
 
-**Opt-in for one minor.** 0.10.0 adds the check OFF: `Suite::new()` prints `FAILURES` as
-skipped, judges nothing and fires nothing more, so re-pinning to 0.10 changes no adopter's
-report but that `skipped:` line. `Suite::check_failures()` turns it on (where it is
-selected; `Checks::all()` selects it), and a `fails_under` probe or a `check_failures`
-that reached nothing is a `DECLARATIONS` finding. **0.11.0 makes it the default**; to keep
-it off then, subtract `Checks::FAILURES`.
+**Default since 0.11.0.** `Suite::new()` runs `FAILURES`, including `fails_under`
+probes. To turn it off, subtract `Checks::FAILURES` with `Suite::checks`; that method
+runs exactly the selected checks. `Suite::check_failures()` is kept for compatibility
+and only records an explicit request. An explicit request or a `fails_under` probe
+that reaches nothing is a `DECLARATIONS` finding.
 
 ### Through a mount
 
@@ -769,9 +766,8 @@ not reach as loudly as what it found.
 
 ```
 0 finding(s) across 6 endpoint(s), 9 action(s)
-checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS* SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES RECOMPUTE DATATYPES
+checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS* SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES RECOMPUTE DATATYPES FAILURES
 * OUTPUTS ran on 1 of 6 endpoint(s); waived on the rest (see `opted out:`)
-skipped: FAILURES
 probed 7 face(s) across 5 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
 probed: ik-context source `application/ld+json`: 0 triple(s) — nothing was checked
