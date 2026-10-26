@@ -635,8 +635,10 @@ means to bind (an endpoint that stops being bound is otherwise a report that get
 (`urn:sniff`'s `content`: a PNG is valid) has no XSD datatype that is true of the
 value; declare `xsd:string` — the type the wire carries — and say so in a comment.
 
-The kernel's own `urn:kernel:*` operations are core's, not the module's: the walk
-skips them unless `Suite::include_kernel_ops()` asks.
+Operations under every prefix `Kernel::sealed()` reports as owned by
+`SealOwner::Core` are core's, not the module's: the walk skips them unless
+`Suite::include_kernel_ops()` asks. Host- and level-owned seals remain in the walk.
+The same core operations are recognized through mounted aliases.
 
 ### A module's own access rule (`Suite::enforced_under`)
 
