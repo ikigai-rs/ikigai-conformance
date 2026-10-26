@@ -1010,8 +1010,39 @@ anyone memoizes by id.
 
 ## Status
 
-0.10.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.11.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.10.0 → 0.11.0: core 0.2.0, `FAILURES` and `DATATYPES` by default, `Suite::vocabulary` (ledger #2261)
+
+- **`ikigai-core` and `ikigai-vocab` 0.2.0**, the streams release (ledger #2261). Under Cargo's 0.x
+  rules the old `"0.1.108"` floors meant `<0.2.0`, so a module on core 0.2.0 linked a second core
+  through this crate (PR 50).
+- **`FAILURES` runs by default**, as 0.10.0 promised (ledger #2309, PR 51). `Suite::new()` runs it,
+  `fails_under` probes included. `Suite::checks` now runs exactly the checks it is given; subtract
+  `Checks::FAILURES` to turn it off. `Suite::check_failures()` stays for compatibility and only
+  records an explicit request: called while `FAILURES` is not selected, it is a `DECLARATIONS` finding.
+- **`DATATYPES`, an eighteenth check, on by default** (ledger #356, PR 47). Every literal of an `ik:`
+  property whose `rdfs:range` is an XSD datatype other than `xsd:string` carries that datatype, the
+  one the generated JSON-LD context coerces it to. "Tag what the shorthand cannot express":
+  `ik:context 8192` (range `xsd:integer`) passes bare, and `ik:batchAt 2` (range
+  `xsd:positiveInteger`) does not. It is in `Checks::RDF` and waivable per endpoint.
+- **`Suite::vocabulary(turtle)`** (ledger #344, PR 48). A module that ships the graph defining its
+  terms holds every term a probed face uses under that graph's namespace to the graph's subjects,
+  instead of waiving the namespace with `Suite::namespace`.
+- **The walk skips every prefix the kernel seals for core** (ledger #2302, PR 49), read from
+  `Kernel::sealed()` rather than a hard-coded `urn:kernel:`, so core's `urn:stream:*` builtins are
+  never walked as a module's.
+
+**Will it turn a green suite red?** It can, and `DATATYPES` is the likely cause: a hand-written
+Turtle face that writes a bare literal for a property whose range is a narrower XSD datatype. Tag the
+literal, or waive that endpoint's `DATATYPES` with a stated reason. `FAILURES` judges only actions that
+state their failure classes, and no adopter stated any as of 2026-10-26, so turning it on finds
+nothing new there. The report text changes for every adopter: `FAILURES` and `DATATYPES` move onto the
+`checked:` line.
+
+**The re-pin wave.** A `"0.10.0"` pin is `<0.11.0`, and every adopter's core moves to 0.2.0 at the same
+time, so every adopter re-pins to `"0.11.0"` in the core 0.2.0 sweep (ledger #2261, one item per repo).
 
 ### 0.9.1 → 0.10.0: `FAILURES` and `Suite::fails_under`, opt-in (ledger #1546)
 
