@@ -75,7 +75,12 @@ categories = ["development-tools::testing"]
 # `Failures`, `ActionSpec::fails`, `Description::fails`), all new in 0.1.108. It is also the
 # release with the four new error variants (`RetryAfter`, `OverBudget`, `Refused`,
 # `Unsupported`), which a module's `fails_under` probe can be held to.
-ikigai-core = "0.1.108"
+#
+# 0.2.0 since 0.11.0 (ledger #2261): the streams release. Under 0.x rules "0.1.108" meant
+# <0.2.0, so a module on core 0.2.0 linked a second core through this crate and its
+# conformance test stopped compiling (ikigai-vocab's did, ledger #2308). Every adopter
+# moves with this release.
+ikigai-core = "0.2.0"
 # The vocabulary is the ORACLE for the terms check: a predicate is "defined" iff it
 # is a subject in `ikigai_vocab::VOCABULARY`. So the floor is the newest published
 # vocabulary, not the oldest API this crate compiles against — an older pin would
@@ -136,7 +141,9 @@ ikigai-core = "0.1.108"
 # <0.2.0). It matches the core floor above, and defines `ik:mayFail`, `ik:FailureClass` and
 # its seven individuals, so a module whose Meta face states its failure classes is not told
 # they are invented.
-ikigai-vocab = "0.1.108"
+# 0.11.0: re-checked — 0.2.0 is the head on crates.io; raised to it (the RANGE >=0.2.0,
+# <0.3.0). It matches the core floor above.
+ikigai-vocab = "0.2.0"
 # One parser for every RDF face a module can declare (Turtle, N-Triples, N-Quads,
 # TriG, RDF/XML, JSON-LD). 0.2.5 is the version whose `for_slice` and
 # `RdfFormat::from_media_type` this crate was written against.
