@@ -1039,7 +1039,10 @@ For an answer of at least two bytes, a second kernel body request carries
 alone raises a host's base allowance; it cannot lower it). The body is collected
 with that same bound: only `Error::OverBudget` passes. A shorter success is reported
 as **truncated**, and any other error is named. The original kernel handles this
-request, preserving host configuration and sub-request routing. A fixture's scopes
+request, preserving host configuration and sub-request routing. If that capability
+already has the answer cached, the check cuts its own-name thread (including the
+canonical name from the baseline trace) so the bounded call reaches the endpoint.
+A fixture's scopes
 and principal are retained; under the default root caller the bounded capability
 carries the action's declared requirements plus the memory grant. Deliberate
 low-budget errors belong to `BODIES`, not `FAILURES`.

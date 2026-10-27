@@ -420,3 +420,47 @@ fn byte_mismatches_name_the_first_offset_and_the_end_of_a_prefix() {
         "{report}"
     );
 }
+
+#[test]
+fn a_cached_answer_cannot_hide_truncation_under_the_bounded_invocation() {
+    struct BufferedTruncator;
+    #[async_trait]
+    impl Endpoint for BufferedTruncator {
+        async fn invoke(&self, _: &Invocation<'_>) -> Result<Representation> {
+            Ok(Representation::new(ReprType::new("text/plain"), b"four".to_vec()).cacheable())
+        }
+        async fn invoke_body(&self, inv: &Invocation<'_>) -> Result<Representation<Body>> {
+            let bytes = if inv.memory_budget().is_some_and(|b| b.remaining() < 4) {
+                &b"fou"[..]
+            } else {
+                &b"four"[..]
+            };
+            Ok(
+                Representation::new(ReprType::new("text/plain"), bytes.to_vec())
+                    .cacheable()
+                    .into_body(),
+            )
+        }
+        fn name(&self) -> &str {
+            "buffered-truncator"
+        }
+        fn describe(&self) -> Description {
+            Description::new("buffered-truncator")
+                .verb(Verb::Source)
+                .output("text/plain")
+        }
+    }
+    let caller = Capability::scoped([ikigai_core::cap_stream_memory(3)]);
+    let report = walk(
+        BufferedTruncator,
+        Suite::new().fixture(
+            ikigai_conformance::Fixture::new("buffered-truncator", Verb::Source).capability(caller),
+        ),
+    );
+    assert!(
+        report
+            .of(ikigai_conformance::Check::Bodies)
+            .any(|f| f.detail.contains("truncated")),
+        "{report}"
+    );
+}

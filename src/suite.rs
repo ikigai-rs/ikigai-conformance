@@ -4863,7 +4863,7 @@ impl<'a> Action<'a> {
             return;
         };
         let args = self.suite.args_for(self.id, self.spec);
-        let (baseline, _) = match self.resolve_minimal(false).await {
+        let (baseline, baseline_events) = match self.resolve_minimal(false).await {
             Ok(answer) => answer,
             Err(err) => {
                 self.report_failure(Check::Bodies, &err, &args, report);
@@ -4972,6 +4972,15 @@ impl<'a> Action<'a> {
         grants.retain(|g| !g.starts_with("urn:cap:stream:memory:"));
         grants.push(ikigai_core::cap_stream_memory(bound as u64));
         let capability = Capability::scoped(grants);
+        // A fixture may already carry exactly this grant, or a prior probe may have
+        // populated this capability partition. The bounded invocation must reach the
+        // endpoint, rather than collect a full answer computed under a larger run.
+        if self.kernel.is_cached(&request, &capability) {
+            self.kernel.cut(self.target.as_str());
+            for event in baseline_events.iter().filter(|e| e.parent.is_none()) {
+                self.kernel.cut(event.target.as_str());
+            }
+        }
         let limited = self
             .kernel
             .issue_body_with_context(
