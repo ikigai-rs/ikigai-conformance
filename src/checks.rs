@@ -315,6 +315,13 @@ pub enum Check {
     /// A read no other selected check resolved is resolved once for it; a
     /// mutating action is judged on what the walk already fired, never fired for it.
     Failures,
+    /// **The bytes and body methods agree; a bounded collect refuses, never truncates.**
+    /// For each deterministic `Source`, resolve in [`Suite::body_space`](crate::Suite::body_space)
+    /// and invoke both endpoint methods directly with a kernel-backed issuer. Compare
+    /// bytes and media type, then issue a body under a smaller byte budget and require
+    /// `Error::OverBudget`. Uncacheable and volatile answers are explicitly unprobed.
+    /// On by default since 0.12.0; subtract [`Checks::BODIES`] with a reason to waive it.
+    Bodies,
 }
 }
 
@@ -339,6 +346,7 @@ impl Check {
             Check::Resolves => "RESOLVES",
             Check::Recompute => "RECOMPUTE",
             Check::Failures => "FAILURES",
+            Check::Bodies => "BODIES",
             Check::Datatypes => "DATATYPES",
         }
     }
@@ -361,6 +369,7 @@ impl Check {
                 | Check::Recompute
                 | Check::Failures
                 | Check::Datatypes
+                | Check::Bodies
         )
     }
 
@@ -436,6 +445,8 @@ impl Checks {
     pub const FAILURES: Checks = Checks(1 << (Check::Failures as u32));
     /// [`Check::Datatypes`].
     pub const DATATYPES: Checks = Checks(1 << (Check::Datatypes as u32));
+    /// [`Check::Bodies`].
+    pub const BODIES: Checks = Checks(1 << (Check::Bodies as u32));
     /// Every RDF-face check: [`Check::SkolemRdf`], [`Check::Vocabulary`] and
     /// [`Check::Datatypes`] — the set a module without a graph face subtracts.
     pub const RDF: Checks =

@@ -1067,8 +1067,9 @@ impl Report {
     /// .with_description(Description::new("upper").verb(Verb::Source)
     ///     .input(ArgSpec::new("in").class("http://www.w3.org/2001/XMLSchema#string"))
     ///     .output("text/plain"));
-    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new().bind(Exact::new("urn:example:upper"), upper)));
-    /// Suite::new().pure("upper").run_blocking(&kernel).assert_clean_with(
+    /// let space = Arc::new(EndpointSpace::new().bind(Exact::new("urn:example:upper"), upper));
+    /// let kernel = Kernel::new(space.clone());
+    /// Suite::new().body_space(space).pure("upper").run_blocking(&kernel).assert_clean_with(
     ///     &Expected::new()
     ///         .endpoints(1)
     ///         .actions(1)

@@ -163,7 +163,17 @@ fn as_a_named_caller_every_check_judges_the_answer() {
         text.contains("fixture: me source as-caller=urn:example:person:alice (2 scopes)"),
         "the record says who it was probed as:\n{report}"
     );
-    assert!(report.unprobed.is_empty(), "{report}");
+    assert!(
+        report.unprobed.iter().all(|u| u.check == Check::Bodies),
+        "{report}"
+    );
+    assert!(
+        report
+            .unprobed
+            .iter()
+            .any(|u| u.reason.contains("Suite::body_space")),
+        "{report}"
+    );
 }
 
 /// Proof the checks ran AS the caller rather than passing vacuously: each misbehavior

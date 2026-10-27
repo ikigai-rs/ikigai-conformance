@@ -7,9 +7,10 @@ use std::sync::{Arc, Mutex};
 
 use ikigai_core::{
     space_iri, ActionSpec, ArgRef, ArgSpec, Arguments, Capability, Description, Error, Expiry,
-    FailureClass, GroupKind, InputGroup, InputSource, Iri, Kernel, OutputFrom, ProposedArgs,
-    Representation, Request, SealOwner, Space, SpaceEntry, SpaceKind, Thread, Topology, TraceEvent,
-    Tracer, UriTemplate, Verb, DENIED_NOTE, FAILED_NOTE, SPACE_PREFIX,
+    FailureClass, GroupKind, InputGroup, InputSource, Invocation, Iri, IssueContext, Kernel,
+    OutputFrom, ProposedArgs, Representation, Request, Resolution, Scope, SealOwner, Space,
+    SpaceEntry, SpaceKind, Thread, Topology, TraceEvent, Tracer, UriTemplate, Verb, DENIED_NOTE,
+    FAILED_NOTE, SPACE_PREFIX,
 };
 
 use crate::checks::{Check, Checks};
@@ -652,6 +653,15 @@ impl fmt::Debug for SpaceDecl {
     }
 }
 
+#[derive(Clone)]
+struct BodySpace(Arc<dyn Space>);
+
+impl fmt::Debug for BodySpace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("BodySpace")
+    }
+}
+
 #[derive(Clone, Debug)]
 struct OptOutCheck {
     id: String,
@@ -686,6 +696,7 @@ pub struct Suite {
     /// What [`Suite::checks`] selected.
     checks: Checks,
     check_failures: bool,
+    body_space: Option<BodySpace>,
     fixtures: Vec<Fixture>,
     enforced_under: Vec<Fixture>,
     fails_under: Vec<(Fixture, FailureClass)>,
@@ -715,11 +726,13 @@ impl Default for Suite {
 
 impl Suite {
     /// Every check, no fixtures, no opt-outs, kernel operations skipped.
-    /// [`Check::Failures`] runs by default since 0.11.0.
+    /// [`Check::Failures`] runs by default since 0.11.0; [`Check::Bodies`] since
+    /// 0.12.0 (supply [`body_space`](Self::body_space) for its direct endpoint calls).
     pub fn new() -> Self {
         Suite {
             checks: Checks::all(),
             check_failures: false,
+            body_space: None,
             fixtures: Vec::new(),
             enforced_under: Vec::new(),
             fails_under: Vec::new(),
@@ -738,6 +751,19 @@ impl Suite {
             inherit: Vec::new(),
             label: None,
         }
+    }
+
+    /// Supply the module space used to construct the kernel for [`Check::Bodies`].
+    ///
+    /// Pass the same shared space, e.g. `.body_space(space.clone())` alongside
+    /// `Kernel::new(space)`. Core 0.2.0 keeps the kernel's root private; neither
+    /// `Kernel::issue` nor `Kernel::issue_body` can compare the endpoint methods,
+    /// because both dispatch `invoke_body`. Without this handle BODIES is reported
+    /// as unprobed, never as a successful comparison. Sub-requests use the supplied
+    /// kernel, including its other configuration.
+    pub fn body_space(mut self, space: impl Space + 'static) -> Self {
+        self.body_space = Some(BodySpace(Arc::new(space)));
+        self
     }
 
     /// Select exactly the checks to run; the rest are reported as skipped.
@@ -1998,6 +2024,7 @@ impl Suite {
                 // minimal resolution, so a failed one is still reported as needed by
                 // the check that always needed it.
                 action.recompute(&mut report).await;
+                action.bodies(&mut report).await;
                 // After every check that resolves the action, so it judges every failure
                 // they observed; it fires only its own `fails_under` probes, and one
                 // minimal resolution of a read nothing above resolved.
@@ -2484,6 +2511,10 @@ impl Suite {
                     verb_list(&coverage.verbs_of(id))
                 ))
             }
+            Check::Bodies if !coverage.verbs_of(id).contains(&Verb::Source) => Some(format!(
+                "it declares no `Source` ({}), and BODIES probes only `Source`",
+                verb_list(&coverage.verbs_of(id))
+            )),
             Check::Authority if !coverage.verbs_of(id).iter().any(|v| v.is_mutating()) => {
                 Some(format!(
                     "it declares no mutating verb ({}), and AUTHORITY looks only at what a \
@@ -3852,6 +3883,8 @@ enum Probe {
     EnforcedUnder,
     /// A forced recomputation of RECOMPUTE.
     Recompute,
+    /// A direct endpoint call or body collect for BODIES.
+    Bodies,
     /// A `fails_under` probe.
     FailsUnder,
 }
@@ -3866,6 +3899,7 @@ impl Probe {
             Probe::NoGrants => "the no-grants probe",
             Probe::EnforcedUnder => "an `enforced_under` probe",
             Probe::Recompute => "a forced recomputation",
+            Probe::Bodies => "a direct BODIES invocation or collect",
             Probe::FailsUnder => "a `fails_under` probe",
         }
     }
@@ -3995,6 +4029,7 @@ impl<'a> Action<'a> {
             }
             Check::Cacheable => self.cacheable(&mut scratch, &mut coverage).await,
             Check::Recompute => self.recompute(&mut scratch).await,
+            Check::Bodies => self.bodies(&mut scratch).await,
             Check::Pipeline => self.pipeline(&mut scratch).await,
             Check::Required => self.required(&mut scratch).await,
             Check::Outputs => self.outputs(&mut scratch).await,
@@ -4814,6 +4849,158 @@ impl<'a> Action<'a> {
         // RECOMPUTE reads this: when the second resolution came back different, the
         // finding is made here and a forced recomputation would only repeat it.
         self.repeated = Some(repeated);
+    }
+
+    // ----- BODIES -------------------------------------------------------------
+
+    async fn bodies(&mut self, report: &mut Report) {
+        if !self.runs(Check::Bodies) || self.spec.verb != Verb::Source {
+            return;
+        }
+        let Some(space) = &self.suite.body_space else {
+            self.unprobed(report, Check::Bodies,
+                "the module space is unavailable: pass the kernel's shared root to Suite::body_space; kernel calls both dispatch invoke_body and cannot prove endpoint agreement");
+            return;
+        };
+        let args = self.suite.args_for(self.id, self.spec);
+        let (baseline, baseline_events) = match self.resolve_minimal(false).await {
+            Ok(answer) => answer,
+            Err(err) => {
+                self.report_failure(Check::Bodies, &err, &args, report);
+                return;
+            }
+        };
+        if self.suite.live.iter().any(|id| id == self.id)
+            || baseline.expiry != Expiry::Never
+            || self.repeated == Some(false)
+        {
+            self.unprobed(report, Check::Bodies,
+                "uncacheable, time-varying, or volatile answer: independent calls cannot establish method agreement (Suite::live, expiry or CACHEABLE's byte comparison)");
+            return;
+        }
+        let request = self.request(&args);
+        let Resolution::Hit(resolved) = space.0.resolve(&request, &Scope::empty()) else {
+            self.unprobed(
+                report,
+                Check::Bodies,
+                "the request did not resolve to an endpoint in Suite::body_space",
+            );
+            return;
+        };
+        // Direct calls bypass the kernel's default injection. Give both methods the
+        // same declared defaults a kernel invocation would receive, without replacing
+        // a fixture argument or a captured binding.
+        let mut direct_request = request.clone();
+        let mut bindings = resolved.bindings;
+        for input in &self.spec.inputs {
+            let Some(default) = &input.default else {
+                continue;
+            };
+            match input.source {
+                InputSource::Argument => {
+                    direct_request
+                        .args
+                        .entry(input.name.clone())
+                        .or_insert_with(|| ArgRef::Inline(default.as_bytes().to_vec()));
+                }
+                InputSource::Binding if bindings.get(&input.name).is_none() => {
+                    bindings.insert(input.name.clone(), default.clone());
+                }
+                _ => {}
+            }
+        }
+        // Separate invocations and pools: neither call can spend the other's budget.
+        const MAX_BYTES: usize = 64 * 1024 * 1024;
+        let inv = Invocation::with_issuer(&direct_request, &bindings, &self.caller, self.kernel);
+        let buffered_inv = inv.with_memory_limit(MAX_BYTES as u64);
+        let buffered = resolved.endpoint.invoke(&buffered_inv).await;
+        let inv = Invocation::with_issuer(&direct_request, &bindings, &self.caller, self.kernel);
+        let body_inv = inv.with_memory_limit(MAX_BYTES as u64);
+        let streamed = match resolved.endpoint.invoke_body(&body_inv).await {
+            Ok(body) => body.collect(MAX_BYTES).await,
+            Err(err) => Err(err),
+        };
+        self.observe(Probe::Bodies, &buffered);
+        self.observe(Probe::Bodies, &streamed);
+        let (buffered, streamed) = match (buffered, streamed) {
+            (Ok(buffered), Ok(streamed)) => (buffered, streamed),
+            (buffered, streamed) => {
+                let error = |answer: &Result<Representation, Error>| match answer {
+                    Ok(_) => "Ok".to_string(),
+                    Err(err) => format!("{}: {err}", err.kind()),
+                };
+                report.findings.push(self.finding(
+                    Check::Bodies,
+                    format!(
+                        "endpoint `{}`: invoke returned {}; invoke_body/collect returned {}",
+                        resolved.endpoint.name(),
+                        error(&buffered),
+                        error(&streamed)
+                    ),
+                ));
+                return;
+            }
+        };
+        if buffered.bytes != streamed.bytes || buffered.repr_type != streamed.repr_type {
+            let difference = if buffered.bytes == streamed.bytes {
+                "agree in bytes but disagree in media type".to_string()
+            } else {
+                let offset = buffered
+                    .bytes
+                    .iter()
+                    .zip(&streamed.bytes)
+                    .position(|(a, b)| a != b)
+                    .unwrap_or(buffered.bytes.len().min(streamed.bytes.len()));
+                format!("disagree at offset {offset}")
+            };
+            report.findings.push(self.finding(Check::Bodies, format!(
+                "endpoint `{}`: invoke and invoke_body {difference} ({} versus {} bytes; media types `{}` versus `{}`)",
+                resolved.endpoint.name(), buffered.bytes.len(), streamed.bytes.len(),
+                buffered.repr_type, streamed.repr_type)));
+        }
+        if streamed.bytes.len() < 2 {
+            return;
+        }
+        let bound = streamed.bytes.len() - 1;
+        // A memory grant alone never lowers the host's base. Carry a run ceiling too,
+        // using the original kernel so composites retain their issuer and host setup.
+        let mut grants: Vec<String> = self
+            .caller
+            .scopes()
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_else(|| self.spec.requires.clone());
+        grants.retain(|g| !g.starts_with("urn:cap:stream:memory:"));
+        grants.push(ikigai_core::cap_stream_memory(bound as u64));
+        let capability = Capability::scoped(grants);
+        // A fixture may already carry exactly this grant, or a prior probe may have
+        // populated this capability partition. The bounded invocation must reach the
+        // endpoint, rather than collect a full answer computed under a larger run.
+        if self.kernel.is_cached(&request, &capability) {
+            self.kernel.cut(self.target.as_str());
+            for event in baseline_events.iter().filter(|e| e.parent.is_none()) {
+                self.kernel.cut(event.target.as_str());
+            }
+        }
+        let limited = self
+            .kernel
+            .issue_body_with_context(
+                request,
+                &capability,
+                IssueContext::new().with_memory_limit(bound as u64),
+            )
+            .await;
+        let collected = match limited {
+            Ok(body) => body.collect(bound).await,
+            Err(err) => Err(err),
+        };
+        match collected {
+            Err(Error::OverBudget { .. }) => {}
+            Err(err) => report.findings.push(self.finding(Check::Bodies, format!(
+                "bounded invoke_body/collect expected OverBudget at {bound} bytes, got {}: {err}", err.kind()))),
+            Ok(short) => report.findings.push(self.finding(Check::Bodies, format!(
+                "bounded invoke_body truncated: returned {} of {} bytes under a {bound}-byte budget instead of OverBudget",
+                short.bytes.len(), streamed.bytes.len()))),
+        }
     }
 
     // ----- RECOMPUTE ----------------------------------------------------------

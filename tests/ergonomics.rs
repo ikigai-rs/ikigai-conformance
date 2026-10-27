@@ -88,9 +88,12 @@ fn a_label_names_the_run_on_the_reports_first_line() {
 
 #[test]
 fn assert_clean_with_passes_a_report_that_matches() {
+    let space = Arc::new(EndpointSpace::new().bind(Exact::new("urn:example:upper"), upper()));
+    let kernel = Kernel::new(space.clone());
     Suite::new()
+        .body_space(space)
         .pure("upper")
-        .run_blocking(&clean_kernel())
+        .run_blocking(&kernel)
         .assert_clean_with(
             &Expected::new()
                 .endpoints(1)
