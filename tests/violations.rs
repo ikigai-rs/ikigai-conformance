@@ -367,7 +367,10 @@ fn outputs_catches_a_declared_type_the_action_does_not_serve() {
         "{report}"
     );
     assert_eq!(report.of(Check::Outputs).count(), 2, "{report}");
-    assert!(report.unprobed.is_empty(), "{report}");
+    assert!(
+        report.unprobed.iter().all(|u| u.check == Check::Bodies),
+        "{report}"
+    );
 }
 
 #[test]
@@ -393,7 +396,10 @@ fn outputs_honors_a_callers_as_label_and_says_it_saw_only_that() {
     let space = EndpointSpace::new().bind(Exact::new("urn:example:relabel"), relabel());
     let report = report_of(space);
     assert!(report.of(Check::Outputs).next().is_none(), "{report}");
-    assert!(report.unprobed.is_empty(), "{report}");
+    assert!(
+        report.unprobed.iter().all(|u| u.check == Check::Bodies),
+        "{report}"
+    );
 }
 
 #[test]

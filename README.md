@@ -10,6 +10,10 @@ fn conforms() {
 }
 ```
 
+For the direct binary body check, use `Suite::new().body_space(space.clone())` with
+the same shared space passed to `Kernel::new`. Core 0.2.0 keeps that space private;
+the kernel-only `check` reports `BODIES` as unprobed. See the 0.12.0 entry below.
+
 `check` walks every endpoint the kernel binds, every action each declares, and
 returns **every violation of the module recipe at once** — one line per finding,
 endpoint id first, so a failing test is a checklist rather than the first miss:
@@ -23,7 +27,7 @@ cms-graph  VOCABULARY  source: the `text/turtle` face uses `https://ikigai-rs.de
 sparql-construct  OUTPUTS  source: served `text/turtle` with its minimal inputs but declares only `application/sparql-results+json`: a face the manifold does not announce and the RDF checks never saw — declare it (`.output("text/turtle")`) or serve what is declared
 link-remove  DECLARATIONS  declared live (`Suite::live`) but nothing held it to it: it declares no cacheable verb (it declares delete), and CACHEABLE returns early on a mutating one. The report prints `declared live: link-remove`, which reads as a check that ran
 7 finding(s) across 4 endpoint(s), 4 action(s)
-checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES RECOMPUTE DATATYPES FAILURES
+checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES RECOMPUTE DATATYPES FAILURES BODIES
 probed 3 face(s) across 3 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
 probed: ik-context source `application/ld+json`: 0 triple(s) — nothing was checked
@@ -74,6 +78,7 @@ pointing at the check.
 | `RECOMPUTE` | cacheability | an `Expiry::Never` answer the cache holds is recomputed after a cut of every thread it carries and of everything it read, 24 times, and every computation must repeat the first one's bytes (one recomputation agrees with the first by chance as often as a two-entry map's order does); each thread an endpoint declared (`depends_on`) is also cut alone and recomputed. `CACHEABLE`'s second resolution is the cache hit, so it can only repeat the first: this is the witness that sees a wrong `.cacheable()` (a fresh nonce, key or timestamp, a `HashMap` order). An order is caught only if the fixture has enough entries for order to matter ([below](#a-fixture-gives-an-order-something-to-order)). An `Expiry::At` answer is exempt (a function of the time too). Each clean answer is a `recomputed:` line. Subtract it (`Checks::all() - Checks::RECOMPUTE`) for a test that pins how often a fixture is read, or waive it per endpoint with the reason an answer differs by design |
 | `DATATYPES` | one graph, two faces, the same terms | every literal in an RDF face carries the datatype its property's `rdfs:range` declares in `ikigai-vocab` — the datatype the generated JSON-LD context (`ikigai_vocab::CONTEXT`) coerces it to. A hand-written Turtle `ik:batchAt 2` is a bare `xsd:integer` while the context coerces the same JSON number to `xsd:positiveInteger`: value-equal, not term-equal, so a diff of the two faces of one graph shows a difference that is not there. The rule is "tag what the shorthand cannot express": Turtle writes `xsd:integer`, `xsd:decimal`, `xsd:double`, `xsd:boolean` and a plain string bare, so `ik:context 8192` (range `xsd:integer`) passes untagged, and only a property whose range is an XSD datatype other than `xsd:string` is judged. Reads the faces `SKOLEM-RDF` and `VOCABULARY` already parse (`rdf::datatype_mismatches` reproduces it by hand); in `Checks::RDF` (ledger #356) |
 | `FAILURES` | declared = produced | **Runs by default since 0.11.0.** An action that states its failure classes (core 0.1.108's `.fails(FailureClass::…)` on an `ActionSpec` or a flat `Description`) fails only with a class it admits: every failure the walk observes from it (the minimal resolution, an RDF face's `as=` resolution, the pipeline firing, REQUIRED's baseline firing, the no-grants probe, an `enforced_under` probe, a forced recomputation, a `fails_under` probe) is held to the declaration by core's one predicate, `ActionSpec::admits_failure`, over `Error::class()`. `permanent` is always admitted and `denied` beside a `requires`. An action that states nothing is listed on a `failures:` line, never a finding. A `Denied` under the no-grants probe stays `ENFORCED`'s, and REQUIRED's deliberately broken calls stay `REQUIRED`'s. A `Suite::fails_under` probe must fail with exactly the class it states. It fires nothing a walk does not already fire, but one minimal resolution of a read no other selected check resolved |
+| `BODIES` | binary body contract | on by default since 0.12.0; with `Suite::body_space`, directly compare a deterministic Source endpoint's `invoke` and collected `invoke_body` bytes and media type, then require `OverBudget` from a kernel body collect under `len - 1` bytes. A shorter success is truncated. Missing module space and volatile answers are explicitly unprobed; see the 0.11.0 → 0.12.0 entry |
 
 ### Why `VALIDATE` is here and not in `bind`
 
@@ -435,7 +440,11 @@ endpoint); the report lists it as `unprobed`. Under `Suite::required_on_mutating
 a `Sink` or `Delete` is also fired once per required by-value input, and once more as
 the baseline when the pipeline probe did not fire it. Sinks land: capture what a
 fixture reads before the walk and assert effects after it. Each
-`Suite::enforced_under` probe fires its action once more, as the probe's caller.
+`Suite::enforced_under` probe fires its action once more, as the probe's caller. With
+`Suite::body_space`, `BODIES` also calls each eligible deterministic `Source` endpoint's
+`invoke` and `invoke_body` directly and issues one kernel body request under a smaller
+budget (the bounded request only for answers of at least two bytes). Volatile answers
+are skipped with a reason.
 
 **An endpoint bound N times is fired once per DISTINCT request those bindings
 produce, not N times.** The invoking checks are memoized on the request, because
@@ -766,7 +775,7 @@ not reach as loudly as what it found.
 
 ```
 0 finding(s) across 6 endpoint(s), 9 action(s)
-checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS* SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES RECOMPUTE DATATYPES FAILURES
+checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS* SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES RECOMPUTE DATATYPES FAILURES BODIES
 * OUTPUTS ran on 1 of 6 endpoint(s); waived on the rest (see `opted out:`)
 probed 7 face(s) across 5 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
@@ -1010,8 +1019,63 @@ anyone memoizes by id.
 
 ## Status
 
-0.11.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.12.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.11.0 → 0.12.0: `BODIES` by default (ledger #2249)
+
+`BODIES`, a nineteenth check, holds each deterministic `Source` to the binary body
+contract in core 0.2.0. It uses the same target, bindings, arguments and caller as
+the walk's minimal resolution. It resolves the endpoint in the module's own space,
+then calls `invoke` and `invoke_body` separately with `Invocation::with_issuer`,
+so composites can issue sub-requests. The collected bytes and media type (including
+parameters) must agree. A byte mismatch names the endpoint and first differing
+offset, including the end of the shorter answer when one is a prefix of the other.
+Comparing `Kernel::issue` with `Kernel::issue_body` cannot establish this: **both
+kernel methods dispatch `invoke_body`** in core 0.2.0.
+
+For an answer of at least two bytes, a second kernel body request carries
+`cap_stream_memory(len - 1)` and an explicit run memory limit of `len - 1` (a grant
+alone raises a host's base allowance; it cannot lower it). The body is collected
+with that same bound: only `Error::OverBudget` passes. A shorter success is reported
+as **truncated**, and any other error is named. The original kernel handles this
+request, preserving host configuration and sub-request routing. A fixture's scopes
+and principal are retained; under the default root caller the bounded capability
+carries the action's declared requirements plus the memory grant. Deliberate
+low-budget errors belong to `BODIES`, not `FAILURES`.
+
+**Supply the same shared module space used by the kernel:**
+
+```rust
+let space = std::sync::Arc::new(my_space());
+let kernel = ikigai_core::Kernel::new(space.clone());
+ikigai_conformance::Suite::new()
+    .body_space(space)
+    .run_blocking(&kernel)
+    .assert_clean();
+```
+
+Core 0.2.0 exposes no kernel root-space accessor. Existing kernel-only entry points
+(`check`, `check_with`, or a suite without `body_space`) therefore list `BODIES` as
+**unprobed** with the missing-space reason, never as a successful method comparison.
+An uncacheable (`Expiry::Always`), time-varying (`Expiry::At`), declared live, or
+already observed differing answer is also unprobed with a reason. A volatile
+sub-request propagates that effective expiry to its composite. A short answer still
+gets the method comparison; the smaller-budget probe applies only at two bytes or
+more. The generous comparison collect bound is 64 MiB.
+
+**What can turn a green suite red?** With `body_space` supplied, different bytes or
+media types from the two endpoint methods, silent truncation under the smaller
+budget, or an error other than `OverBudget` under that budget now produces a
+finding. A direct endpoint invocation or comparison collect that fails is also a
+finding. Most endpoints need no implementation change: the default `invoke_body`
+wraps `invoke`. `Expected::nothing_unprobed()` also turns red if a selected BODIES
+check lacks the module space or skips a volatile answer. The default walk adds two
+direct endpoint calls and one bounded kernel body request per eligible `Source`,
+plus a minimal resolution if no other selected check made it. Tests that pin call
+counts can subtract `Checks::BODIES` with their reason, or waive an endpoint with
+`.opt_out_check("id", Check::Bodies, "why this comparison cannot hold")`.
+No mutating verb or `Exists` is invoked by this check.
 
 ### 0.10.0 → 0.11.0: core 0.2.0, `FAILURES` and `DATATYPES` by default, `Suite::vocabulary` (ledger #2261)
 
