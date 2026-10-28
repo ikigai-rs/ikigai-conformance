@@ -729,7 +729,7 @@ impl Suite {
     /// Every check, no fixtures, no opt-outs, kernel operations skipped.
     /// [`Check::Failures`] runs by default since 0.11.0; [`Check::Bodies`] since
     /// 0.12.0 (supply [`body_space`](Self::body_space) for its direct endpoint calls).
-    /// [`Check::BodyInputs`] runs by default since 0.13.0.
+    /// [`Check::BodyInputs`] runs by default since 0.12.0.
     pub fn new() -> Self {
         Suite {
             checks: Checks::all(),

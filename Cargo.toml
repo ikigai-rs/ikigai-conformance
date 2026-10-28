@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-conformance"
-version = "0.13.0"
+version = "0.12.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "What \"done\" means for an ikigai module, as one test: walks every endpoint a kernel binds and reports every violation of the module recipe at once — ArgSpec completeness, requires implies a verb, declared = enforced, declared outputs = served outputs, skolemized RDF faces, vocabulary terms only, the cacheable-twice probe, pipeline citizenship, a space's name is a claim (same name, same doors), every description passes core's own validate, a required input is required and an input group holds, a resolution a check needed resolves, an action fails only with a failure class it states (opt-in) — and says what it did NOT do: what it probed, what it could not, and which of your own declarations reached no check at all."
@@ -80,7 +80,7 @@ categories = ["development-tools::testing"]
 # <0.2.0, so a module on core 0.2.0 linked a second core through this crate and its
 # conformance test stopped compiling (ikigai-vocab's did, ledger #2308). Every adopter
 # moves with this release.
-# 0.2.4 since 0.13.0: BODY-INPUTS reads ArgSpec::reads_body and uses BodyIssue
+# 0.2.4 since 0.12.0: BODY-INPUTS reads ArgSpec::reads_body and uses BodyIssue
 # to exercise live attachments through the same host kernel (ledger #2457).
 ikigai-core = "0.2.4"
 # The vocabulary is the ORACLE for the terms check: a predicate is "defined" iff it
@@ -145,8 +145,7 @@ ikigai-core = "0.2.4"
 # they are invented.
 # 0.11.0: re-checked — 0.2.0 is the head on crates.io; raised to it (the RANGE >=0.2.0,
 # <0.3.0). It matches the core floor above.
-# 0.12.0: re-checked — 0.2.0 remains the newest published vocabulary.
-# 0.13.0: re-checked — 0.2.4 is the newest published vocabulary; includes readsBody.
+# 0.12.0: re-checked — 0.2.4 is the newest published vocabulary; includes readsBody.
 ikigai-vocab = "0.2.4"
 # One parser for every RDF face a module can declare (Turtle, N-Triples, N-Quads,
 # TriG, RDF/XML, JSON-LD). 0.2.5 is the version whose `for_slice` and

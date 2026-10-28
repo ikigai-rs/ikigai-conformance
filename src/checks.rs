@@ -327,7 +327,7 @@ pub enum Check {
     /// content id and a one-shot attached body. Bytes and media type must agree;
     /// expiry may differ. Supply [`Suite::body_input_store`](crate::Suite::body_input_store)
     /// for the stored-content probe. Runs on every verb, including mutations, and
-    /// costs up to four calls per declared argument. On by default since 0.13.0.
+    /// costs up to four calls per declared argument. On by default since 0.12.0.
     BodyInputs,
 }
 }
