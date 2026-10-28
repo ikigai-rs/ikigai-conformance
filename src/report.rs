@@ -537,6 +537,8 @@ pub struct Evidence {
     /// [`Check::Recompute`] recomputed and found identical, in walk order
     /// (`recomputed:` lines).
     pub recomputed: Vec<Recomputed>,
+    /// Successful BODY-INPUTS transport comparisons, in walk order.
+    pub body_inputs: Vec<BodyInputComparison>,
     /// Every read action whose only intake is an input group with no `pipe` member, in
     /// walk order (`pipeline:` lines, under [`Check::Pipeline`]).
     pub named_only: Vec<NamedOnly>,
@@ -551,6 +553,20 @@ pub struct Evidence {
     /// Every [`Suite::fails_under`](crate::Suite::fails_under) probe that ran, in walk
     /// order (`fails under:` lines).
     pub fails_under: Vec<FailsUnder>,
+}
+
+/// One transport whose answer matched its inline baseline under BODY-INPUTS.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BodyInputComparison {
+    /// The endpoint's description id.
+    pub endpoint: String,
+    /// The action's verb.
+    pub verb: Verb,
+    /// The input declared `reads_body`.
+    pub input: String,
+    /// The transport compared with inline bytes.
+    pub transport: String,
 }
 
 /// What [`Check::Failures`] saw of one action: what it declares and the classes of the
@@ -1244,6 +1260,16 @@ impl fmt::Display for Report {
         if !skipped.is_empty() {
             writeln!(f, "skipped: {}", skipped.join(" "))?;
         }
+        for comparison in &declared.evidence.body_inputs {
+            writeln!(
+                f,
+                "body-inputs: {} {} `{}` {}: identical to inline (bytes and media type)",
+                visible(&comparison.endpoint),
+                verb_name(comparison.verb),
+                visible(&comparison.input),
+                comparison.transport
+            )?;
+        }
         // What was PROBED, not only what was checked: a clean report otherwise says
         // nothing about whether anything was ever reached. Every face, not only the
         // RDF ones — a module with no graph face had no section at all, which is
@@ -1817,6 +1843,7 @@ mod tests {
                     label: None,
                     enforced_under: vec![],
                     recomputed: vec![],
+                    body_inputs: vec![],
                     named_only: vec![],
                     check_failures: false,
                     failures: vec![],
@@ -1951,6 +1978,7 @@ mod tests {
                     label: None,
                     enforced_under: vec![],
                     recomputed: vec![],
+                    body_inputs: vec![],
                     named_only: vec![],
                     check_failures: false,
                     failures: vec![],

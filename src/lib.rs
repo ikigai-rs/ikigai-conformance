@@ -63,6 +63,7 @@
 //! | [`Datatypes`](Check::Datatypes) | one graph, two faces, the same terms | every literal in an RDF face carries the datatype its property's `rdfs:range` declares in `ikigai-vocab`, the one the generated JSON-LD context coerces it to; a bare Turtle number is `xsd:integer`, so a range the shorthand cannot express (`xsd:positiveInteger`, `xsd:nonNegativeInteger`, `xsd:dateTime`) must be tagged ([`rdf::datatype_mismatches`]) |
 //! | [`Failures`](Check::Failures) | declared = produced | **Runs by default since 0.11.0.** An action that states its failure classes (core 0.1.108's `ActionSpec::fails` / `Description::fails`) fails only with a class it admits: every failure the walk observes is held to the declaration by core's `ActionSpec::admits_failure` over `Error::class()` (`permanent` implied, `denied` beside a `requires`); an action that states nothing is listed on a `failures:` line, never a finding; a [`Suite::fails_under`] probe must fail with exactly the class it states |
 //! | [`Bodies`](Check::Bodies) | binary body contract | on by default since 0.12.0; with [`Suite::body_space`], directly compare a deterministic `Source` endpoint's `invoke` and collected `invoke_body` bytes and media type, then require `OverBudget` under a smaller kernel body collect budget; missing module space and volatile answers are explicitly unprobed |
+//! | [`BodyInputs`](Check::BodyInputs) | declared = enforced | on by default since 0.13.0; each `reads_body` argument answers inline, reference, stored content id and one-shot attached inputs with identical bytes and media type. Supply [`Suite::body_input_store`] for stored content; missing setup is unprobed. Up to four calls per argument on every verb, including mutations |
 //!
 //! Both RDF checks resolve and **parse** the face, so a mislabeled or malformed
 //! graph is reported whichever of the two is selected — under
@@ -257,12 +258,15 @@
 //! by-value input without a default ([`Required`](Check::Required)); each declared
 //! RDF face beyond the first is resolved once more with `as=`; a `Sink` or `Delete` declaring
 //! `content` is fired **once**, by the pipeline probe, and [`Outputs`](Check::Outputs)
-//! reads that same firing; a mutating action without `content` is never fired
+//! reads that same firing; apart from BODY-INPUTS below, a mutating action without `content` is never fired
 //! under root ([`Enforced`](Check::Enforced) and [`Authority`](Check::Authority) run
 //! under no grants, off **one** shared resolution however many of the two are
 //! selected) and is listed as unprobed. Under [`Suite::required_on_mutating`] a
 //! `Sink` or `Delete` is also fired once per required by-value input, and once more
 //! as the baseline when the pipeline probe did not fire it. Fixture bindings are per entry, not per verb (see [`Fixture::binding`]).
+//! [`BodyInputs`](Check::BodyInputs) adds up to four calls per `reads_body` argument
+//! on every verb, including mutations. Subtract [`Checks::BODY_INPUTS`] or waive it
+//! with a reason when repeated calls cannot produce comparable answers.
 //! A check WAIVED for an endpoint ([`Suite::opt_out_check`]) is still run on its
 //! reads, after the walk proper, with the findings set aside: the same `Source` and
 //! `Exists` resolutions the check fires unwaived, and never a `Sink` or `Delete` the
@@ -297,9 +301,10 @@ mod suite;
 
 pub use checks::{Check, Checks};
 pub use report::{
-    Collapsed, Declarations, DeclaredSpace, DeclaredVocabulary, EnforcedUnder, Evidence, Expected,
-    FailsUnder, FailuresSeen, Finding, Inherited, NamedOnly, OptedOut, OptedOutAt, OptedOutCheck,
-    Probed, Recomputed, RefusedBy, Report, RequiredProbe, SpaceNaming, Unprobed,
+    BodyInputComparison, Collapsed, Declarations, DeclaredSpace, DeclaredVocabulary, EnforcedUnder,
+    Evidence, Expected, FailsUnder, FailuresSeen, Finding, Inherited, NamedOnly, OptedOut,
+    OptedOutAt, OptedOutCheck, Probed, Recomputed, RefusedBy, Report, RequiredProbe, SpaceNaming,
+    Unprobed,
 };
 pub use suite::{Fixture, Suite};
 

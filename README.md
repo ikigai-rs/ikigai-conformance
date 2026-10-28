@@ -27,7 +27,7 @@ cms-graph  VOCABULARY  source: the `text/turtle` face uses `https://ikigai-rs.de
 sparql-construct  OUTPUTS  source: served `text/turtle` with its minimal inputs but declares only `application/sparql-results+json`: a face the manifold does not announce and the RDF checks never saw — declare it (`.output("text/turtle")`) or serve what is declared
 link-remove  DECLARATIONS  declared live (`Suite::live`) but nothing held it to it: it declares no cacheable verb (it declares delete), and CACHEABLE returns early on a mutating one. The report prints `declared live: link-remove`, which reads as a check that ran
 7 finding(s) across 4 endpoint(s), 4 action(s)
-checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES RECOMPUTE DATATYPES FAILURES BODIES
+checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES RECOMPUTE DATATYPES FAILURES BODIES BODY-INPUTS
 probed 3 face(s) across 3 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
 probed: ik-context source `application/ld+json`: 0 triple(s) — nothing was checked
@@ -79,6 +79,7 @@ pointing at the check.
 | `DATATYPES` | one graph, two faces, the same terms | every literal in an RDF face carries the datatype its property's `rdfs:range` declares in `ikigai-vocab` — the datatype the generated JSON-LD context (`ikigai_vocab::CONTEXT`) coerces it to. A hand-written Turtle `ik:batchAt 2` is a bare `xsd:integer` while the context coerces the same JSON number to `xsd:positiveInteger`: value-equal, not term-equal, so a diff of the two faces of one graph shows a difference that is not there. The rule is "tag what the shorthand cannot express": Turtle writes `xsd:integer`, `xsd:decimal`, `xsd:double`, `xsd:boolean` and a plain string bare, so `ik:context 8192` (range `xsd:integer`) passes untagged, and only a property whose range is an XSD datatype other than `xsd:string` is judged. Reads the faces `SKOLEM-RDF` and `VOCABULARY` already parse (`rdf::datatype_mismatches` reproduces it by hand); in `Checks::RDF` (ledger #356) |
 | `FAILURES` | declared = produced | **Runs by default since 0.11.0.** An action that states its failure classes (core 0.1.108's `.fails(FailureClass::…)` on an `ActionSpec` or a flat `Description`) fails only with a class it admits: every failure the walk observes from it (the minimal resolution, an RDF face's `as=` resolution, the pipeline firing, REQUIRED's baseline firing, the no-grants probe, an `enforced_under` probe, a forced recomputation, a `fails_under` probe) is held to the declaration by core's one predicate, `ActionSpec::admits_failure`, over `Error::class()`. `permanent` is always admitted and `denied` beside a `requires`. An action that states nothing is listed on a `failures:` line, never a finding. A `Denied` under the no-grants probe stays `ENFORCED`'s, and REQUIRED's deliberately broken calls stay `REQUIRED`'s. A `Suite::fails_under` probe must fail with exactly the class it states. It fires nothing a walk does not already fire, but one minimal resolution of a read no other selected check resolved |
 | `BODIES` | binary body contract | on by default since 0.12.0; with `Suite::body_space`, directly compare a deterministic Source endpoint's `invoke` and collected `invoke_body` bytes and media type, then require `OverBudget` from a kernel body collect under `len - 1` bytes. A shorter success is truncated. Missing module space and volatile answers are explicitly unprobed; see the 0.11.0 → 0.12.0 entry |
+| `BODY-INPUTS` | declared = enforced | on by default since 0.13.0; for each `reads_body` argument, compare inline, reference, stored content and one-shot attached inputs. Answer bytes and media type must match; expiry may differ. Supply `Suite::body_input_store` for stored content. Up to four calls per argument on every verb, including writes; missing setup and failed inline baselines are explicitly unprobed |
 
 ### Why `VALIDATE` is here and not in `bind`
 
@@ -434,7 +435,7 @@ required by-value input
 without a default (`REQUIRED`), each declared RDF face beyond the first
 is resolved once more with `as=`, and a `Sink` or `Delete` declaring `content` is
 fired **once**, by the pipeline probe — `OUTPUTS` reads that same firing rather than
-making another. A mutating action without `content` is never fired under root
+making another. Apart from `BODY-INPUTS` below, a mutating action without `content` is never fired under root
 (`ENFORCED` runs under no grants and, when the gate is declared, never reaches the
 endpoint); the report lists it as `unprobed`. Under `Suite::required_on_mutating()`
 a `Sink` or `Delete` is also fired once per required by-value input, and once more as
@@ -444,7 +445,8 @@ fixture reads before the walk and assert effects after it. Each
 `Suite::body_space`, `BODIES` also calls each eligible deterministic `Source` endpoint's
 `invoke` and `invoke_body` directly and issues one kernel body request under a smaller
 budget (the bounded request only for answers of at least two bytes). Volatile answers
-are skipped with a reason.
+are skipped with a reason. `BODY-INPUTS` adds up to four calls per `reads_body`
+argument on every verb, including mutations, as described in the 0.13.0 entry.
 
 **An endpoint bound N times is fired once per DISTINCT request those bindings
 produce, not N times.** The invoking checks are memoized on the request, because
@@ -775,7 +777,7 @@ not reach as loudly as what it found.
 
 ```
 0 finding(s) across 6 endpoint(s), 9 action(s)
-checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS* SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES RECOMPUTE DATATYPES FAILURES BODIES
+checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS* SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES RECOMPUTE DATATYPES FAILURES BODIES BODY-INPUTS
 * OUTPUTS ran on 1 of 6 endpoint(s); waived on the rest (see `opted out:`)
 probed 7 face(s) across 5 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
@@ -1019,8 +1021,47 @@ anyone memoizes by id.
 
 ## Status
 
-0.12.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.13.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.12.0 → 0.13.0: `BODY-INPUTS` by default (ledger #2457)
+
+Core 0.2.4 publishes `ArgSpec::reads_body`: an argument declared this way must
+answer the same whether its bytes arrive inline, as a resource reference, as a
+stored `b3:` content id, or as a live attached body. `BODY-INPUTS`, the twentieth
+check, probes each declared argument separately on every verb. It compares answer
+bytes and media type; expiry may differ, because consuming a one-shot attachment
+makes an answer uncacheable. Successful comparisons appear as `body-inputs:` lines
+in the report and in `report.declared.evidence.body_inputs`.
+
+Pass the same shared content store to the kernel and suite:
+
+```rust
+let store = Arc::new(ikigai_core::MemoryContentStore::new(1024 * 1024));
+let kernel = Kernel::new(space).with_content_store(store.clone());
+let report = Suite::new().body_input_store(store).run_blocking(&kernel);
+report.assert_clean();
+```
+
+The suite holds its samples in that store until each content request finishes.
+Without the handle, the stored-content comparison is explicitly `unprobed`; the
+reference and attached comparisons still run. References are served from a private
+sample corridor on the existing kernel. All variants keep the target, bindings,
+other arguments and fixture capability. Binary fixture values are preserved; an
+omitted optional body argument is filled from its default, example or class sample.
+A failed inline baseline is reported through `RESOLVES` and leaves that argument's
+transport comparisons unprobed. The existing `BODIES` method-agreement check remains
+separately selectable.
+
+This adds up to **four calls per declared body argument**, including on `Sink` and
+`Delete`. Use isolated fixtures whose repeated actions produce comparable answers.
+A check waiver never adds a write during idle-waiver accounting. To skip these
+probes, subtract `Checks::BODY_INPUTS`, waive `Check::BodyInputs` with a reason, or
+opt out the action. Endpoints without `reads_body` receive no additional calls.
+
+This default is introduced at a minor release so adopters opt in by moving their
+conformance pin. The core API floor and vocabulary floor both advance to published
+0.2.4; the latter defines `ik:readsBody`.
 
 ### 0.11.0 → 0.12.0: `BODIES` by default (ledger #2249)
 

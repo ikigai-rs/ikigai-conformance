@@ -322,6 +322,13 @@ pub enum Check {
     /// `Error::OverBudget`. Uncacheable and volatile answers are explicitly unprobed.
     /// On by default since 0.12.0; subtract [`Checks::BODIES`] with a reason to waive it.
     Bodies,
+    /// **A declared body reader answers every transport identically.** For every
+    /// `reads_body` argument, compare inline bytes with a resource reference, a stored
+    /// content id and a one-shot attached body. Bytes and media type must agree;
+    /// expiry may differ. Supply [`Suite::body_input_store`](crate::Suite::body_input_store)
+    /// for the stored-content probe. Runs on every verb, including mutations, and
+    /// costs up to four calls per declared argument. On by default since 0.13.0.
+    BodyInputs,
 }
 }
 
@@ -347,6 +354,7 @@ impl Check {
             Check::Recompute => "RECOMPUTE",
             Check::Failures => "FAILURES",
             Check::Bodies => "BODIES",
+            Check::BodyInputs => "BODY-INPUTS",
             Check::Datatypes => "DATATYPES",
         }
     }
@@ -370,6 +378,7 @@ impl Check {
                 | Check::Failures
                 | Check::Datatypes
                 | Check::Bodies
+                | Check::BodyInputs
         )
     }
 
@@ -447,6 +456,8 @@ impl Checks {
     pub const DATATYPES: Checks = Checks(1 << (Check::Datatypes as u32));
     /// [`Check::Bodies`].
     pub const BODIES: Checks = Checks(1 << (Check::Bodies as u32));
+    /// [`Check::BodyInputs`].
+    pub const BODY_INPUTS: Checks = Checks(1 << (Check::BodyInputs as u32));
     /// Every RDF-face check: [`Check::SkolemRdf`], [`Check::Vocabulary`] and
     /// [`Check::Datatypes`] — the set a module without a graph face subtracts.
     pub const RDF: Checks =

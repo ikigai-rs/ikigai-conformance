@@ -697,6 +697,7 @@ pub struct Suite {
     checks: Checks,
     check_failures: bool,
     body_space: Option<BodySpace>,
+    body_input_store: Option<Arc<ikigai_core::MemoryContentStore>>,
     fixtures: Vec<Fixture>,
     enforced_under: Vec<Fixture>,
     fails_under: Vec<(Fixture, FailureClass)>,
@@ -728,11 +729,13 @@ impl Suite {
     /// Every check, no fixtures, no opt-outs, kernel operations skipped.
     /// [`Check::Failures`] runs by default since 0.11.0; [`Check::Bodies`] since
     /// 0.12.0 (supply [`body_space`](Self::body_space) for its direct endpoint calls).
+    /// [`Check::BodyInputs`] runs by default since 0.13.0.
     pub fn new() -> Self {
         Suite {
             checks: Checks::all(),
             check_failures: false,
             body_space: None,
+            body_input_store: None,
             fixtures: Vec::new(),
             enforced_under: Vec::new(),
             fails_under: Vec::new(),
@@ -763,6 +766,27 @@ impl Suite {
     /// kernel, including its other configuration.
     pub fn body_space(mut self, space: impl Space + 'static) -> Self {
         self.body_space = Some(BodySpace(Arc::new(space)));
+        self
+    }
+
+    /// Supply the same store installed with `Kernel::with_content_store` for
+    /// [`Check::BodyInputs`]. The suite holds each sample in it while issuing a
+    /// content-id request through the supplied kernel. Without this handle the
+    /// stored-content comparison is explicitly unprobed; the reference and attached
+    /// comparisons still run. A different store will cause the content probe to fail.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use ikigai_core::{EndpointSpace, Kernel, MemoryContentStore};
+    /// use ikigai_conformance::Suite;
+    /// let store = Arc::new(MemoryContentStore::new(1024 * 1024));
+    /// let kernel = Kernel::new(Arc::new(EndpointSpace::new()))
+    ///     .with_content_store(store.clone());
+    /// let report = Suite::new().body_input_store(store).run_blocking(&kernel);
+    /// report.assert_clean();
+    /// ```
+    pub fn body_input_store(mut self, store: Arc<ikigai_core::MemoryContentStore>) -> Self {
+        self.body_input_store = Some(store);
         self
     }
 
@@ -2025,6 +2049,7 @@ impl Suite {
                 // the check that always needed it.
                 action.recompute(&mut report).await;
                 action.bodies(&mut report).await;
+                action.body_inputs(&mut report).await;
                 // After every check that resolves the action, so it judges every failure
                 // they observed; it fires only its own `fails_under` probes, and one
                 // minimal resolution of a read nothing above resolved.
@@ -3885,6 +3910,8 @@ enum Probe {
     Recompute,
     /// A direct endpoint call or body collect for BODIES.
     Bodies,
+    /// A BODY-INPUTS transport comparison.
+    BodyInputs,
     /// A `fails_under` probe.
     FailsUnder,
 }
@@ -3900,6 +3927,7 @@ impl Probe {
             Probe::EnforcedUnder => "an `enforced_under` probe",
             Probe::Recompute => "a forced recomputation",
             Probe::Bodies => "a direct BODIES invocation or collect",
+            Probe::BodyInputs => "a BODY-INPUTS transport comparison",
             Probe::FailsUnder => "a `fails_under` probe",
         }
     }
@@ -4030,6 +4058,7 @@ impl<'a> Action<'a> {
             Check::Cacheable => self.cacheable(&mut scratch, &mut coverage).await,
             Check::Recompute => self.recompute(&mut scratch).await,
             Check::Bodies => self.bodies(&mut scratch).await,
+            Check::BodyInputs => self.body_inputs(&mut scratch).await,
             Check::Pipeline => self.pipeline(&mut scratch).await,
             Check::Required => self.required(&mut scratch).await,
             Check::Outputs => self.outputs(&mut scratch).await,
@@ -4668,6 +4697,10 @@ impl<'a> Action<'a> {
         let Some(repr) = served else {
             return;
         };
+        self.record_answer(repr, report);
+    }
+
+    fn record_answer(&self, repr: &Representation, report: &mut Report) {
         let face = rdf::bare_media_type(&repr.repr_type.media_type);
         if report
             .probed
@@ -4849,6 +4882,190 @@ impl<'a> Action<'a> {
         // RECOMPUTE reads this: when the second resolution came back different, the
         // finding is made here and a forced recomputation would only repeat it.
         self.repeated = Some(repeated);
+    }
+
+    // ----- BODY-INPUTS --------------------------------------------------------
+
+    async fn body_inputs(&mut self, report: &mut Report) {
+        if !self.runs(Check::BodyInputs) {
+            return;
+        }
+        for input in self.spec.inputs.iter().filter(|i| i.reads_body) {
+            if input.source != InputSource::Argument {
+                self.unprobed(
+                    report,
+                    Check::BodyInputs,
+                    format!(
+                        "`{}` declares reads_body on a binding, not an argument",
+                        input.name
+                    ),
+                );
+                continue;
+            }
+            if !self.may_fire() {
+                return;
+            }
+            let mut args = self.suite.args_for(self.id, self.spec);
+            let bytes = args
+                .entry(input.name.clone())
+                .or_insert_with(|| sample_value(input).into_bytes())
+                .clone();
+            complete_relations(self.spec, &mut args);
+            // An anonymous, private corridor provides just the sample resource. All
+            // variants share this scope and retain the host kernel and caller, so
+            // module subrequests and host policies continue to apply. A fresh scope
+            // also prevents a previous suite run from hiding a transport defect.
+            let mut reference_name = format!(
+                "urn:ikigai:conformance:body-input:{}",
+                ikigai_core::ContentId::of(&bytes)
+            );
+            while reference_name == self.target.as_str() {
+                reference_name.push_str(":input");
+            }
+            let reference = Iri::parse(&reference_name).expect("generated sample IRI");
+            let sample = bytes.clone();
+            let space = ikigai_core::EndpointSpace::new().bind(
+                ikigai_core::Exact::new(reference_name),
+                ikigai_core::FnEndpoint::new("body-input-sample", move |_| {
+                    Ok(Representation::new(
+                        ikigai_core::ReprType::new("application/octet-stream"),
+                        sample.clone(),
+                    )
+                    .cacheable())
+                }),
+            );
+            let scope = Scope::empty().with(Arc::new(space));
+            self.caller_used = true;
+            let baseline = self
+                .kernel
+                .issue_with(
+                    self.request(&args),
+                    &self.caller,
+                    ikigai_core::BodyIssue::new().in_scope(scope.clone()),
+                )
+                .await;
+            self.observe(Probe::BodyInputs, &baseline);
+            let baseline = match baseline {
+                Ok(answer) => answer,
+                Err(err) => {
+                    self.report_failure(Check::BodyInputs, &err, &args, report);
+                    self.unprobed(
+                        report,
+                        Check::BodyInputs,
+                        format!(
+                            "`{}` reads_body: inline baseline failed; no transports compared",
+                            input.name
+                        ),
+                    );
+                    continue;
+                }
+            };
+            self.record_answer(&baseline, report);
+            let mut request = self.request(&args);
+            request
+                .args
+                .insert(input.name.clone(), ArgRef::Reference(reference));
+            let referenced = self
+                .kernel
+                .issue_with(
+                    request,
+                    &self.caller,
+                    ikigai_core::BodyIssue::new().in_scope(scope.clone()),
+                )
+                .await;
+            self.observe(Probe::BodyInputs, &referenced);
+            self.compare_body_input(&input.name, "reference", &baseline, referenced, report);
+
+            if let Some(store) = &self.suite.body_input_store {
+                match store.put(bytes.clone()) {
+                    Ok(held) => {
+                        let mut request = self.request(&args);
+                        request
+                            .args
+                            .insert(input.name.clone(), ArgRef::Content(held.id()));
+                        let stored = self
+                            .kernel
+                            .issue_with(
+                                request,
+                                &self.caller,
+                                ikigai_core::BodyIssue::new().in_scope(scope.clone()),
+                            )
+                            .await;
+                        self.observe(Probe::BodyInputs, &stored);
+                        self.compare_body_input(
+                            &input.name,
+                            "stored content id",
+                            &baseline,
+                            stored,
+                            report,
+                        );
+                        drop(held);
+                    }
+                    Err(err) => self.unprobed(
+                        report,
+                        Check::BodyInputs,
+                        format!("`{}` reads_body: could not store sample: {err}", input.name),
+                    ),
+                }
+            } else {
+                self.unprobed(report, Check::BodyInputs,
+                    format!("`{}` reads_body: stored content id was not compared; supply the kernel's shared store to Suite::body_input_store", input.name));
+            }
+
+            let mut request = self.request(&args);
+            request.args.remove(&input.name);
+            // Multiple chunks exercise actual stream consumption. Body::once has no
+            // content validator: the kernel must pass a live, one-shot attachment.
+            let split = bytes.len() / 2;
+            let body = ikigai_core::Body::once(futures::stream::iter([
+                Ok(ikigai_core::Bytes::copy_from_slice(&bytes[..split])),
+                Ok(ikigai_core::Bytes::copy_from_slice(&bytes[split..])),
+            ]));
+            let attached = self
+                .kernel
+                .issue_with(
+                    request,
+                    &self.caller,
+                    ikigai_core::BodyIssue::new()
+                        .in_scope(scope)
+                        .attach(&input.name, body),
+                )
+                .await;
+            self.observe(Probe::BodyInputs, &attached);
+            self.compare_body_input(
+                &input.name,
+                "one-shot attached body",
+                &baseline,
+                attached,
+                report,
+            );
+        }
+    }
+
+    fn compare_body_input(
+        &self,
+        name: &str,
+        transport: &str,
+        baseline: &Representation,
+        answer: Result<Representation, Error>,
+        report: &mut Report,
+    ) {
+        let detail = match answer {
+            Err(err) => format!("`{name}` declares reads_body: inline succeeded but {transport} failed ({}: {err})", err.kind()),
+            Ok(answer) if answer.bytes != baseline.bytes || answer.repr_type != baseline.repr_type =>
+                format!("`{name}` declares reads_body: {transport} differs from inline ({} versus {} bytes; media types `{}` versus `{}`)",
+                    answer.bytes.len(), baseline.bytes.len(), answer.repr_type, baseline.repr_type),
+            Ok(_) => {
+                report.declared.evidence.body_inputs.push(crate::report::BodyInputComparison {
+                    endpoint: self.id.to_string(), verb: self.spec.verb,
+                    input: name.to_string(), transport: transport.to_string(),
+                });
+                return;
+            }
+        };
+        report
+            .findings
+            .push(self.finding(Check::BodyInputs, detail));
     }
 
     // ----- BODIES -------------------------------------------------------------
