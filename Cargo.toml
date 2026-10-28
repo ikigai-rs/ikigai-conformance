@@ -80,7 +80,9 @@ categories = ["development-tools::testing"]
 # <0.2.0, so a module on core 0.2.0 linked a second core through this crate and its
 # conformance test stopped compiling (ikigai-vocab's did, ledger #2308). Every adopter
 # moves with this release.
-ikigai-core = "0.2.0"
+# 0.2.4 since 0.12.0: BODY-INPUTS reads ArgSpec::reads_body and uses BodyIssue
+# to exercise live attachments through the same host kernel (ledger #2457).
+ikigai-core = "0.2.4"
 # The vocabulary is the ORACLE for the terms check: a predicate is "defined" iff it
 # is a subject in `ikigai_vocab::VOCABULARY`. So the floor is the newest published
 # vocabulary, not the oldest API this crate compiles against — an older pin would
@@ -143,8 +145,8 @@ ikigai-core = "0.2.0"
 # they are invented.
 # 0.11.0: re-checked — 0.2.0 is the head on crates.io; raised to it (the RANGE >=0.2.0,
 # <0.3.0). It matches the core floor above.
-# 0.12.0: re-checked — 0.2.0 remains the newest published vocabulary.
-ikigai-vocab = "0.2.0"
+# 0.12.0: re-checked — 0.2.4 is the newest published vocabulary; includes readsBody.
+ikigai-vocab = "0.2.4"
 # One parser for every RDF face a module can declare (Turtle, N-Triples, N-Quads,
 # TriG, RDF/XML, JSON-LD). 0.2.5 is the version whose `for_slice` and
 # `RdfFormat::from_media_type` this crate was written against.
