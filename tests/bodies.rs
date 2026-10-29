@@ -464,3 +464,55 @@ fn a_cached_answer_cannot_hide_truncation_under_the_bounded_invocation() {
         "{report}"
     );
 }
+
+/// Answers with the graphs its caller holds an exact grant for, as a store's graph
+/// listing does: the declared family `urn:cap:store:read:graph:*` is the floor, and the
+/// grants are the dataset (ledger #2599).
+struct Graphs;
+
+#[async_trait]
+impl Endpoint for Graphs {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let visible: Vec<&str> = ["urn:example:g1", "urn:example:g2"]
+            .into_iter()
+            .filter(|g| {
+                inv.capability
+                    .allows(&format!("urn:cap:store:read:graph:{g}"))
+            })
+            .collect();
+        Ok(
+            Representation::new(ReprType::new("text/plain"), visible.join("\n").into_bytes())
+                .cacheable(),
+        )
+    }
+
+    fn name(&self) -> &str {
+        "graphs"
+    }
+
+    fn describe(&self) -> Description {
+        Description::new("graphs")
+            .verb(Verb::Source)
+            .requires("urn:cap:store:read:graph:*")
+            .output("text/plain")
+    }
+}
+
+#[test]
+fn the_bounded_call_keeps_a_root_callers_authority_over_a_wildcard_family() {
+    let report = walk(Graphs, Suite::new());
+    report.assert_clean();
+    assert!(report.unprobed.is_empty(), "{report}");
+}
+
+#[test]
+fn the_bounded_call_keeps_a_fixtures_exact_grants_under_a_wildcard_family() {
+    let caller = Capability::scoped(["urn:cap:store:read:graph:urn:example:g1"]);
+    let report = walk(
+        Graphs,
+        Suite::new()
+            .fixture(ikigai_conformance::Fixture::new("graphs", Verb::Source).capability(caller)),
+    );
+    report.assert_clean();
+    assert!(report.unprobed.is_empty(), "{report}");
+}

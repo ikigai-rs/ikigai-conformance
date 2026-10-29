@@ -78,7 +78,7 @@ pointing at the check.
 | `RECOMPUTE` | cacheability | an `Expiry::Never` answer the cache holds is recomputed after a cut of every thread it carries and of everything it read, 24 times, and every computation must repeat the first one's bytes (one recomputation agrees with the first by chance as often as a two-entry map's order does); each thread an endpoint declared (`depends_on`) is also cut alone and recomputed. `CACHEABLE`'s second resolution is the cache hit, so it can only repeat the first: this is the witness that sees a wrong `.cacheable()` (a fresh nonce, key or timestamp, a `HashMap` order). An order is caught only if the fixture has enough entries for order to matter ([below](#a-fixture-gives-an-order-something-to-order)). An `Expiry::At` answer is exempt (a function of the time too). Each clean answer is a `recomputed:` line. Subtract it (`Checks::all() - Checks::RECOMPUTE`) for a test that pins how often a fixture is read, or waive it per endpoint with the reason an answer differs by design |
 | `DATATYPES` | one graph, two faces, the same terms | every literal in an RDF face carries the datatype its property's `rdfs:range` declares in `ikigai-vocab` — the datatype the generated JSON-LD context (`ikigai_vocab::CONTEXT`) coerces it to. A hand-written Turtle `ik:batchAt 2` is a bare `xsd:integer` while the context coerces the same JSON number to `xsd:positiveInteger`: value-equal, not term-equal, so a diff of the two faces of one graph shows a difference that is not there. The rule is "tag what the shorthand cannot express": Turtle writes `xsd:integer`, `xsd:decimal`, `xsd:double`, `xsd:boolean` and a plain string bare, so `ik:context 8192` (range `xsd:integer`) passes untagged, and only a property whose range is an XSD datatype other than `xsd:string` is judged. Reads the faces `SKOLEM-RDF` and `VOCABULARY` already parse (`rdf::datatype_mismatches` reproduces it by hand); in `Checks::RDF` (ledger #356) |
 | `FAILURES` | declared = produced | **Runs by default since 0.11.0.** An action that states its failure classes (core 0.1.108's `.fails(FailureClass::…)` on an `ActionSpec` or a flat `Description`) fails only with a class it admits: every failure the walk observes from it (the minimal resolution, an RDF face's `as=` resolution, the pipeline firing, REQUIRED's baseline firing, the no-grants probe, an `enforced_under` probe, a forced recomputation, a `fails_under` probe) is held to the declaration by core's one predicate, `ActionSpec::admits_failure`, over `Error::class()`. `permanent` is always admitted and `denied` beside a `requires`. An action that states nothing is listed on a `failures:` line, never a finding. A `Denied` under the no-grants probe stays `ENFORCED`'s, and REQUIRED's deliberately broken calls stay `REQUIRED`'s. A `Suite::fails_under` probe must fail with exactly the class it states. It fires nothing a walk does not already fire, but one minimal resolution of a read no other selected check resolved |
-| `BODIES` | binary body contract | on by default since 0.12.0; with `Suite::body_space`, directly compare a deterministic Source endpoint's `invoke` and collected `invoke_body` bytes and media type, then require `OverBudget` from a kernel body collect under `len - 1` bytes. A shorter success is truncated. Missing module space and volatile answers are explicitly unprobed; see the 0.11.0 → 0.12.0 entry |
+| `BODIES` | binary body contract | on by default since 0.12.0; with `Suite::body_space`, directly compare a deterministic Source endpoint's `invoke` and collected `invoke_body` bytes and media type, then require `OverBudget` from a kernel body collect under `len - 1` bytes, under the baseline caller's own authority (root stays root; a fixture keeps its scopes), bounded only in memory, never replaced by the declared `requires`. A shorter success is truncated. Missing module space and volatile answers are explicitly unprobed; see the 0.11.0 → 0.12.0 entry |
 | `BODY-INPUTS` | declared = enforced | on by default since 0.12.0; for each `reads_body` argument, compare inline, reference, stored content and one-shot attached inputs. Answer bytes and media type must match; expiry may differ. Supply `Suite::body_input_store` for stored content. Up to four calls per argument on every verb, including writes; missing setup and failed inline baselines are explicitly unprobed |
 
 ### Why `VALIDATE` is here and not in `bind`
@@ -1021,8 +1021,28 @@ anyone memoizes by id.
 
 ## Status
 
-0.12.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.12.1. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.12.0 → 0.12.1: BODIES' bounded call keeps the caller's authority (ledger #2599)
+
+`BODIES` makes two kinds of call: the baseline (`invoke`, `invoke_body`) and a bounded
+kernel body request under `len - 1` bytes. In 0.12.0 the bounded request turned the
+default root caller into `Capability::scoped(requires + memory grant)`. A declared
+family (`urn:cap:store:read:graph:*`, `urn:cap:net:*`, an fs path ACL) is a floor, not a
+grant naming anything, so an endpoint answering per its caller's grants saw a smaller
+dataset in the bounded call: BODIES reported **truncated** (ikigai-store's
+`store-graphs`, ikigai-nl's `nl-grounding`) or **denied** (`store-graph-select`) for a
+correct endpoint.
+
+The bounded request now runs under the baseline caller's capability, bounded, never
+replaced: root stays root, and the run memory limit (`IssueContext::with_memory_limit`)
+narrows root's ceiling to the bound; a fixture's scopes are kept, its memory grants set
+to the bound, as before. Both calls see the same dataset.
+
+**Will it turn a green suite red?** No. It turns findings like the above green. A waiver
+or exact-grant fixture added only to work around them can be removed; one left in place
+still passes. A patch release, so a `"0.12.0"` pin admits it.
 
 ### 0.11.0 → 0.12.0: `BODIES` and `BODY-INPUTS` by default (ledger #2249, #2457)
 
@@ -1045,8 +1065,9 @@ request, preserving host configuration and sub-request routing. If that capabili
 already has the answer cached, the check cuts its own-name thread (including the
 canonical name from the baseline trace) so the bounded call reaches the endpoint.
 A fixture's scopes
-and principal are retained; under the default root caller the bounded capability
-carries the action's declared requirements plus the memory grant. Deliberate
+and principal are retained; the default root caller stays root, bounded by the run
+memory limit alone (since 0.12.1; 0.12.0 replaced it with the action's declared
+requirements plus the memory grant, see the 0.12.0 → 0.12.1 entry). Deliberate
 low-budget errors belong to `BODIES`, not `FAILURES`.
 
 **Supply the same shared module space used by the kernel:**
