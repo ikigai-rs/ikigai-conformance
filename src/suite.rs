@@ -5181,14 +5181,19 @@ impl<'a> Action<'a> {
         let bound = streamed.bytes.len() - 1;
         // A memory grant alone never lowers the host's base. Carry a run ceiling too,
         // using the original kernel so composites retain their issuer and host setup.
-        let mut grants: Vec<String> = self
-            .caller
-            .scopes()
-            .map(|s| s.iter().cloned().collect())
-            .unwrap_or_else(|| self.spec.requires.clone());
-        grants.retain(|g| !g.starts_with("urn:cap:stream:memory:"));
-        grants.push(ikigai_core::cap_stream_memory(bound as u64));
-        let capability = Capability::scoped(grants);
+        // The bounded call runs under the baseline's authority, bounded, never replaced
+        // (ledger #2599): an endpoint answering per the caller's grants must see the same
+        // dataset in both calls. Root stays root (its ceiling is narrowed by the run
+        // limit); a scoped caller keeps its scopes, its memory grants set to the bound.
+        let capability = match self.caller.scopes() {
+            None => self.caller.clone(),
+            Some(scopes) => {
+                let mut grants: Vec<String> = scopes.iter().cloned().collect();
+                grants.retain(|g| !g.starts_with("urn:cap:stream:memory:"));
+                grants.push(ikigai_core::cap_stream_memory(bound as u64));
+                Capability::scoped(grants)
+            }
+        };
         // A fixture may already carry exactly this grant, or a prior probe may have
         // populated this capability partition. The bounded invocation must reach the
         // endpoint, rather than collect a full answer computed under a larger run.
