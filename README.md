@@ -1884,3 +1884,8 @@ through its existing caret pin** — so `OUTPUTS` arrived with no commit of ours
 all, whenever CI next ran. This release does not behave that way, on purpose: a
 minor bump is outside every existing caret, so nothing changes for you until you
 raise the pin.
+
+## Accessibility
+
+What this crate emits that people read (the report a failing test prints), the rules that report
+follows and how to report a barrier are in [ACCESSIBILITY.md](ACCESSIBILITY.md).
