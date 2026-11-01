@@ -138,6 +138,16 @@
 //! imports. If a term you can see in `vocabulary.ttl` is reported as invented,
 //! check the resolved version first.
 //!
+//! # Concurrency: a write that is right alone and wrong in company
+//!
+//! The walk issues one request at a time, so it cannot see an endpoint that reads,
+//! decides, and then writes with a guard that does not re-check the decision. [`race`]
+//! is the probe for that, called from a module's own tests with an invariant the module
+//! states: [`race::Race`] releases N copies of a request (or several different ones) at
+//! once for many rounds and reports the rate at which the invariant broke, and
+//! [`race::Interleave`] forces one request between another's read and its write, every
+//! time (ledger #2772).
+//!
 //! # What stays prose
 //!
 //! Honest residue — what no check here can see, so the field guide keeps it:
@@ -295,6 +305,7 @@
 #![forbid(unsafe_code)]
 
 mod checks;
+pub mod race;
 pub mod rdf;
 mod report;
 mod suite;

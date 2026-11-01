@@ -25,6 +25,10 @@ template](https://github.com/mgifford/ACCESSIBILITY.md) (MIT).
 - **The finding details** (`src/suite.rs`): each finding's sentence, written where the check
   runs.
 - **The missed-expectation lines** `assert_clean_with` prints above the report.
+- **The race report**: the `Display` of `race::RaceReport` (`src/race.rs`), printed by
+  `assert_holds` when a concurrency probe fails. One count line (`the invariant broke in K of N
+  round(s) of C concurrent call(s):`), then up to five `round R: <the invariant's message>`
+  lines and an `and M more` line; one line when every round held.
 
 Not this repository's: the terminal, CI page or editor that shows the test output, and how
 `cargo test` frames a failed assertion.
