@@ -884,6 +884,49 @@ resolved `ikigai-vocab` version first.** The per-module workaround (an
 `ikigai-vocab` dev-dependency no line imports, added purely to lift this floor) is
 not needed against a current pin; two modules were carrying one.
 
+## Concurrency probes (`race`)
+
+The walk issues one request at a time, so it cannot see an endpoint that is right alone
+and wrong in company: one that **reads, decides, and then writes with a guard that does not
+re-check what it decided on**. Four concurrent closes of one claimed ledger item each wrote
+"the claim is released" (ledger #2764); a budget counter read and rewritten by two calls
+loses one (ledger #2767). `ikigai_conformance::race` is the probe for that shape, called from
+a module's own tests with an invariant only the module can state (ledger #2772):
+
+- **`Race`** releases N copies of one request (`copies`), or several different ones
+  (`together`), at once on real threads behind a barrier, for many rounds, and checks the
+  invariant after each. A race is a rate, so the report says how many rounds broke it
+  (`the invariant broke in 7 of 50 round(s) of 4 concurrent call(s):`), with the
+  invariant's own words for the first few. `Race::over(&kernel)` shares one kernel and gives
+  each round its own subject through `setup`; `Race::fresh(|| kernel())` builds one per round.
+- **`Interleave`** forces one ordering: it wraps a space so that a given call runs
+  immediately before (or after) the first invocation matching a trigger. A trigger on the
+  sub-request that WRITES puts another request between an endpoint's read and its write
+  every time, which turns a one-in-a-hundred window into a regression test. Each arming fires
+  once, and `armed()` says how many never matched (a probe that tested nothing). The wrapper
+  passes every `Endpoint` and `Space` method through, so the wrapped kernel describes itself
+  exactly as the unwrapped one does.
+
+```rust,ignore
+use ikigai_conformance::race::{Call, Race};
+use ikigai_core::Verb;
+
+// Claim one item, then close it four times at once: exactly one release comment.
+Race::fresh(kernel).rounds(50).copies(
+    4,
+    |k, _| { let n = append(k, "probe"); claim(k, &n, "h1"); n },
+    |n| Call::new(Verb::Sink, "urn:iki:ledger:close").arg("item", n).arg("reason", "done"),
+    |k, n, _answers| match release_comments(k, n) {
+        1 => Ok(()),
+        many => Err(format!("{many} release comments")),
+    },
+)
+.assert_holds();
+```
+
+A clean `Race` is evidence, not proof: raise `rounds` until the unfixed code fails it
+reliably, and state the rate in the test. A window you can name belongs to `Interleave`.
+
 ## What stays prose
 
 Honest residue — what no check here can see:
@@ -1021,8 +1064,16 @@ anyone memoizes by id.
 
 ## Status
 
-0.12.1. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.13.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.12.1 → 0.13.0: concurrency probes, `race` (ledger #2772)
+
+New module `race`: `Race` (N copies of a request, or several requests, released at once for
+many rounds, each round held to a caller-supplied invariant, the failure rate reported) and
+`Interleave` (one call forced immediately before or after the first invocation a trigger
+matches). Nothing in `Suite` changed. The `ikigai-core` floor is 0.2.5, because the wrapper
+passes `Endpoint::forwards` through; `async-trait` moves from a dev-dependency to a dependency.
 
 ### 0.12.0 → 0.12.1: BODIES' bounded call keeps the caller's authority (ledger #2599)
 

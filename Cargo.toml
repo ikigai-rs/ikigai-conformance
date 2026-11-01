@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-conformance"
-version = "0.12.1"
+version = "0.13.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "What \"done\" means for an ikigai module, as one test: walks every endpoint a kernel binds and reports every violation of the module recipe at once — ArgSpec completeness, requires implies a verb, declared = enforced, declared outputs = served outputs, skolemized RDF faces, vocabulary terms only, the cacheable-twice probe, pipeline citizenship, a space's name is a claim (same name, same doors), every description passes core's own validate, a required input is required and an input group holds, a resolution a check needed resolves, an action fails only with a failure class it states (opt-in) — and says what it did NOT do: what it probed, what it could not, and which of your own declarations reached no check at all."
@@ -82,7 +82,11 @@ categories = ["development-tools::testing"]
 # moves with this release.
 # 0.2.4 since 0.12.0: BODY-INPUTS reads ArgSpec::reads_body and uses BodyIssue
 # to exercise live attachments through the same host kernel (ledger #2457).
-ikigai-core = "0.2.4"
+# 0.2.5 since 0.13.0, an API floor (ledger #2772): `race::Interleave` wraps every endpoint a
+# space resolves and passes each defaulted `Endpoint` method through, `forwards` included,
+# which is new in 0.2.5. A wrapper that dropped it would describe a forwarding view
+# generically (ledger #2537), and a probe must not change what it probes.
+ikigai-core = "0.2.5"
 # The vocabulary is the ORACLE for the terms check: a predicate is "defined" iff it
 # is a subject in `ikigai_vocab::VOCABULARY`. So the floor is the newest published
 # vocabulary, not the oldest API this crate compiles against — an older pin would
@@ -156,6 +160,9 @@ oxrdf = "0.3"
 # `#[test]` wants, so it needs an executor. The futures executor is what every
 # module's own tests already use.
 futures = { version = "0.3", default-features = false, features = ["executor"] }
+# `Endpoint` is an `async_trait` trait, and `race::Interleave` implements it for the wrapper it
+# puts around each endpoint. Already in every graph this crate is in, through ikigai-core.
+async-trait = "0.1"
 
 [dev-dependencies]
 async-trait = "0.1"
