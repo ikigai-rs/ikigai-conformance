@@ -774,6 +774,8 @@ impl Suite {
     /// content-id request through the supplied kernel. Without this handle the
     /// stored-content comparison is explicitly unprobed; the reference and attached
     /// comparisons still run. A different store will cause the content probe to fail.
+    /// Samples are held for the fixture caller. A non-root caller must name a
+    /// principal to read them; principal-less holds belong to root (core 0.3).
     ///
     /// ```
     /// use std::sync::Arc;
@@ -4977,7 +4979,8 @@ impl<'a> Action<'a> {
             self.compare_body_input(&input.name, "reference", &baseline, referenced, report);
 
             if let Some(store) = &self.suite.body_input_store {
-                match store.put(bytes.clone()) {
+                // The probe delivers this sample on behalf of its caller.
+                match store.put_for(&self.caller, bytes.clone()) {
                     Ok(held) => {
                         let mut request = self.request(&args);
                         request

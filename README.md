@@ -1064,8 +1064,15 @@ anyone memoizes by id.
 
 ## Status
 
-0.13.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.14.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.13.0 → 0.14.0: core 0.3 scoped content store (ledger #2965)
+
+Public APIs now use `ikigai-core` 0.3 types, and the vocabulary floor is 0.3.0.
+BODY-INPUTS holds its stored sample for the fixture's caller with `put_for`.
+A non-root fixture caller must name a principal to read stored content; a hold
+without a principal belongs to root, even when the reader has identical scopes.
 
 ### 0.12.1 → 0.13.0: concurrency probes, `race` (ledger #2772)
 

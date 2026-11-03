@@ -96,6 +96,7 @@ fn reader(
             output.extend_from_slice(inv.inline_arg("salt")?);
             assert!(!inv.capability.is_root());
             assert!(inv.capability.allows("urn:cap:reader"));
+            assert_eq!(inv.capability.principal(), Some("urn:example:reader"));
             let media = if differs && matches!(behavior, Behavior::WrongMedia) {
                 "application/octet-stream"
             } else {
@@ -145,7 +146,11 @@ fn run_reader(
             .arg_bytes("payload", sample("payload"))
             .arg_bytes("other", sample("other"))
             .arg("salt", "pepper")
-            .capability(Capability::scoped(["urn:cap:reader"])),
+            .capability(
+                Capability::scoped(["urn:cap:reader"])
+                    .with_principal("urn:example:reader")
+                    .unwrap(),
+            ),
     );
     if provide_store {
         suite = suite.body_input_store(store.clone());
