@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 use oxrdf::vocab::{rdf, rdfs, xsd};
-use oxrdf::{NamedOrBlankNode, Term, Triple};
+use oxrdf::{GraphName, NamedOrBlankNode, Quad, Term, Triple};
 use oxrdfio::{RdfFormat, RdfParser};
 
 /// The media types this crate treats as RDF faces. An action declaring one of these
@@ -117,15 +117,34 @@ pub fn is_rdf_face(media_type: &str) -> bool {
 /// assert!(parse("text/plain", b"not rdf").is_err(), "not an RDF media type");
 /// ```
 pub fn parse(media_type: &str, bytes: &[u8]) -> Result<Vec<Triple>, String> {
+    Ok(parse_quads(media_type, bytes)?
+        .into_iter()
+        .map(|q| Triple::new(q.subject, q.predicate, q.object))
+        .collect())
+}
+
+// Keep graph names until SKOLEM-RDF has inspected them. The public triple helper
+// intentionally projects a dataset, but that projection cannot prove no blank nodes.
+pub(crate) fn parse_quads(media_type: &str, bytes: &[u8]) -> Result<Vec<Quad>, String> {
     let bare = bare_media_type(media_type);
     let format = RdfFormat::from_media_type(&bare)
         .ok_or_else(|| format!("`{bare}` is not an RDF media type this crate can parse"))?;
-    let mut triples = Vec::new();
+    let mut quads = Vec::new();
     for quad in RdfParser::from_format(format).for_slice(bytes) {
         let quad = quad.map_err(|e| format!("does not parse as {bare}: {e}"))?;
-        triples.push(Triple::new(quad.subject, quad.predicate, quad.object));
+        quads.push(quad);
     }
-    Ok(triples)
+    Ok(quads)
+}
+
+pub(crate) fn blank_graph_names(quads: &[Quad]) -> BTreeSet<String> {
+    quads
+        .iter()
+        .filter_map(|q| match &q.graph_name {
+            GraphName::BlankNode(b) => Some(b.to_string()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The blank nodes in `triples`, as their `_:label` forms, deduplicated. A

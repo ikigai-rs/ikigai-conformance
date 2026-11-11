@@ -1759,7 +1759,7 @@ impl Suite {
             return report;
         };
 
-        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut seen: BTreeMap<String, Vec<Description>> = BTreeMap::new();
         let mut walk_order: Vec<String> = Vec::new();
         let mut coverage = Coverage::default();
         // Every firing the walk has already considered, keyed by the request it
@@ -1836,10 +1836,16 @@ impl Suite {
                     continue;
                 }
             }
-            let first_time = seen.insert(description.id.clone());
-            if first_time {
+            let descriptions = seen.entry(description.id.clone()).or_default();
+            if descriptions.is_empty() {
                 report.endpoints += 1;
                 walk_order.push(description.id.clone());
+            }
+            // An id counts one catalog endpoint, but it does not prove two bindings
+            // have the same contract. Check every distinct description; aliases of
+            // the same description still contribute static evidence only once.
+            if !descriptions.contains(&description) {
+                descriptions.push(description.clone());
                 let from = report.findings.len();
                 self.static_checks(&description, &mut report);
                 self.set_aside_waived(&mut report, from, &mut tally);
@@ -4548,8 +4554,8 @@ impl<'a> Action<'a> {
                 ));
                 continue;
             }
-            let triples = match rdf::parse(&got, &repr.bytes) {
-                Ok(triples) => triples,
+            let quads = match rdf::parse_quads(&got, &repr.bytes) {
+                Ok(quads) => quads,
                 Err(e) => {
                     report
                         .findings
@@ -4557,6 +4563,11 @@ impl<'a> Action<'a> {
                     continue;
                 }
             };
+            let mut blank = rdf::blank_graph_names(&quads);
+            let triples: Vec<_> = quads
+                .into_iter()
+                .map(|q| oxrdf::Triple::new(q.subject, q.predicate, q.object))
+                .collect();
             // Positive evidence: this face was reached, served and parsed. A clean
             // report is otherwise indistinguishable from a never-probed one, and the
             // triple count says whether "clean" meant anything — a face that parses
@@ -4570,7 +4581,7 @@ impl<'a> Action<'a> {
             });
             coverage.faces_probed = true;
             if skolem {
-                let blank = rdf::blank_nodes(&triples);
+                blank.extend(rdf::blank_nodes(&triples));
                 if !blank.is_empty() {
                     let shown: Vec<&str> = blank.iter().take(3).map(String::as_str).collect();
                     report.findings.push(self.finding(
