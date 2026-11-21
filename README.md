@@ -1064,8 +1064,15 @@ anyone memoizes by id.
 
 ## Status
 
-0.14.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.15.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.14.0 → 0.15.0: core 0.4 (ledger #3893)
+
+Public APIs now use `ikigai-core` 0.4 types, and the vocabulary floor is 0.4.0. A module
+on core 0.3 cannot mix them, so it moves with this release. No check changed: core 0.4's
+`Error::Denied` carries a `Denial`, which the report shows through its `Display`, so a
+finding's text is the same.
 
 ### 0.13.0 → 0.14.0: core 0.3 scoped content store (ledger #2965)
 

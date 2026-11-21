@@ -444,7 +444,7 @@ pub enum RefusedBy {
 /// let secret = FnEndpoint::new("secret", |inv: &Invocation<'_>| {
 ///     let name = inv.inline_str("name")?;
 ///     if !inv.capability.allows(&format!("urn:cap:example:read:{name}")) {
-///         return Err(Error::Denied(format!("no grant on `{name}`")));
+///         return Err(Error::Denied(format!("no grant on `{name}`").into()));
 ///     }
 ///     Ok(Representation::new(ReprType::new("text/plain"), b"s3cret".to_vec()))
 /// })
