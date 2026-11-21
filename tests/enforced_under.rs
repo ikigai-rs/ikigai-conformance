@@ -37,7 +37,7 @@ fn fetch(rule: Rule) -> FnEndpoint {
         let host = inv.inline_str("host")?;
         let granted = inv.capability.allows(&format!("urn:cap:net:{host}"));
         match rule {
-            Rule::Typed if !granted => Err(Error::Denied(format!("no grant for {host}"))),
+            Rule::Typed if !granted => Err(Error::Denied(format!("no grant for {host}").into())),
             Rule::Untyped if !granted => Err(Error::Endpoint(format!("could not fetch {host}"))),
             _ => Ok(text("ok")),
         }
@@ -239,7 +239,7 @@ fn net() -> FnEndpoint {
     FnEndpoint::new("net", |inv: &Invocation<'_>| {
         let host = inv.bindings.get("host").unwrap_or_default();
         if !inv.capability.allows(&format!("urn:cap:net:{host}")) {
-            return Err(Error::Denied(format!("no grant for {host}")));
+            return Err(Error::Denied(format!("no grant for {host}").into()));
         }
         Ok(text("ok"))
     })
