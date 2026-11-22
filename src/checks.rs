@@ -74,9 +74,10 @@ pub enum Check {
     /// declared `outputs`. A wrong declaration hides a face from every consumer that
     /// reads outputs — [`SkolemRdf`](Check::SkolemRdf) and
     /// [`Vocabulary`](Check::Vocabulary) included, which filter the declaration for
-    /// RDF faces before probing. What the check could not observe (a mutating
-    /// action never fired under root, a failed minimal resolution, a caller's `as=`
-    /// label) is listed in the report as unprobed, never as a finding.
+    /// RDF faces before probing. OUTPUTS covers Sources, plus mutating actions the
+    /// pipeline probe fires. A mutating action with no observed answer is listed as
+    /// unprobed. Failed minimal resolutions and caller-supplied `as=` labels also
+    /// leave the served type unprobed.
     ///
     /// A pass-through (ikigai-core 0.1.105's `output_from`) reads `outputs` as "at least
     /// these": `OutputFrom::Input(name)` holds the served type to the type of the
