@@ -2047,9 +2047,7 @@ impl Suite {
                 // After PIPELINE, so a mutating action's baseline is the one firing
                 // the pipeline probe already made.
                 action.required(&mut report).await;
-                // Last of the answer-judging checks: it reads what the checks above resolved and fires
-                // nothing new for a mutating verb, so the walk's footprint stays
-                // "Source once or twice, Sink once, Delete never".
+                // OUTPUTS reads Source resolutions and does not probe mutations.
                 action.outputs(&mut report).await;
                 // After CACHEABLE, because it cuts and CACHEABLE reads the cache as its
                 // own two resolutions left it; and after every check that reads the
@@ -4697,8 +4695,7 @@ impl<'a> Action<'a> {
     /// A face the RDF checks already recorded (same id, verb and media type) is not
     /// recorded twice: there the triple count is the stronger statement.
     fn record_probe(&self, report: &mut Report) {
-        // The same representation OUTPUTS reads: the pipeline probe's firing for a
-        // mutating verb, the minimal resolution otherwise.
+        // The pipeline probe's firing for a mutation, the minimal resolution otherwise.
         let served = match (self.spec.verb.is_mutating(), self.fired.as_ref()) {
             (true, Some(Ok(repr))) => Some(repr),
             (true, Some(Err(_))) => None,
@@ -5567,6 +5564,9 @@ impl<'a> Action<'a> {
         let result = self.kernel.issue(self.request(&args), &self.caller).await;
         self.observe(Probe::Pipeline, &result);
         self.fired = Some(result.clone());
+        if let Err(err) = &result {
+            self.report_failure(Check::Pipeline, err, &args, report);
+        }
         if let Err(Error::MissingArgument(name)) = &result {
             // With `content` and every required input supplied, a missing argument
             // is one the contract does not declare — `content` itself unread and
@@ -5848,42 +5848,26 @@ impl<'a> Action<'a> {
 
     // ----- OUTPUTS ------------------------------------------------------------
 
-    /// The bare media type the action serves with its minimal inputs must be one of
-    /// its declared outputs. Reads the resolution the other checks already made —
-    /// for a mutating verb, the pipeline probe's firing (or an RDF face's minimal
-    /// resolution) — so it never fires a Sink or Delete itself; what it could not
-    /// observe is recorded as unprobed.
+    /// Compare a Source's served media type with its declared outputs.
     async fn outputs(&mut self, report: &mut Report) {
         if !self.runs(Check::Outputs) {
             return;
         }
-        // The arguments of whichever resolution is read, so a failure can say what
-        // it was sent: the pipeline probe's when it fired, the minimal ones otherwise.
-        let mut args = self.suite.args_for(self.id, self.spec);
-        let probed = if self.spec.verb.is_mutating() {
-            match (&self.fired, self.content_spec()) {
-                (Some(fired), Some(content)) => {
-                    args = self.pipeline_args(content);
-                    Some(fired.clone())
-                }
-                (Some(fired), None) => Some(fired.clone()),
-                (None, _) => self.minimal.clone().map(|r| r.map(|(repr, _)| repr)),
-            }
-        } else {
-            Some(self.resolve_minimal(false).await.map(|(repr, _)| repr))
-        };
-        let repr = match probed {
-            None => {
-                self.unprobed(
-                    report,
-                    Check::Outputs,
-                    "never fired under root: a mutating action is fired only by the pipeline \
-                     probe (PIPELINE, on an action declaring `content`), so what it serves was \
-                     not observed",
-                );
-                return;
-            }
-            Some(Err(err)) => {
+        if self.spec.verb.is_mutating() {
+            self.unprobed(report, Check::Outputs, "not probed: mutating action");
+            return;
+        }
+        if self.spec.verb != Verb::Source {
+            self.unprobed(
+                report,
+                Check::Outputs,
+                "not probed: OUTPUTS probes Source actions only",
+            );
+            return;
+        }
+        let args = self.suite.args_for(self.id, self.spec);
+        let repr = match self.resolve_minimal(false).await {
+            Err(err) => {
                 self.report_failure(Check::Outputs, &err, &args, report);
                 self.unprobed(
                     report,
@@ -5892,7 +5876,7 @@ impl<'a> Action<'a> {
                 );
                 return;
             }
-            Some(Ok(repr)) => repr,
+            Ok((repr, _)) => repr,
         };
         let got = rdf::bare_media_type(&repr.repr_type.media_type);
         let declared: Vec<String> = self

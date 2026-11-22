@@ -70,12 +70,12 @@ pub enum Check {
     /// because what an ungranted caller can do through it was not observed.
     Authority,
     /// **Declared outputs = served outputs.** The bare media type of the minimal
-    /// resolution (parameters such as `;charset=` stripped) is one of the action's
+    /// Source resolution (parameters such as `;charset=` stripped) is one of the action's
     /// declared `outputs`. A wrong declaration hides a face from every consumer that
     /// reads outputs — [`SkolemRdf`](Check::SkolemRdf) and
     /// [`Vocabulary`](Check::Vocabulary) included, which filter the declaration for
-    /// RDF faces before probing. What the check could not observe (a mutating
-    /// action never fired under root, a failed minimal resolution, a caller's `as=`
+    /// RDF faces before probing. Mutating actions are not probed. What the check could
+    /// not observe (a failed minimal resolution, a caller's `as=`
     /// label) is listed in the report as unprobed, never as a finding.
     ///
     /// A pass-through (ikigai-core 0.1.105's `output_from`) reads `outputs` as "at least
@@ -230,9 +230,7 @@ pub enum Check {
     /// was fine, and two adopters describing one defect named different checks.
     ///
     /// It fires nothing of its own: it reports a resolution another selected check
-    /// needed, so it reports nothing for an action no such check runs on (waive
-    /// `OUTPUTS` on a `Sink` whose target this kernel does not bind, and nothing is
-    /// said). Waive it per endpoint like any check. **Not selected** (a selection
+    /// needed, so it reports nothing for an action no such check runs on. Waive it per endpoint like any check. **Not selected** (a selection
     /// written before 0.8.4 never names it), the failure is reported under the check
     /// that needed it, exactly as before.
     Resolves,

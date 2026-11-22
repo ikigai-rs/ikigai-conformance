@@ -403,7 +403,7 @@ fn outputs_honors_a_callers_as_label_and_says_it_saw_only_that() {
 }
 
 #[test]
-fn outputs_reads_a_mutating_action_from_the_one_firing_the_pipeline_probe_makes() {
+fn outputs_lists_mutations_as_unprobed_even_when_pipeline_fires_them() {
     // Fired under root exactly once (the pipeline probe); ENFORCED's no-grants call
     // is refused at the kernel's floor and never reaches the endpoint.
     let fired = Arc::new(AtomicUsize::new(0));
@@ -435,29 +435,24 @@ fn outputs_reads_a_mutating_action_from_the_one_firing_the_pipeline_probe_makes(
         .bind(Exact::new("urn:example:notes-put"), put)
         .bind(Exact::new("urn:example:notes-delete"), delete);
     let report = report_of(space);
-    assert_caught(
-        &report,
-        Check::Outputs,
-        "served `application/json` with its minimal inputs but declares only `text/plain`",
-    );
-    assert_eq!(
-        fired.load(Ordering::SeqCst),
-        1,
-        "Sink is fired once, under root"
-    );
+    let text = report.to_string();
     assert!(
-        report.to_string().contains(
-            "unprobed: notes-delete delete OUTPUTS: never fired under root: a mutating \
-             action is fired only by the pipeline probe"
-        ),
-        "{report}"
+        text.contains("OUTPUTS: probes Source actions only"),
+        "{text}"
     );
-    assert!(
-        report
-            .against("notes-delete")
-            .all(|f| f.check != Check::Outputs),
-        "{report}"
-    );
+    for (id, verb) in [("notes-put", "sink"), ("notes-delete", "delete")] {
+        assert!(
+            text.contains(&format!(
+                "unprobed: {id} {verb} OUTPUTS: not probed: mutating"
+            )),
+            "{text}"
+        );
+        assert!(
+            report.against(id).all(|f| f.check != Check::Outputs),
+            "{text}"
+        );
+    }
+    assert_eq!(fired.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -2196,8 +2191,7 @@ fn a_refused_generic_content_sample_is_named_as_the_cause() {
         }),
     );
     let report = report_of(space);
-    // The finding is RESOLVES's (0.8.4; OUTPUTS before it, the first check that needed
-    // the firing, which it names), and says the sample was the cause and what fixes it.
+    // RESOLVES names the pipeline firing and explains the sample and its remedy.
     assert_caught(
         &report,
         Check::Resolves,
@@ -2220,7 +2214,7 @@ fn a_refused_generic_content_sample_is_named_as_the_cause() {
         Check::Resolves,
         "(`.arg_bytes(\"content\", …)` for a byte input)",
     );
-    assert_caught(&report, Check::Resolves, "Needed by OUTPUTS");
+    assert_caught(&report, Check::Resolves, "Needed by PIPELINE");
     assert!(report.of(Check::Outputs).next().is_none(), "{report}");
 }
 

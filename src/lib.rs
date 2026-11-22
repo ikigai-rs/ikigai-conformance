@@ -48,7 +48,7 @@
 //! | [`RequiresVerb`](Check::RequiresVerb) | declared = enforced | a `requires` with no verb — enforced on every verb since core 0.1.85, but the catalog cannot say which actions it gates |
 //! | [`Enforced`](Check::Enforced) | declared = enforced | under a capability holding no grants, an action with `requires` is refused with a typed `Denied`; an action declaring nothing is not (an undeclared gate: a capability to declare, or a state to document and waive); opt-in, a caller a [`Suite::enforced_under`] probe names (some grant under the prefix, not this target's) is refused with a typed `Denied` by the module's own rule |
 //! | [`Authority`](Check::Authority) | declared = enforced | the fourth cell of the same probe: a `Sink` or a `Delete` that declares no `requires` and **mutated anyway** under a capability holding no grants — no scope to withhold, so no caller can be given read without write. A `Source` is not in scope; a mutating action refused for some other reason is unprobed, never a finding |
-//! | [`Outputs`](Check::Outputs) | faces are declared | the bare media type the action serves with its minimal inputs (parameters stripped) is one of its declared `outputs` — a wrong declaration hides a face from every consumer that reads outputs, the two RDF checks included; a pass-through (`output_from`, core 0.1.105) is held to the type of the resource its named input names, and an `Origin` one is reported unprobed |
+//! | [`Outputs`](Check::Outputs) | faces are declared | the bare media type a Source serves with its minimal inputs (parameters stripped) is one of its declared `outputs` — a wrong declaration hides a face from every consumer that reads outputs, the two RDF checks included; a pass-through (`output_from`, core 0.1.105) is held to the type of the resource its named input names, and an `Origin` one is reported unprobed |
 //! | [`SkolemRdf`](Check::SkolemRdf) | skolemize; no blank nodes | every declared RDF face ([`rdf::RDF_FACES`]) resolves with minimal inputs, parses, and has no blank node |
 //! | [`Vocabulary`](Check::Vocabulary) | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known ([`rdf::WELL_KNOWN_NAMESPACES`]) or module-registered namespace |
 //! | [`Cacheable`](Check::Cacheable) | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and — if it never expires (`Expiry::Never`; an `Expiry::At` deadline is a bound) — carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; an endpoint declared pure carries no thread but its own name and what it read; a result declared live ([`Suite::live`]) is `Expiry::Always` |
@@ -267,11 +267,10 @@
 //! when cacheable — the second is the cache probe), and once more per required
 //! by-value input without a default ([`Required`](Check::Required)); each declared
 //! RDF face beyond the first is resolved once more with `as=`; a `Sink` or `Delete` declaring
-//! `content` is fired **once**, by the pipeline probe, and [`Outputs`](Check::Outputs)
-//! reads that same firing; apart from BODY-INPUTS below, a mutating action without `content` is never fired
+//! `content` is fired **once**, by the pipeline probe, while [`Outputs`](Check::Outputs) probes only Sources; apart from BODY-INPUTS below, a mutating action without `content` is never fired
 //! under root ([`Enforced`](Check::Enforced) and [`Authority`](Check::Authority) run
 //! under no grants, off **one** shared resolution however many of the two are
-//! selected) and is listed as unprobed. Under [`Suite::required_on_mutating`] a
+//! selected) and all mutations are listed as unprobed for OUTPUTS. Under [`Suite::required_on_mutating`] a
 //! `Sink` or `Delete` is also fired once per required by-value input, and once more
 //! as the baseline when the pipeline probe did not fire it. Fixture bindings are per entry, not per verb (see [`Fixture::binding`]).
 //! [`BodyInputs`](Check::BodyInputs) adds up to four calls per `reads_body` argument

@@ -1220,6 +1220,9 @@ impl fmt::Display for Report {
             })
             .collect();
         writeln!(f, "checked: {}", ran.join(" "))?;
+        if self.checks.contains(Check::Outputs) {
+            writeln!(f, "OUTPUTS: probes Source actions only")?;
+        }
         for (check, ids) in &waived {
             if !self.checks.contains(*check) {
                 continue;

@@ -167,6 +167,7 @@ fn the_kernel_operations_reported_for_the_record() {
         [
             "kernel-cached",
             "kernel-catalog",
+            "kernel-cut",
             "kernel-explain",
             "kernel-validate"
         ],
