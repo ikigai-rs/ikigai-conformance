@@ -5877,9 +5877,11 @@ impl<'a> Action<'a> {
                 self.unprobed(
                     report,
                     Check::Outputs,
-                    "never fired under root: a mutating action is fired only by the pipeline \
-                     probe (PIPELINE, on an action declaring `content`), so what it serves was \
-                     not observed",
+                    if self.content_spec().is_none() {
+                        "not probed: mutating action (no content= for the pipeline probe to fire)"
+                    } else {
+                        "not probed: mutating action (the pipeline probe did not fire it)"
+                    },
                 );
                 return;
             }

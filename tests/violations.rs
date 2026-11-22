@@ -447,8 +447,8 @@ fn outputs_reads_a_mutating_action_from_the_one_firing_the_pipeline_probe_makes(
     );
     assert!(
         report.to_string().contains(
-            "unprobed: notes-delete delete OUTPUTS: never fired under root: a mutating \
-             action is fired only by the pipeline probe"
+            "unprobed: notes-delete delete OUTPUTS: not probed: mutating action \
+             (no content= for the pipeline probe to fire)"
         ),
         "{report}"
     );
@@ -461,13 +461,41 @@ fn outputs_reads_a_mutating_action_from_the_one_firing_the_pipeline_probe_makes(
 }
 
 #[test]
+fn outputs_reports_a_sink_without_content_as_unprobed() {
+    let sink = FnEndpoint::new("notes-archive", |_inv: &Invocation<'_>| {
+        Ok(text("archived"))
+    })
+    .with_description(
+        Description::new("notes-archive")
+            .verb(Verb::Sink)
+            .requires("urn:cap:example:write")
+            .output("application/json"),
+    );
+    let space = EndpointSpace::new().bind(Exact::new("urn:example:notes-archive"), sink);
+    let report = report_of(space);
+    let rendered = report.to_string();
+    let unprobed = "unprobed: notes-archive sink OUTPUTS: not probed: mutating action \
+                    (no content= for the pipeline probe to fire)";
+    let coverage = "OUTPUTS covers Sources, plus mutating actions the pipeline probe fires.";
+    assert!(rendered.lines().any(|line| line == unprobed), "{rendered}");
+    assert_eq!(
+        rendered.lines().filter(|line| *line == coverage).count(),
+        1,
+        "{rendered}"
+    );
+    assert!(report.of(Check::Outputs).next().is_none(), "{report}");
+}
+
+#[test]
 fn outputs_can_be_left_out_like_any_other_check() {
     let space = EndpointSpace::new().bind(Exact::new("urn:example:mislabeled"), mislabeled());
     let report = Suite::new()
         .checks(Checks::all() - Checks::OUTPUTS)
         .run_blocking(&kernel(space));
     assert!(report.is_clean(), "{report}");
-    assert!(report.to_string().contains("skipped: OUTPUTS"), "{report}");
+    let rendered = report.to_string();
+    assert!(rendered.contains("skipped: OUTPUTS"), "{rendered}");
+    assert!(!rendered.contains("OUTPUTS covers"), "{rendered}");
 }
 
 // ----- SKOLEM-RDF -------------------------------------------------------------

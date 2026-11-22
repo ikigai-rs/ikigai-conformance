@@ -1260,6 +1260,12 @@ impl fmt::Display for Report {
         if !skipped.is_empty() {
             writeln!(f, "skipped: {}", skipped.join(" "))?;
         }
+        if self.checks.contains(Check::Outputs) {
+            writeln!(
+                f,
+                "OUTPUTS covers Sources, plus mutating actions the pipeline probe fires."
+            )?;
+        }
         for comparison in &declared.evidence.body_inputs {
             writeln!(
                 f,

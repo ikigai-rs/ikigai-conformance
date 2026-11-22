@@ -28,6 +28,7 @@ sparql-construct  OUTPUTS  source: served `text/turtle` with its minimal inputs 
 link-remove  DECLARATIONS  declared live (`Suite::live`) but nothing held it to it: it declares no cacheable verb (it declares delete), and CACHEABLE returns early on a mutating one. The report prints `declared live: link-remove`, which reads as a check that ran
 7 finding(s) across 4 endpoint(s), 4 action(s)
 checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES RECOMPUTE DATATYPES FAILURES BODIES BODY-INPUTS
+OUTPUTS covers Sources, plus mutating actions the pipeline probe fires.
 probed 3 face(s) across 3 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
 probed: ik-context source `application/ld+json`: 0 triple(s) — nothing was checked
@@ -36,7 +37,7 @@ required: dropped 1 input(s) across 1 endpoint(s)
 required: sparql-construct source without `query`: refused missing-argument
 declared live: link-remove
 fixture: sparql-construct source query="CONSTRUCT WHERE { ?s ?p ?o }"
-unprobed: link-remove delete OUTPUTS: never fired under root: a mutating action is fired only by the pipeline probe (PIPELINE, on an action declaring `content`), so what it serves was not observed
+unprobed: link-remove delete OUTPUTS: not probed: mutating action (no content= for the pipeline probe to fire)
 ```
 
 The `probed:` lines are the positive half: a clean report would otherwise be
@@ -64,7 +65,7 @@ pointing at the check.
 | `REQUIRES-VERB` | declared = enforced | a `requires` with no verb — enforced on every verb since core 0.1.85 (it was silently inert before), but the catalog cannot say which actions it gates |
 | `ENFORCED` | declared = enforced | under a capability holding no grants, every action with a `requires` is refused with a typed `Denied`; an action declaring nothing is not. An undeclared gate makes the manifold over-offer, and the finding names both readings, since their fixes differ: a CAPABILITY it enforces is declared (`.requires(…)`), a STATE no capability expresses (refused until another resource opens a window) is documented and `ENFORCED` waived with that reason. And, opt-in, the module's OWN rule: a caller a `Suite::enforced_under` probe names (some grant under the declared prefix, not the one for this target) is refused with a typed `Denied` on the module's path |
 | `AUTHORITY` | declared = enforced | the fourth cell of `ENFORCED`'s own probe: a `Sink` or a `Delete` that declares no `requires` and **mutated anyway** under a capability holding no grants. Nothing gates the write, so nothing can be withheld — a party that should read and report cannot be given read alone, because read is all there is. A `Source` is not in scope (a public read is a decision a module makes); a mutating action refused for some *other* reason is recorded as `unprobed`, never as a finding, because what an ungranted caller could do through it was not observed |
-| `OUTPUTS` | faces are declared | the bare media type the action serves with its minimal inputs (`;charset=` and other parameters stripped, no `as=`) is one of its declared `outputs`. A wrong declaration hides a face from every consumer that reads outputs — `SKOLEM-RDF` and `VOCABULARY` included, which filter the declaration for RDF faces before probing; linkeddata's `sparql-construct` declared only `application/sparql-results+json` over Turtle for its whole life and the RDF checks saw nothing. What the check cannot observe (a mutating action never fired under root, a failed minimal resolution, a caller's `as=` label) is printed as `unprobed`, never as a finding. A **pass-through** (core 0.1.105's `output_from`, ledger #45/#301) reads `outputs` as "at least these": `output_from(Input("src"))` holds the served type to the type `src`'s resource serves (the walk resolves it), and `output_from(Origin)` (a type decided outside the kernel, an HTTP origin's) is printed as a declared pass-through, never a finding. Delete the `Check::Outputs` waiver a pass-through used to need |
+| `OUTPUTS` | faces are declared | covers Sources, plus mutating actions the pipeline probe fires. The bare media type the action serves with its minimal inputs (`;charset=` and other parameters stripped, no `as=`) is one of its declared `outputs`. A wrong declaration hides a face from every consumer that reads outputs — `SKOLEM-RDF` and `VOCABULARY` included, which filter the declaration for RDF faces before probing; linkeddata's `sparql-construct` declared only `application/sparql-results+json` over Turtle for its whole life and the RDF checks saw nothing. What the check cannot observe (a mutating action whose answer OUTPUTS did not observe, a failed minimal resolution, a caller's `as=` label) is printed as `unprobed`, never as a finding. A **pass-through** (core 0.1.105's `output_from`, ledger #45/#301) reads `outputs` as "at least these": `output_from(Input("src"))` holds the served type to the type `src`'s resource serves (the walk resolves it), and `output_from(Origin)` (a type decided outside the kernel, an HTTP origin's) is printed as a declared pass-through, never a finding. Delete the `Check::Outputs` waiver a pass-through used to need |
 | `SKOLEM-RDF` | skolemize; no blank nodes | every declared RDF face (`text/turtle`, `application/ld+json`, `application/rdf+xml`, N-Triples, N-Quads, TriG) resolves with the smallest inputs its ArgSpecs allow, parses, and has no blank node |
 | `VOCABULARY` | faces use the shared vocabularies | the face **parses**, and every predicate and class in it is defined in `ikigai-vocab`, or under a well-known namespace (rdf, rdfs, xsd, owl, dcterms, Dublin Core Elements 1.1, foaf, schema, prov, ical, skos, sh, and the W3C Web Annotation `oa:`) or one the module registers (`Suite::namespace`, a waiver). A module that ships the graph defining its own terms passes it to `Suite::vocabulary`, and every term under that graph's namespace must be one of its subjects — the same rule `ik:` is held to against `ikigai-vocab`. Because it parses, it also reports a mislabeled or malformed face — under its own name when `SKOLEM-RDF` is not selected, so `VOCABULARY` alone proves a hand-written `@prefix` line is well-formed (a face that does not resolve at all is `RESOLVES`'s) |
 | `CACHEABLE` | cacheability | a result marked cacheable is a cache hit the second time (the kernel's trace says so), byte-identical, and — if it never expires (`Expiry::Never`; an `Expiry::At` deadline is a bound) — carries a golden thread besides its own name unless the endpoint is declared pure or takes writes through that name; an endpoint declared pure carries no thread but its own name and what it read; a result declared live (`Suite::live`) is `Expiry::Always` |
@@ -779,6 +780,7 @@ not reach as loudly as what it found.
 0 finding(s) across 6 endpoint(s), 9 action(s)
 checked: ARGSPECS REQUIRES-VERB ENFORCED AUTHORITY OUTPUTS* SKOLEM-RDF VOCABULARY CACHEABLE PIPELINE REQUIRED NAMES VALIDATE SPACE-NAME DECLARATIONS RESOLVES RECOMPUTE DATATYPES FAILURES BODIES BODY-INPUTS
 * OUTPUTS ran on 1 of 6 endpoint(s); waived on the rest (see `opted out:`)
+OUTPUTS covers Sources, plus mutating actions the pipeline probe fires.
 probed 7 face(s) across 5 endpoint(s)
 probed: cms-graph source `text/turtle`: 412 triple(s)
 probed: ik-context source `application/ld+json`: 0 triple(s) — nothing was checked
@@ -786,7 +788,7 @@ probed: wc source `text/plain`: 3 byte(s)
 required: nothing dropped — no `Source` or `Exists` action declares a required by-value input without a default; a `Sink` or `Delete` does, and REQUIRED fires those only under `Suite::required_on_mutating`
 opted out: a-face b-face c-face VOCABULARY: ik:madeUp lands in the next vocabulary release
 note: the waiver of VOCABULARY for c-face suppressed nothing — the check ran with it set aside and found nothing; drop it if its reason has passed (ik:madeUp lands in the next vocabulary release)
-unprobed: notes-delete delete OUTPUTS: never fired under root
+unprobed: notes-delete delete OUTPUTS: not probed: mutating action (no content= for the pipeline probe to fire)
 ```
 
 - **`probed:`** — every face the walk actually resolved, not only the RDF ones.
@@ -1064,8 +1066,15 @@ anyone memoizes by id.
 
 ## Status
 
-0.15.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
+0.16.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
+
+### 0.15.0 → 0.16.0: OUTPUTS report coverage (ledger #3972)
+
+The report states that OUTPUTS covers Sources, plus mutating actions the pipeline
+probe fires. It names unobserved mutating actions as `not probed: mutating action`.
+Module tests that pin report text need to update their expected output, so this
+report contract change gets a minor version bump. Probe behavior is unchanged.
 
 ### 0.14.0 → 0.15.0: core 0.4 (ledger #3893)
 
