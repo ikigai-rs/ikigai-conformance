@@ -1069,12 +1069,16 @@ anyone memoizes by id.
 0.16.0. Depends only on published crates (`ikigai-core`, `ikigai-vocab`,
 `oxrdfio`). Dual-licensed MIT / Apache-2.0.
 
-### 0.15.0 → 0.16.0: OUTPUTS report coverage (ledger #3972)
+### 0.15.0 → 0.16.0: OUTPUTS report coverage (ledger #3972) and core 0.5
 
 The report states that OUTPUTS covers Sources, plus mutating actions the pipeline
 probe fires. It names unobserved mutating actions as `not probed: mutating action`.
 Module tests that pin report text need to update their expected output, so this
 report contract change gets a minor version bump. Probe behavior is unchanged.
+
+The same release moves to `ikigai-core` 0.5 and `ikigai-vocab` 0.5 (the core 0.5 cascade).
+Public APIs now use core 0.5 types, so a module on core 0.4 cannot mix them and moves with
+this release. No check changed.
 
 ### 0.14.0 → 0.15.0: core 0.4 (ledger #3893)
 
